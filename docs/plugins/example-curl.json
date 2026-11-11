@@ -1,0 +1,11 @@
+{
+  "id": "curl-head",
+  "name": "curl headers",
+  "summary": "Show response headers with curl. The program must be on PATH or given as an absolute path.",
+  "command": ["curl", "-I", "--max-time", "{timeout}", "--url", "{url}"],
+  "inputs": [
+    {"key": "url", "label": "URL", "kind": "Text", "default": "https://example.com", "hint": "http or https URL"},
+    {"key": "timeout", "label": "Timeout (seconds)", "kind": "Number", "default": "10", "min": 1, "max": 60}
+  ],
+  "lines": "HTTP/[0-9.]+ (?<value>[0-9]{3})"
+}

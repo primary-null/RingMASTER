@@ -1,0 +1,16 @@
+[package]
+name = "ringmaster-bt"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+serde_json = "1.0.154"
+windows = { version = "0.58", features = ["Foundation", "Foundation_Collections", "Devices_Enumeration", "Devices_Bluetooth", "Devices_Radios", "Win32_System_WinRT", "implement"] }
+
+# Small, self-contained helper: size-optimised, no unwinding tables, symbols stripped.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

@@ -1,0 +1,145 @@
+# RingMASTER
+
+A desktop client for **Proxmox VE** and **Proxmox Datacenter Manager**, for **Windows** and **Linux** (Debian 13 and Ubuntu 26.04).
+
+Your nodes, guests, consoles and tasks in one native window, with live charts. It asks before it changes anything, and it reports a change as done only when Proxmox says it finished.
+
+![Fleet overview: guests grouped by node, with live CPU, memory and network, and the inspector for the selected guest](docs/images/fleet.png)
+
+<sub>All pictures use the built-in demo mode or invented sample data.</sub>
+
+## Download
+
+Get the latest version from the [Releases page](https://github.com/primary-null/RingMASTER/releases/latest).
+
+| System | File |
+|---|---|
+| Windows 11, 64-bit | `RingMASTER-<version>.msi` |
+| Debian 13 (trixie), amd64 | `ringmaster-<version>-debian-13-amd64.deb` |
+| Ubuntu 26.04 LTS, amd64 | `ringmaster-<version>-ubuntu-26.04-amd64.deb` |
+
+Every package includes its own Java runtime, so there is nothing else to install. Windows 10 may work but is not tested.
+
+### Windows
+
+1. Download the `.msi` and, to check it, `SHA256SUMS` (see [Checking a download](#checking-a-download)).
+2. Run the `.msi`. It installs for your Windows account only, without an administrator prompt, and adds RingMASTER to the Start menu.
+3. The installer is not code-signed yet, so Windows SmartScreen may show "Windows protected your PC". Choose **More info**, then **Run anyway**. Your browser may also ask whether to keep the file.
+
+A newer `.msi` upgrades the installed version in place. To remove RingMASTER, use Settings > Apps > Installed apps.
+
+### Debian and Ubuntu
+
+Download the file for your distribution and install it with apt, which also installs the libraries it needs:
+
+```sh
+sudo apt install ./ringmaster-<version>-debian-13-amd64.deb       # Debian 13
+sudo apt install ./ringmaster-<version>-ubuntu-26.04-amd64.deb    # Ubuntu 26.04
+```
+
+Each package is built on its own distribution, because the two name some libraries differently. RingMASTER appears in the application menu under System, or run `/opt/ringmaster/bin/ringmaster`. Remove it with `sudo apt remove ringmaster`.
+
+Optional: `virt-viewer` (for SPICE consoles), BlueZ (for Bluetooth scans), and the Tailscale or WireGuard tools (for the VPN page).
+
+### Checking a download
+
+Each release lists the SHA-256 of every file in `SHA256SUMS`.
+
+```powershell
+# Windows (PowerShell): compare the result with the line in SHA256SUMS
+Get-FileHash .\RingMASTER-<version>.msi -Algorithm SHA256
+```
+
+```sh
+# Linux: checks every file you downloaded
+sha256sum -c SHA256SUMS --ignore-missing
+```
+
+Release files are built by GitHub Actions from the tagged source, never on a personal computer, and GitHub keeps a signed record of each build. With the [GitHub CLI](https://cli.github.com/) you can check that a file came from this repository's workflow:
+
+```sh
+gh attestation verify RingMASTER-<version>.msi --repo primary-null/RingMASTER
+```
+
+## What it does
+
+**Connect**
+- Saved connections to Proxmox VE and Proxmox Datacenter Manager, with an API token or a password, including TOTP and recovery codes for two-factor accounts.
+- Secrets are never written to disk: each connection asks for its secret when it opens.
+- Normal TLS validation, or a SHA-256 certificate pin you enter. There is no trust-on-first-use and no switch to ignore certificate errors.
+- Up to six connections open side by side, each with its own live data, tasks and secret.
+- A demo mode with clearly labelled sample data, to look around without a server.
+
+**Fleet**
+- Guests grouped by node (or by PDM remote, then node), with search, filters, live CPU, memory, network and disk, and sparklines. Refreshes every 5 s, 10 s, 30 s or 2 min, pauses while minimised and backs off on errors.
+- History charts for nodes and guests, from an hour to a year: drag to zoom, a shared crosshair, CSV export.
+- Guest pages: summary, hardware, snapshots (create with RAM, roll back, delete), backups, Bluetooth, console and actions.
+- Power actions (start, shut down, reboot, stop, reset, suspend, resume). One confirmation names the server, node, guest and action, and the task is followed to its final status.
+- Node tools: services, the system log with follow, and available package updates (read-only). A storage page with usage and contents.
+- Permissions: what the signed-in account may do, feature by feature, and which privilege each needs.
+- Pins: keep a guest, one of its tabs, or a web page it serves in the sidebar, with a live dot for the guest's state.
+- Tags show state at a glance: template, HA, lock, protected backup, unplugged network card, firewall, shared storage.
+
+![Guest summary with gauges and history charts for CPU, memory, network and disk](docs/images/guest-summary-debian.png)
+*A guest's summary and history charts, on Debian 13.*
+
+**Consoles**
+- In-app VNC console for VMs, and in-app terminals for containers, nodes and serial ports.
+- SPICE through remote-viewer for VMs with a SPICE display.
+
+**Activity**
+- The cluster's tasks with outcome counts, and a live task log you can follow, copy and save. A task that ends with warnings counts as done and is marked amber.
+
+![Recent tasks with running, succeeded and failed counts](docs/images/activity.png)
+
+**Network and devices**
+- A scan of your private networks for Proxmox VE, Backup Server and Datacenter Manager, Pi-hole, AdGuard Home, Home Assistant and other web services. It sends no credentials. Certificates are shown for you to compare, never trusted automatically.
+- Network tools: ping, traceroute, port check, DNS, HTTP/TLS, iPerf3 and WireGuard, plus [your own tools](docs/plugins/README.md) described in small JSON files.
+- VPN: Tailscale and WireGuard status, up and down, exit node, and WireGuard import.
+- Bluetooth: a live scan on this computer (Windows, or BlueZ on Linux) and inside a VM through the guest agent.
+
+![A network scan sweeping a /24 and finding Proxmox servers and other services](docs/images/scan.gif)
+
+![Network tools: ping with a live latency chart, on Debian 13](docs/images/network-tools-debian.png)
+*Network tools on Debian 13.*
+
+**The app**
+- Its own dark window frame, light and dark themes, custom backgrounds, an interface size for each display, and Reduce motion (which follows the operating system unless you choose).
+- Under the Hood: a live trace of every API call, socket, process, refresh and task poll, with latency, counts per source and the slowest and failed operations. Request bodies and secrets are never recorded.
+- Browser mode: started with `--web`, RingMASTER serves itself to a browser on this computer only, unless you allow remote access.
+- Showcase blur for screenshots (Ctrl+Shift+B; hold Alt to peek).
+- Keyboard: Ctrl 1-9 for pages, Ctrl , for settings, Ctrl B for the sidebar, Ctrl F to search, F5 to refresh.
+
+![Under the Hood: the live operation stream, engine counters and latency](docs/images/under-the-hood-debian.png)
+*Under the Hood on Debian 13.*
+
+**Not yet:** saved secrets, guest editing, backup and restore, node actions, storage changes, firewall, SDN, notifications, the scheduler, a file manager, and installing updates in place.
+
+## Privacy and network use
+
+- No telemetry, no analytics and no account.
+- RingMASTER connects only to the servers you add, the networks you scan and the hosts you test.
+- Update checks are optional and it asks before the first one. A check downloads `ringmaster-update.json` and its signature from this repository's latest release: two HTTPS requests with `User-Agent: RingMASTER/<version>` and nothing about you or your servers. It offers only releases signed with the project's key, never offers a downgrade, and opens the download page rather than installing anything. Set `RINGMASTER_DISABLE_UPDATES=1` to turn checks off entirely.
+- The VNC console uses an embedded Chromium engine (JCEF), which is downloaded into your user cache the first time you open a console.
+- Settings live in `~/.config/ringmaster` (Windows: `%USERPROFILE%\.config\ringmaster`) and the cache in `~/.cache/ring-leader`. Settings > About > Clear everything removes them. The settings folder is backed up whenever the version changes (three copies kept).
+
+## Building from source
+
+Requires JDK 21.
+
+```sh
+./gradlew :core:test :desktop:test    # run the tests
+./gradlew :desktop:run                # run from source
+./gradlew :desktop:packageMsi         # Windows installer
+./gradlew :desktop:packageDeb         # .deb for the distribution you build on
+```
+
+On Windows, the Bluetooth helper in `native/ringmaster-bt` (Rust) is built when `cargo` is installed. Without it, RingMASTER uses a PowerShell scanner instead. Build each `.deb` on the distribution it is for.
+
+How releases and the signed update feed are made: [RELEASING.md](RELEASING.md).
+
+## Licence
+
+Apache License 2.0: see [LICENSE](LICENSE) and [NOTICE](NOTICE). Third-party licences are listed in [desktop/resources/common/THIRD-PARTY-NOTICES.txt](desktop/resources/common/THIRD-PARTY-NOTICES.txt). JediTerm is LGPL-3.0 and ships as a separate, replaceable jar.
+
+RingMASTER is an independent project. It is not affiliated with or endorsed by Proxmox Server Solutions GmbH. Proxmox is a trademark of Proxmox Server Solutions GmbH.

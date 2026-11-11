@@ -1,0 +1,11 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+<title>RingMASTER local engine proof</title>
+<style>body{background:#101a22;color:#dce7ee;font:16px monospace;padding:28px}h2{color:#79d5b7}input{width:90%;background:#172631;color:white;border:1px solid #496273;padding:14px;font:inherit}pre{white-space:pre-wrap;line-height:1.6}</style>
+<h2>Local engine proof</h2>
+<p>This page runs inside RingMASTER. It is not a live console, shell, or guest display. Keyboard input is echoed locally and nothing is executed.</p>
+<pre id="output">Try typing a line and pressing Enter. Nothing is executed.</pre>
+<input id="command" aria-label="Local engine input" placeholder="Type here to test keyboard input" autofocus>
+<script>const input=document.getElementById('command'),output=document.getElementById('output');input.addEventListener('keydown',e=>{if(e.key==='Enter'){output.textContent=('Local echo: '+input.value+'\n'+output.textContent).slice(0,8000);input.value='';}});</script>
+</html>

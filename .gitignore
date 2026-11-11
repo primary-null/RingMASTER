@@ -1,0 +1,10 @@
+.gradle/
+.kotlin/
+**/build/
+.idea/
+*.log
+.local/
+
+# Rust helper build output; the exe is rebuilt by :desktop:buildBluetoothHelper
+native/*/target/
+desktop/resources/windows/ringmaster-bt.exe
