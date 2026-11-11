@@ -69,6 +69,39 @@ class ConsoleStillTest {
     @Test fun proxyRequestsJson() {
         assertEquals("""{"websocket":1,"generate-password":1}""", consoleStillRequestBody().decodeToString())
     }
+    @Test fun malformedProxyBodyYieldsFallbackSentenceWithNoSecrets() {
+        val remote = "https://pve1.example:8006"
+        Connection(remote, "test@pve!test", "secret", "").use { connection ->
+            val ticket = "PVEVNC:demo@pve:synthetic-ticket-value"
+            val password = "synthetic-password-value"
+            val malformed = """{"data":{"ticket":"$ticket","password":"$password" unclosed"""
+            val error = assertFailsWith<IllegalStateException> {
+                captureConsoleStill(connection, "/api2/json/nodes/pve1/qemu/100") { malformed }
+            }
+            assertEquals("The screen could not be captured.", error.message)
+            assertNull(error.cause)
+            assertFalse("synthetic-ticket-value" in error.toString())
+            assertFalse("synthetic-password-value" in error.toString())
+        }
+    }
+    @Test fun sessionExpiredKeepsItsType() {
+        val remote = "https://pve1.example:8006"
+        Connection(remote, "test@pve!test", "secret", "").use { connection ->
+            assertFailsWith<SessionExpiredException> {
+                captureConsoleStill(connection, "/api2/json/nodes/pve1/qemu/100") { throw SessionExpiredException() }
+            }
+        }
+    }
+    @Test fun channelOpenSentenceSurvives() {
+        val remote = "https://pve1.example:8006"
+        Connection(remote, "test@pve!test", "secret", "").use { connection ->
+            val error = assertFailsWith<IllegalStateException> {
+                captureConsoleStill(connection, "/api2/json/nodes/pve1/qemu/100") { error("The server did not open a console channel.") }
+            }
+            assertEquals("The server did not open a console channel.", error.message)
+            assertNull(error.cause)
+        }
+    }
     @Test fun guardsRunBeforeAnyNetwork() {
         val remote = "https://example.invalid:8006"
         Connection(remote, "test@pve!test", "secret", "").use { connection ->

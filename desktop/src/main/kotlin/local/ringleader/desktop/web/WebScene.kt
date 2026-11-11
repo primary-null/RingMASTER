@@ -30,11 +30,11 @@ class TileDiff {
         }
     }
 }
-class WebScene : AutoCloseable {
+class WebScene(private val hostActions: Boolean = false) : AutoCloseable {
     private val dispatcher = java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r,"browser-scene").apply { isDaemon=true } }.asCoroutineDispatcher()
     override fun close() = dispatcher.close()
     suspend fun run(socket: WebSocketSession) = withContext(dispatcher) {
-        val host = AppHost(true)
+        val host = AppHost(true, hostActions)
         var dpr by androidx.compose.runtime.mutableStateOf(1f)
         // Constraints can change without disposing the composition or its remembered Workspace/ProfileDesk.
         var width = 960; var height = 640

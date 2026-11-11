@@ -6,7 +6,9 @@ That folder is `%USERPROFILE%\.config\ringmaster\plugins` unless `XDG_CONFIG_HOM
 
 Each `*.json` file is one tool. RingMASTER does not run a shell. `command` is a list of arguments. The first entry is a program name on `PATH` or an absolute path. A `{placeholder}` is replaced inside a single argument from the input with the same key. Values are never joined into one shell string.
 
-The first time you run a plug-in in a session, RingMASTER shows the exact argument list and waits for confirmation.
+RingMASTER shows the exact argument list and asks again whenever the command in the file, or any argument, differs from one you confirmed in this session.
+
+Batch files (.bat, .cmd) are refused because Windows passes their arguments to cmd.exe.
 
 A file that is not valid is listed on the Network tools page and is not run.
 

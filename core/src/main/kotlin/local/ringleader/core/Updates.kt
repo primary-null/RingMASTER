@@ -120,6 +120,7 @@ class UpdatePreferences(val file: Path, private val report: (String) -> Unit = {
     val automatic get() = props.getProperty("automatic", "true") == "true"
     val lastChecked get() = runCatching { Instant.parse(props.getProperty("lastChecked")) }.getOrNull()
     val skippedVersion get() = props.getProperty("skippedVersion")
+    val feedPublished get() = runCatching { Instant.parse(props.getProperty("feedPublished")) }.getOrNull()
     fun put(key: String, value: String) {
         props.setProperty(key,value)
         if (blocked) return
@@ -179,8 +180,15 @@ class UpdateChecker(val version: String, val preferences: UpdatePreferences, pri
                 val s = fetch("$UPDATE_FEED.sig",SIGNATURE_LIMIT)
                 require(s.status == 200 && verifyUpdateSignature(m.bytes,s.bytes,keys))
                 val manifest = parseUpdateManifest(m.bytes)
+                val savedPublished = preferences.feedPublished
+                if (savedPublished != null && manifest.published < savedPublished) {
+                    return@withContext UpdateState.Failed("The update feed could not be verified.")
+                }
+                val clampedPublished = minOf(manifest.published, clock.instant())
+                preferences.put("feedPublished", (if (savedPublished != null) maxOf(savedPublished, clampedPublished) else clampedPublished).toString())
                 when {
-                    compareUpdateVersions(manifest.version,version) <= 0 -> UpdateState.UpToDate()
+                    compareUpdateVersions(manifest.version,version) < 0 -> UpdateState.Failed("The update feed is older than this version.", RELEASE_PAGE)
+                    compareUpdateVersions(manifest.version,version) == 0 -> UpdateState.UpToDate()
                     manifest.minVersion != null && compareUpdateVersions(version,manifest.minVersion) < 0 -> UpdateState.Failed("An in-between update is needed before this version.", RELEASE_PAGE)
                     manifest.version == preferences.skippedVersion -> UpdateState.Skipped(manifest.version)
                     else -> platform()?.let { p -> manifest.assets.find { it.platform == p } }?.let { UpdateState.Available(OfferedUpdate(manifest,it)) }

@@ -43,6 +43,9 @@ private const val SESSION_HEAD = 18
 /** Rail order. Ctrl+1 opens the first name; Main maps the number keys to these names. */
 internal val ringPages = listOf("Desk", "Fleet", "Storage", "Activity", "Scan", "Bluetooth", "VPN", "Tools", "Under the Hood")
 
+/** Pages this host is allowed to show. The browser drops Under the Hood so Ctrl+1-8 keep their meaning. */
+internal fun pagesFor(host: AppHost): List<String> = if (host.traceView) ringPages else ringPages - "Under the Hood"
+
 /** Line icons drawn on a 20dp canvas, 1.5dp stroke, round caps. */
 private fun DrawScope.railIcon(kind: String, c: Color) {
     val st = Stroke(1.5.dp.toPx(), cap = StrokeCap.Round)
@@ -183,7 +186,8 @@ private fun DrawScope.railIcon(kind: String, c: Color) {
     LaunchedEffect(state.connectionEpoch) { if (state.connected || state.demo) workspace.setLive(prefs.option("live", true), prefs.number("liveInterval", LIVE_INTERVAL_DEFAULT)) }
     val reduce = LocalReduceMotion.current
     val width by animateDpAsState(if (expanded) 208.dp else 60.dp, tween(if (reduce) 0 else 200, easing = FastOutSlowInEasing))
-    val index = ringPages.indexOf(page)
+    val pages = pagesFor(LocalAppHost.current)
+    val index = pages.indexOf(page)
     val offset by animateDpAsState(((index.coerceAtLeast(0)) * ITEM_HEIGHT + 8).dp, if (reduce) snap() else spring(dampingRatio = .75f, stiffness = Spring.StiffnessMediumLow))
     val running = state.tasks.orEmpty().count { it.outcome == TaskOutcome.Running }
     val backoff = state.liveBackoffSeconds
@@ -196,13 +200,13 @@ private fun DrawScope.railIcon(kind: String, c: Color) {
         val rule = if (entries.isNotEmpty()) PIN_RULE else 0
         // Open sessions are listed above Settings once there is more than one; pins get the room that is left.
         val sessionBlock = if (sessions.size > 1) 1 + (if (expanded) SESSION_HEAD else 4) + sessions.size * SESSION_ROW + 4 else 0
-        val room = (maxHeight.value - (8 + ringPages.size * ITEM_HEIGHT) - (1 + ITEM_HEIGHT + 48 + ITEM_HEIGHT + 24) - head - rule - 4 - sessionBlock).toInt()
+        val room = (maxHeight.value - (8 + pages.size * ITEM_HEIGHT) - (1 + ITEM_HEIGHT + 48 + ITEM_HEIGHT + 24) - head - rule - 4 - sessionBlock).toInt()
         val shown = visiblePinCount(entries.size, room, PIN_ROW, PIN_MORE)
         val hidden = (entries.size - shown).coerceAtLeast(0)
         Column(Modifier.fillMaxSize()) {
             Spacer(Modifier.height(8.dp))
             Box {
-                Column { ringPages.forEachIndexed { i, item ->
+                Column { pages.forEachIndexed { i, item ->
                     val label = if (item == "Tools") "Network tools" else item
                     RailRow(item, label, expanded, active = page == item, hint = "Ctrl ${i + 1}", badge = if (item == "Activity") running else 0,
                         tooltip = "$label  ·  Ctrl ${i + 1}" + if (item == "Activity" && running > 0) "  ·  $running running" else "") { onPage(item) }

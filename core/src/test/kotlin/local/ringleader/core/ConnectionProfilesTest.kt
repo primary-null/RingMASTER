@@ -3,6 +3,9 @@ package local.ringleader.core
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
+import java.nio.file.attribute.AclEntryPermission
+import java.nio.file.attribute.AclEntryType
+import java.nio.file.attribute.AclFileAttributeView
 import java.nio.file.attribute.PosixFilePermission
 import java.util.Comparator
 import java.util.UUID
@@ -266,6 +269,35 @@ class ConnectionProfilesTest {
                 Files.getPosixFilePermissions(file.parent),
             )
         } finally { delete(directory) }
+    }
+
+    @Test fun savedFileHasOneAllowEntryForTheUserOnAnAclStore() {
+        val directory = tempDirectory()
+        try {
+            if (directory.fileSystem.supportedFileAttributeViews().contains("posix")) return
+            if (Files.getFileAttributeView(directory, AclFileAttributeView::class.java, LinkOption.NOFOLLOW_LINKS) == null) return
+            val file = directory.resolve("ringmaster").resolve("profiles.json")
+            val first = profile(displayName = "Lab")
+            val store = ProfileStore(file)
+            store.save(listOf(first))
+            assertSingleAllowEntry(file)
+            // Saving over an existing file must keep the single ALLOW entry and leave the user able to read, write, and delete.
+            val second = first.copy(displayName = "Renamed")
+            store.save(listOf(second))
+            assertSingleAllowEntry(file)
+            assertEquals(listOf(second), ProfileStore(file).load())
+            Files.writeString(file, Files.readString(file))
+            Files.delete(file)
+            assertFalse(Files.exists(file))
+        } finally { delete(directory) }
+    }
+
+    private fun assertSingleAllowEntry(file: Path) {
+        val entries = Files.getFileAttributeView(file, AclFileAttributeView::class.java, LinkOption.NOFOLLOW_LINKS)!!.acl
+        assertEquals(1, entries.size)
+        val entry = entries.single()
+        assertEquals(AclEntryType.ALLOW, entry.type())
+        assertEquals(AclEntryPermission.values().toSet(), entry.permissions())
     }
 
     @Test fun profileFileUsesXdgThenHomeAndNeverARelativeWorkingDirectory() {

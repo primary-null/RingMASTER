@@ -50,6 +50,43 @@ class WebModeTest {
         assertTrue(parseWebArgs(listOf("--web","--bind","0.0.0.0","--allow-remote"))!!.allowRemote)
         for(args in listOf(listOf("--web","--port"),listOf("--web","--port","-1"),listOf("--web","--unknown"))) assertFails { parseWebArgs(args) }
         assertFails { WebServer(WebOptions(), "short") }
+        // --public-origin
+        assertEquals("https://example.com",parseWebArgs(listOf("--web","--public-origin","https://example.com"))!!.publicOrigin)
+        assertEquals("https://example.com",parseWebArgs(listOf("--web","--public-origin","HTTPS://EXAMPLE.COM:443/"))!!.publicOrigin)
+        assertEquals("https://example.com:8443",parseWebArgs(listOf("--web","--public-origin","https://example.com:8443"))!!.publicOrigin)
+        assertFails { parseWebArgs(listOf("--web","--public-origin","http://example.com")) }
+        assertFails { parseWebArgs(listOf("--web","--public-origin","https://example.com/path")) }
+        assertFails { parseWebArgs(listOf("--web","--public-origin","https://example.com?q=1")) }
+        assertFails { parseWebArgs(listOf("--web","--public-origin","https://user@example.com")) }
+        // --allow-host-actions
+        assertFalse(parseWebArgs(listOf("--web"))!!.hostActions)
+        assertTrue(parseWebArgs(listOf("--web","--allow-host-actions"))!!.hostActions)
+        assertFalse(AppHost(true).hostActions)
+        assertTrue(AppHost(true, true).hostActions)
+        assertTrue(DesktopAppHost().hostActions)
+    }
+
+    @Test fun vpnActSkipsBackendWhenHostActionsOff() {
+        val calls = java.util.concurrent.atomic.AtomicInteger(0)
+        val backend = object : local.ringleader.core.VpnBackend {
+            override val platform = "Test"
+            override fun snapshot() = local.ringleader.core.VpnSnapshot(java.time.Instant.now(), emptyList(), false, null, true, emptyList(), emptyList())
+            override fun routeTo(host: String, snapshot: local.ringleader.core.VpnSnapshot?) = local.ringleader.core.VpnRoute(host, host, null, null, null)
+            override fun setTunnel(tunnel: local.ringleader.core.VpnTunnel, up: Boolean) { calls.incrementAndGet() }
+            override fun setExitNode(peer: local.ringleader.core.TailscalePeer?) { calls.incrementAndGet() }
+            override fun importWireGuard(config: java.nio.file.Path, name: String): String { calls.incrementAndGet(); return "" }
+            override fun removeWireGuard(tunnel: local.ringleader.core.VpnTunnel) { calls.incrementAndGet() }
+        }
+        val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+        try {
+            val session = VpnSession(scope, backend)
+            session.hostActions = false
+            session.act("test", null, "done") { it.setTunnel(local.ringleader.core.VpnTunnel("x", local.ringleader.core.VpnKind.WireGuard, "wg0", local.ringleader.core.VpnState.Down, "wg0"), true) }
+            Thread.sleep(150)
+            assertEquals(0, calls.get())
+            assertNull(session.busy)
+            assertNull(session.message)
+        } finally { scope.cancel() }
     }
     @Test fun busyDefaultPortFallsForwardButANamedPortDoesNot() {
         java.net.ServerSocket(0, 1, java.net.InetAddress.getLoopbackAddress()).use { busy ->
@@ -89,6 +126,49 @@ class WebModeTest {
             scene.render(System.nanoTime()).close()
             assertEquals("Hello ?",text)
         } finally { scene.close() }
+    }
+    @Test fun sessionPathBypassBlocked() {
+        val client=HttpClient.newHttpClient()
+        WebServer(WebOptions(port=0),"test-key-with-at-least-24-characters").use { server ->
+            server.start()
+            val login=client.send(HttpRequest.newBuilder(URI(server.loginUrl)).GET().build(),HttpResponse.BodyHandlers.ofString())
+            val cookie=login.headers().firstValue("set-cookie").get().substringBefore(';')
+            fun rejected(path: String, cookie: String?, origin: String) {
+                val builder=client.newWebSocketBuilder().header("Origin",origin)
+                if(cookie!=null) builder.header("Cookie",cookie)
+                val error=assertFails { builder.buildAsync(URI(server.origin.replace("http","ws")+path),object: WebSocket.Listener {}).join() }
+                assertEquals(403,((error as CompletionException).cause as WebSocketHandshakeException).response.statusCode())
+            }
+            rejected("//session",null,server.origin)
+            rejected("/%73ession",null,server.origin)
+            rejected("//session",cookie,"https://foreign.invalid")
+            rejected("/%73ession",cookie,"https://foreign.invalid")
+        }
+    }
+    @Test fun publicOriginCookieAndOriginCheck() {
+        val client=HttpClient.newHttpClient()
+        val browserGate="ringmaster-browser-gate-value"
+        WebServer(WebOptions(port=0, publicOrigin="https://ring.example.com"),browserGate).use { server ->
+            server.start()
+            val bindOrigin="http://127.0.0.1:${server.port}"
+            val login=client.send(HttpRequest.newBuilder(URI("$bindOrigin/login?key=$browserGate")).GET().build(),HttpResponse.BodyHandlers.ofString())
+            assertEquals(302,login.statusCode())
+            val setCookie=login.headers().firstValue("set-cookie").get()
+            assertTrue(setCookie.lowercase().contains("secure"))
+            val cookie=setCookie.substringBefore(';')
+            val builder=client.newWebSocketBuilder().header("Origin",bindOrigin).header("Cookie",cookie)
+            val error=assertFails { builder.buildAsync(URI("ws://127.0.0.1:${server.port}/session"),object: WebSocket.Listener {}).join() }
+            assertEquals(403,((error as CompletionException).cause as WebSocketHandshakeException).response.statusCode())
+        }
+    }
+    @Test fun forwardedHeadersIgnored() {
+        val client=HttpClient.newHttpClient()
+        WebServer(WebOptions(port=0),"test-key-with-at-least-24-characters").use { server ->
+            server.start()
+            val login=client.send(HttpRequest.newBuilder(URI(server.loginUrl)).header("X-Forwarded-Proto","https").header("Forwarded","proto=https").GET().build(),HttpResponse.BodyHandlers.ofString())
+            assertEquals(302,login.statusCode())
+            assertFalse(login.headers().firstValue("set-cookie").get().lowercase().contains("secure"))
+        }
     }
     @Test fun authenticationAndDeskRoundTrip() {
         val client=HttpClient.newHttpClient()

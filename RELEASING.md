@@ -52,6 +52,8 @@ UTF-8 JSON: schema 1, channel `stable`, a numeric dotted version, an ISO-8601 UT
 {"schema":1,"channel":"stable","version":"0.24.0","published":"2026-12-01T12:00:00Z","notes":"Release notes in plain text.","notesUrl":"https://github.com/primary-null/RingMASTER/releases/tag/v0.24.0","assets":[{"platform":"windows-x64-msi","url":"https://github.com/primary-null/RingMASTER/releases/download/v0.24.0/RingMASTER-0.24.0.msi","sha256":"REPLACE_WITH_64_HEX_DIGITS","size":1048576}]}
 ```
 
+The `published` timestamp must strictly increase with each signed manifest. The app remembers the most recent accepted value and rejects any manifest whose `published` is earlier.
+
 List all three assets. Take hashes and sizes from the draft's files, sign the exact final bytes, and sign again after any edit.
 
 ## What the app does with it

@@ -10,7 +10,7 @@ object Redact {
     private val headers = Regex("""(?im)(authorization|cookie|set-cookie|csrfpreventiontoken)["']?\s*[:=]\s*[^\r\n]+""")
     private val assignment = Regex("(?i)([\\\"']?(?:password|passwd|totp|otp|vncticket|ticket|token|secret|PVEAuthCookie|CSRFPreventionToken|tfa-challenge)[\\\"']?\\s*[:=]\\s*)(?:\\\"[^\\\"]*\\\"|'[^']*'|[^\\s&,;}]+)")
     private val apiToken = Regex("(?i)(PVEAPIToken|PDMAPIToken)=[^\\s,;\\\"']+")
-    private val ticket = Regex("(?i)(?:PVE|PDM|PVNC|PTERM):[^\\s&\\\"'<>]+")
+    private val ticket = Regex("(?i)(?:PVESPICEPROXY|PVEVNC|PVNC|PTERM|PVE|PDM):[^\\s&\\\"'<>]+")
     fun key(name: String) = sensitive.containsMatchIn(name)
     fun text(value: String): String {
         val queries = Regex("([?&])([^=&\\s]+)=([^&\\s]*)").replace(value) { m ->

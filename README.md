@@ -106,7 +106,7 @@ gh attestation verify RingMASTER-<version>.msi --repo primary-null/RingMASTER
 **The app**
 - Its own dark window frame, light and dark themes, custom backgrounds, an interface size for each display, and Reduce motion (which follows the operating system unless you choose).
 - Under the Hood: a live trace of every API call, socket, process, refresh and task poll, with latency, counts per source and the slowest and failed operations. Request bodies and secrets are never recorded.
-- Browser mode: started with `--web`, RingMASTER serves itself to a browser on this computer only, unless you allow remote access.
+- Browser mode: started with `--web`, RingMASTER serves itself to a browser on this computer only, unless you allow remote access. Pass `--allow-host-actions` to let the browser run tools that act on the server host (JSON plug-ins, iperf's server and custom-path modes, VPN changes); without it the browser stays read-only for those. Pass `--public-origin` with an `https://` address when a reverse proxy or tunnel terminates TLS in front of the server.
 - Showcase blur for screenshots (Ctrl+Shift+B; hold Alt to peek).
 - Keyboard: Ctrl 1-9 for pages, Ctrl , for settings, Ctrl B for the sidebar, Ctrl F to search, F5 to refresh.
 

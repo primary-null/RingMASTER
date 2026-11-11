@@ -16,9 +16,11 @@ import local.ringleader.core.findExecutable
 
 data class SkippedPlugin(val file: String, val reason: String)
 
+data class PluginApproval(val command: List<String>, val argv: List<String>)
+
 /**
- * A command the user described in JSON. The first run in a session must set [confirmed]
- * after the person has seen [commandFor]. Arguments are substituted one element at a time.
+ * A command the user described in JSON. The first run in a session must have [approval]
+ * set after the person has seen [commandFor]. Arguments are substituted one element at a time.
  */
 class UserToolPlugin(
     override val id: String,
@@ -30,9 +32,11 @@ class UserToolPlugin(
     val source: String,
     private val which: (String) -> String? = ::findExecutable,
 ) : ToolPlugin {
-    @Volatile var confirmed: Boolean = false
+    @Volatile var approval: PluginApproval? = null
+    val manifestCommand: List<String> get() = command
 
     override fun available(): ToolAvailability {
+        if (isBatchFile(command.first())) return ToolAvailability(false, "Batch files (.bat, .cmd) cannot be the program. Use the program itself.")
         val program = resolveProgram(command.first(), which)
         return if (program != null) ToolAvailability(true) else ToolAvailability(false, "${command.first()} was not found. Use a full path or install it on PATH.")
     }
@@ -44,7 +48,9 @@ class UserToolPlugin(
 
     override suspend fun run(values: Map<String, String>, emit: (ToolEvent) -> Unit): ToolResult {
         val argv = try { commandFor(values) } catch (e: ToolInputException) { return ToolResult(false, e.message ?: "Check the inputs.") }
-        if (!confirmed) return ToolResult(false, "Confirm this command before running it.")
+        val a = approval
+        if (a == null || a.command != command || a.argv != argv) return ToolResult(false, "Confirm this command before running it.")
+        if (isBatchFile(argv.first())) return ToolResult(false, "Batch files (.bat, .cmd) cannot be the program. Use the program itself.")
         val program = resolveProgram(argv.first(), which) ?: return ToolResult(false, "${argv.first()} was not found. Use a full path or install it on PATH.")
         val full = listOf(program) + argv.drop(1)
         emit(ToolEvent.Status("Running $name"))
@@ -129,6 +135,7 @@ fun readUserPlugin(fileName: String, text: String, which: (String) -> String? = 
     }
     if ('{' in command.first()) return ManifestRead.Bad("The program cannot be a placeholder.")
     if (!validExecutableToken(command.first())) return ManifestRead.Bad("The program must be an absolute path or a program name.")
+    if (isBatchFile(command.first())) return ManifestRead.Bad("Batch files (.bat, .cmd) cannot be the program. Use the program itself.")
     val inputs = when (val parsed = parseInputs(obj["inputs"] as? JsonArray)) {
         is InputRead.Ok -> parsed.inputs
         is InputRead.Bad -> return ManifestRead.Bad(parsed.reason)
@@ -174,11 +181,19 @@ internal fun validExecutableToken(token: String): Boolean {
 
 internal fun resolveProgram(token: String, which: (String) -> String?): String? {
     if (!validExecutableToken(token)) return null
+    if (isBatchFile(token)) return null
     if ('/' in token || '\\' in token || runCatching { Path.of(token).isAbsolute }.getOrDefault(false)) {
         val path = Path.of(token)
         return path.toString().takeIf { path.isAbsolute && Files.isRegularFile(path) }
     }
-    return which(token)
+    val resolved = which(token) ?: return null
+    if (isBatchFile(resolved)) return null
+    return resolved
+}
+
+internal fun isBatchFile(token: String): Boolean {
+    val name = token.substringAfterLast('/').substringAfterLast('\\').trimEnd(' ', '.').lowercase()
+    return name.endsWith(".bat") || name.endsWith(".cmd")
 }
 
 private sealed class InputRead {

@@ -79,11 +79,51 @@ class UpdatesTest {
     @Test fun offersOnlyNewerAndHonoursMinVersionSkipAndPlatform() = runTest {
         assertIs<UpdateState.Available>(checked())
         assertIs<UpdateState.UpToDate>(checked(running="0.22.0"))
-        assertIs<UpdateState.UpToDate>(checked(running="1.0.0"))
+        val stale = assertIs<UpdateState.Failed>(checked(running="0.23.0"))
+        assertEquals("The update feed is older than this version.", stale.reason)
+        assertEquals(RELEASE_PAGE, stale.releasePage)
+        val stale2 = assertIs<UpdateState.Failed>(checked(running="1.0.0"))
+        assertEquals("The update feed is older than this version.", stale2.reason)
+        assertEquals(RELEASE_PAGE, stale2.releasePage)
         assertIs<UpdateState.Skipped>(checked(skip="0.22.0"))
         assertEquals(RELEASE_PAGE,assertIs<UpdateState.Failed>(checked(platform=null)).releasePage)
         val min=json.replace("\"assets\"", "\"minVersion\":\"0.21.9\",\"assets\"")
         assertTrue(assertIs<UpdateState.Failed>(checked(min)).reason.contains("in-between"))
+    }
+    @Test fun freshnessRejectsOlderManifestAndPreservesDate() = runTest {
+        val key=pair()
+        val clockTime=Instant.parse("2026-11-11T00:00:00Z")
+        val clock=object: Clock() { override fun getZone()=ZoneOffset.UTC; override fun withZone(zone: ZoneId)=this; override fun instant()=clockTime }
+        val newer=json.replace("0.22.0","0.23.0").replace("2026-11-10T00:00:00Z","2026-11-10T12:00:00Z")
+        val older=json.replace("2026-11-10T00:00:00Z","2026-11-09T00:00:00Z")
+        val p=prefs(); p.put("consent","yes")
+        var payload=newer.toByteArray()
+        val t=UpdateTransport { u,_,_ -> UpdateResponse(200, if(u.endsWith(".sig")) signature(payload,key) else payload) }
+        val c=UpdateChecker("0.21.6",p,listOf(publicKey(key)),t,clock,platform={"windows-x64-msi"})
+        c.check()
+        assertIs<UpdateState.Available>(c.state.value)
+        val saved=p.feedPublished; assertNotNull(saved)
+        payload=older.toByteArray()
+        c.check()
+        assertIs<UpdateState.Failed>(c.state.value)
+        assertEquals(saved,p.feedPublished)
+        payload=newer.toByteArray()
+        c.check()
+        assertIs<UpdateState.Available>(c.state.value)
+    }
+    @Test fun futureDatedManifestSavesClockTime() = runTest {
+        val key=pair()
+        val clockTime=Instant.parse("2026-11-10T00:00:00Z")
+        val clock=object: Clock() { override fun getZone()=ZoneOffset.UTC; override fun withZone(zone: ZoneId)=this; override fun instant()=clockTime }
+        val future=json.replace("0.22.0","0.23.0").replace("2026-11-10T00:00:00Z","2027-01-01T00:00:00Z")
+        val bytes=future.toByteArray()
+        val p=prefs(); p.put("consent","yes")
+        val c=UpdateChecker("0.21.6",p,listOf(publicKey(key)),UpdateTransport { u,_,_ ->
+            UpdateResponse(200, if(u.endsWith(".sig")) signature(bytes,key) else bytes)
+        },clock,platform={"windows-x64-msi"})
+        c.check()
+        assertIs<UpdateState.Available>(c.state.value)
+        assertEquals(clockTime,p.feedPublished)
     }
     @Test fun notPublishedOversizeRedirectAndUnverified() = runTest {
         val key=pair(); val p=prefs(); p.put("consent","yes")

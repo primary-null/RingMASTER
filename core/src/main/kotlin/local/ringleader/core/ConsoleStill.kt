@@ -159,6 +159,17 @@ private class WebSocketRfb(private val deadline: Long) : RfbChannel, WebSocket.L
     override fun close() { closed = true; if (::socket.isInitialized) socket.abort() }
 }
 
+internal fun stillFailure(e: Throwable): Throwable {
+    var root: Throwable = e
+    while (root is ExecutionException && root.cause != null) root = root.cause!!
+    if (root is SessionExpiredException || root is java.io.IOException) return root
+    if (root is IllegalStateException) {
+        val msg = root.message
+        if (msg != null && msg.length <= 200 && Redact.text(msg) == msg) return IllegalStateException(msg)
+    }
+    return IllegalStateException("The screen could not be captured.")
+}
+
 internal fun captureConsoleStill(connection: Connection, base: String, proxy: (String) -> String): ConsoleStill {
     val trace = Trace.begin(TraceSource.Console, "VNC still capture", mapOf("path" to base))
     try {
@@ -184,7 +195,7 @@ internal fun captureConsoleStill(connection: Connection, base: String, proxy: (S
         }
     }
     try { return future.get(20, TimeUnit.SECONDS) }
-    catch (e: ExecutionException) { throw (e.cause as? Exception ?: e) }
+    catch (e: ExecutionException) { throw stillFailure(e) }
     catch (e: TimeoutException) { error("The console capture timed out.") }
     finally { future.cancel(true); channel.close(); worker.shutdownNow() }
     } catch (t: Throwable) { trace.end(error=t); throw t } finally { trace.end() }

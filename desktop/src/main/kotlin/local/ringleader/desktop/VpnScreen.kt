@@ -63,6 +63,8 @@ class VpnSession(private val scope: CoroutineScope, val backend: VpnBackend?) {
     var services by mutableStateOf<List<TailnetService>>(emptyList()); private set
     var finding by mutableStateOf(false); private set
     var searched by mutableStateOf(false); private set
+    /** In the browser without --allow-host-actions this is false; the UI sets it from LocalAppHost. */
+    var hostActions: Boolean = true
     private var findJob: Job? = null
 
     fun refresh(host: String?) {
@@ -81,6 +83,7 @@ class VpnSession(private val scope: CoroutineScope, val backend: VpnBackend?) {
 
     fun act(key: String, host: String?, done: String, block: (VpnBackend) -> Unit) {
         val b = backend ?: return
+        if (!hostActions) return
         if (busy != null) return
         busy = key; message = null; failed = false
         scope.launch {
@@ -113,6 +116,8 @@ private fun hostOf(address: String?): String? = address?.takeIf { it.isNotBlank(
  */
 @Composable fun VpnScreen(session: VpnSession, currentAddress: String?, origins: List<String>, onUse: (ScanHit) -> Unit) {
     val appHost = LocalAppHost.current
+    session.hostActions = appHost.hostActions
+    val canAct = appHost.hostActions
     val host = hostOf(currentAddress)
     LaunchedEffect(host) { while (true) { session.refresh(host); delay(10_000) } }
     var confirm by remember { mutableStateOf<VpnConfirm?>(null) }
@@ -145,12 +150,12 @@ private fun hostOf(address: String?): String? = address?.takeIf { it.isNotBlank(
             }, fontFamily = Tech.Mono, fontSize = 11.sp, color = Tech.Muted)
             FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 snap.tunnels.forEach { t ->
-                    TunnelCard(t, session.busy == t.id, session.route?.tunnelId == t.id,
+                    TunnelCard(t, session.busy == t.id, session.route?.tunnelId == t.id, canAct,
                         onToggle = { confirm = VpnConfirm.Toggle(t, up = t.state != VpnState.Up) },
                         onRemove = { confirm = VpnConfirm.Remove(t) })
                 }
             }
-            snap.tailscale?.let { ts -> Tailnet(ts, session, origins, onUse, onExit = { confirm = VpnConfirm.Exit(it) }) }
+            snap.tailscale?.let { ts -> Tailnet(ts, session, origins, canAct, onUse, onExit = { confirm = VpnConfirm.Exit(it) }) }
             if (snap.notes.isNotEmpty()) Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 snap.notes.forEach { Text(it, fontFamily = Tech.Mono, fontSize = 10.sp, color = Tech.Muted) }
             }
@@ -212,7 +217,7 @@ private sealed class VpnConfirm(val title: String, val body: String, val action:
     }
 }
 
-@Composable private fun TunnelCard(t: VpnTunnel, busy: Boolean, carriesServer: Boolean, onToggle: () -> Unit, onRemove: () -> Unit) {
+@Composable private fun TunnelCard(t: VpnTunnel, busy: Boolean, carriesServer: Boolean, canAct: Boolean, onToggle: () -> Unit, onRemove: () -> Unit) {
     val tint = when (t.state) { VpnState.Up -> Tech.Green; VpnState.Connecting, VpnState.NeedsLogin -> Tech.Amber; else -> Tech.Muted }
     TechPanel(Modifier.width(340.dp), rail = tint, padding = 10.dp) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -231,8 +236,8 @@ private sealed class VpnConfirm(val title: String, val body: String, val action:
         if (t.canToggle || t.canRemove) {
             Spacer(Modifier.height(8.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (t.canToggle && t.state != VpnState.Connecting) MiniAction(if (busy) "Working…" else if (t.state == VpnState.Up) "Bring down" else "Bring up", primary = t.state != VpnState.Up, enabled = !busy, onClick = onToggle)
-                if (t.canRemove && t.state != VpnState.Up) MiniAction("Remove", enabled = !busy, onClick = onRemove)
+                if (t.canToggle && t.state != VpnState.Connecting) MiniAction(if (busy) "Working…" else if (t.state == VpnState.Up) "Bring down" else "Bring up", primary = t.state != VpnState.Up, enabled = !busy && canAct, onClick = onToggle)
+                if (t.canRemove && t.state != VpnState.Up) MiniAction("Remove", enabled = !busy && canAct, onClick = onRemove)
             }
         }
     }
@@ -243,7 +248,7 @@ internal fun agoShort(seconds: Long): String { val s = seconds.coerceAtLeast(0);
 
 private val VpnKind.label get() = when (this) { VpnKind.Tailscale -> "Tailscale"; VpnKind.WireGuard -> "WireGuard"; VpnKind.OpenVpn -> "OpenVPN"; VpnKind.IpSec -> "IPsec"; VpnKind.Other -> "VPN" }
 
-@Composable private fun Tailnet(ts: TailscaleStatus, session: VpnSession, origins: List<String>, onUse: (ScanHit) -> Unit, onExit: (TailscalePeer?) -> Unit) {
+@Composable private fun Tailnet(ts: TailscaleStatus, session: VpnSession, origins: List<String>, canAct: Boolean, onUse: (ScanHit) -> Unit, onExit: (TailscalePeer?) -> Unit) {
     var exitMenu by remember { mutableStateOf(false) }
     val online = ts.peers.count { it.online }
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -252,7 +257,7 @@ private val VpnKind.label get() = when (this) { VpnKind.Tailscale -> "Tailscale"
             ts.tailnet?.let { Text(it, Modifier.identity(), fontFamily = Tech.Mono, fontSize = 11.sp, color = Tech.Muted, maxLines = 1) }
             Spacer(Modifier.weight(1f))
             if (ts.running) Box {
-                MiniAction("Exit node · ${ts.exitNode?.hostName ?: "none"}", enabled = session.busy == null) { exitMenu = true }
+                MiniAction("Exit node · ${ts.exitNode?.hostName ?: "none"}", enabled = session.busy == null && canAct) { exitMenu = true }
                 DropdownMenu(exitMenu, { exitMenu = false }, containerColor = Tech.Raised) {
                     DropdownMenuItem(text = { Text("None", fontSize = 13.sp) }, onClick = { exitMenu = false; if (ts.exitNode != null) onExit(null) })
                     ts.peers.filter { it.exitNodeOption && it.online }.forEach { p ->

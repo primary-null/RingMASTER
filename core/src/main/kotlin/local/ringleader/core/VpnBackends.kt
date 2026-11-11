@@ -35,7 +35,7 @@ fun runVpnCommand(command: List<String>, timeout: Long): String {
     } finally { if(p.isAlive) { p.descendants().forEach { it.destroyForcibly() }; p.destroyForcibly() } }
     } catch (t: Throwable) { trace.end(error=t); throw t } finally { trace.end() }
 }
-internal fun psQuote(value: String) = "'${value.replace("'", "''")}'"
+internal fun psQuote(value: String) = "'${Regex("['‘’‚‛]").replace(value) { it.value + it.value }}'"
 internal fun vpnPowerShell(script: String) = listOf("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", Base64.getEncoder().encodeToString(script.toByteArray(Charsets.UTF_16LE)))
 fun windowsVpnReadScript() = """
 ${'$'}services = @(try { Get-Service -Name 'WireGuardTunnel${'$'}*' -ErrorAction Stop | Select-Object Name,@{n='Status';e={${'$'}_.Status.ToString()}} } catch {})

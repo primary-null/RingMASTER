@@ -42,7 +42,8 @@ class VpnTest {
         assertEquals("wg:office", b.importWireGuard(conf,"office"))
         val script = inner(calls.single())
         assertTrue("C:\\Program Files\\WireGuard\\Data\\Configurations" in script, script)
-        assertTrue("Copy-Item -LiteralPath '${conf.toAbsolutePath()}'" in script)
+        assertTrue("Copy-Item -LiteralPath \$source" in script)
+        assertFalse(conf.toAbsolutePath().toString() in script, "the source path must not appear in the script text")
         assertFalse("installtunnelservice" in script, "importing must not bring the tunnel up")
         assertFalse("SECRET" in script || "SECRET" in decode(calls.single()), "the configuration's contents never enter a command line")
         assertTrue("already exists" in decode(calls.single()), "exit codes are explained")
@@ -90,6 +91,24 @@ class VpnTest {
         val record = WireGuardImports(file); assertEquals(emptyList(), record.names()); assertFailsWith<IllegalStateException> { record.add("mine") }
         assertEquals(newer, Files.readString(file))
     }
+    @Test fun psQuoteDoublesEachPowerShellApostrophe() {
+        assertEquals("'a''b'", psQuote("a'b"))
+        assertEquals("'a\u2018\u2018b'", psQuote("a\u2018b"))
+        assertEquals("'a\u2019\u2019b'", psQuote("a\u2019b"))
+        assertEquals("'a\u201A\u201Ab'", psQuote("a\u201Ab"))
+        assertEquals("'a\u201B\u201Bb'", psQuote("a\u201Bb"))
+        assertEquals("'plain path 1.2.3'", psQuote("plain path 1.2.3"))
+    }
+
+    @Test fun wireGuardImportHidesTheSourcePathBehindBase64() {
+        // A path with a typographic apostrophe and a space, both of which would otherwise need shaping to live safely in script text.
+        val source = "C:\\Tunnels\\A\u2019B\\My Dir\\office.conf"
+        val script = wireGuardImportScript(wgExe, "office", source)
+        assertFalse(source in script, "the source path must not appear in the script text")
+        val b64 = Regex("FromBase64String\\('([A-Za-z0-9+/=]+)'\\)").findAll(script).toList().single().groupValues[1]
+        assertEquals(source, String(Base64.getDecoder().decode(b64), Charsets.UTF_16LE))
+    }
+
     @Test fun discovery() = runBlocking { val status = parseTailscaleStatus(ts); val seen = mutableSetOf<String>(); val scanner = NetworkScanner { ip,port -> seen += ip; if(port == 8006) listOf(ScanHit(ip,port,true,ScanKind.PVE)) else emptyList() }; val result = findTailnetProxmox(status,scanner).toList().last(); assertEquals(1,result.size); assertEquals(setOf("100.64.0.2"),seen) }
 
     @Test fun failureMessagesNeverCarryKeyMaterial() {

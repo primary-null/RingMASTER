@@ -61,7 +61,7 @@ object SpiceViewer {
         val dir = try { privateDirectory() } catch(t: Throwable) { trace.end(error=t); throw t }
         val file = dir.resolve("console.vv")
         try {
-            if (posix(dir)) Files.createFile(file, PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")))
+            createPrivateFile(file)
             Files.writeString(file, ticket.viewerFile())
             val process = ProcessBuilder(viewer.path, file.toString()).redirectErrorStream(true).redirectInput(ProcessBuilder.Redirect.from(nullDevice())).start()
             val output = StringBuffer()
@@ -85,6 +85,15 @@ object SpiceViewer {
         val probe = Files.createTempDirectory("ringmaster-spice-")
         if (posix(probe)) Files.setPosixFilePermissions(probe, PosixFilePermissions.fromString("rwx------"))
         return probe
+    }
+    /** Creates an empty ticket file restricted to the current user before any secret is written. */
+    internal fun createPrivateFile(file: Path) {
+        if (posix(file)) {
+            Files.createFile(file, PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")))
+        } else {
+            Files.createFile(file)
+            restrictToCurrentUser(file)
+        }
     }
     private fun posix(path: Path) = "posix" in path.fileSystem.supportedFileAttributeViews()
     private fun nullDevice() = File(if (windows) "NUL" else "/dev/null")

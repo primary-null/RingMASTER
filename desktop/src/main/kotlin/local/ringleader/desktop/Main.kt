@@ -186,7 +186,7 @@ private var desktopShortcuts: ((KeyEvent) -> Boolean)? = null
                 else -> false
             }
         } else if(it.type == KeyEventType.KeyDown && it.isCtrlPressed) {
-            val target=when(it.key) { Key.One, Key.Two, Key.Three, Key.Four, Key.Five, Key.Six, Key.Seven, Key.Eight, Key.Nine -> shortcutPage(listOf(Key.One, Key.Two, Key.Three, Key.Four, Key.Five, Key.Six, Key.Seven, Key.Eight, Key.Nine).indexOf(it.key) + 1); else -> null }
+            val target=when(it.key) { Key.One, Key.Two, Key.Three, Key.Four, Key.Five, Key.Six, Key.Seven, Key.Eight, Key.Nine -> pagesFor(host).getOrNull(listOf(Key.One, Key.Two, Key.Three, Key.Four, Key.Five, Key.Six, Key.Seven, Key.Eight, Key.Nine).indexOf(it.key)); else -> null }
             if(it.key==Key.Comma) { settingsOpen = true;true } else if(it.key==Key.F && page=="Fleet") { runCatching { searchFocus.requestFocus() };true } else if(target!=null) { page=target;true } else if(it.key==Key.B && it.isShiftPressed) { Appearance.toggleShowcase();true } else if(it.key==Key.Equals || it.key==Key.Plus || it.key==Key.NumPadAdd) { Appearance.zoom(1);true } else if(it.key==Key.Minus || it.key==Key.NumPadSubtract) { Appearance.zoom(-1);true } else if(it.key==Key.Zero || it.key==Key.NumPad0) { Appearance.chooseScale(null);true } else if(it.key==Key.B) { railToggle++;true } else false
         } else false
     })

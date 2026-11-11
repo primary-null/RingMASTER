@@ -21,11 +21,30 @@ class Iperf3Plugin(private val which: (String) -> String? = ::findExecutable) : 
         ToolInput("executable", "iperf3 path", ToolInputKind.Text, "", "Leave empty to use PATH", required = false),
     )
 
+    /** Resolved iperf3 path the user has approved for this session; remains null until the UI records one. */
+    @Volatile var approvedExecutable: String? = null
+
     override fun available(): ToolAvailability = availableFor(emptyMap())
 
     fun availableFor(values: Map<String, String>): ToolAvailability {
         val exe = resolveIperf(values["executable"].orEmpty(), which)
         return if (exe != null) ToolAvailability(true) else ToolAvailability(false, IPERF_MISSING)
+    }
+
+    /** The argv [run] would execute for [values]. null when the inputs are not valid or iperf is unavailable. */
+    fun previewCommand(values: Map<String, String>): List<String>? {
+        val clean = try { validateToolValues(inputs, values) } catch (_: ToolInputException) { return null }
+        val exe = resolveIperf(clean["executable"].orEmpty(), which) ?: return null
+        return iperfCommand(
+            exe,
+            clean["server"] == "true",
+            clean["host"].orEmpty(),
+            clean.getValue("port").toInt(),
+            clean.getValue("duration").toInt(),
+            clean.getValue("parallel").toInt(),
+            clean["reverse"] == "true",
+            clean["udp"] == "true",
+        )
     }
 
     override suspend fun run(values: Map<String, String>, emit: (ToolEvent) -> Unit): ToolResult {
@@ -34,7 +53,9 @@ class Iperf3Plugin(private val which: (String) -> String? = ::findExecutable) : 
         val host = clean["host"].orEmpty()
         if (!server && host.isEmpty()) return ToolResult(false, "Enter a host.")
         if (!server && !isHostToken(host)) return ToolResult(false, "Host must be a hostname or an IP address.")
-        val exe = resolveIperf(clean["executable"].orEmpty(), which) ?: return ToolResult(false, IPERF_MISSING)
+        val raw = clean["executable"].orEmpty()
+        val exe = resolveIperf(raw, which) ?: return ToolResult(false, IPERF_MISSING)
+        if (raw.isNotBlank() && approvedExecutable != exe) return ToolResult(false, "Confirm this command before running it.")
         val command = iperfCommand(
             exe, server, host, clean.getValue("port").toInt(), clean.getValue("duration").toInt(),
             clean.getValue("parallel").toInt(), clean["reverse"] == "true", clean["udp"] == "true",

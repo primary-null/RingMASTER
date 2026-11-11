@@ -345,6 +345,8 @@ private val ConnectPanelWidth = 520.dp
     var passwordMode by remember { mutableStateOf(false) }
     var fingerprint by remember(scanned) { mutableStateOf("") }
     var kind by remember(scanned) { mutableStateOf(if (scanned?.kind == ScanKind.PDM) PDM_KIND else DIRECT_PVE_KIND) }
+    val pinPrompt = remember(scanned) { ScannedPinPrompt().also { p -> scanned?.fingerprint?.let { p.offer(scanned.origin, it) } } }
+    var pinConfirmShowing by remember(scanned) { mutableStateOf(false) }
     TechPanel(modifier) {
         Column(verticalArrangement = Arrangement.spacedBy(Tech.Space8)) {
             SectionLabel("Connect")
@@ -355,7 +357,7 @@ private val ConnectPanelWidth = 520.dp
             if (kind == DIRECT_PVE_KIND) AuthChoice(passwordMode) { passwordMode = it }
             // Tab order is composition order. These fields stay consecutive:
             // Server address, user or token ID, password or secret, (two-factor code), Trusted certificate SHA-256.
-            CompactDeskField(address, { address = it }, "Server address", identity = true)
+            CompactDeskField(address, { address = it; pinPrompt.addressChanged(it); if (!pinPrompt.pending) pinConfirmShowing = false }, "Server address", identity = true)
             if (passwordMode) {
                 CompactDeskField(user, { user = it.trim() }, "User · user@realm, for example root@pam", identity = true)
                 SecretField(deskState.secretGeneration, "Password") { desk.setManualSecret(it) }
@@ -368,16 +370,38 @@ private val ConnectPanelWidth = 520.dp
             if (scanned != null && address == scanned.origin) {
                 scanned.fingerprint?.let { seen ->
                     Text("Scanned SHA-256: $seen", fontFamily = FontFamily.Monospace, fontSize = Tech.Label, color = Tech.Amber)
-                    Text("Compare with the server's real fingerprint before trusting it. Proxmox: node > System > Certificates.", color = Tech.Muted, fontFamily = Tech.Mono, fontSize = 11.sp, lineHeight = 15.sp)
-                    TechAction("Use scanned fingerprint") { fingerprint = seen }
+                    Text("Compare with the server's real fingerprint before trusting it. Proxmox: node › System › Certificates.", color = Tech.Muted, fontFamily = Tech.Mono, fontSize = 11.sp, lineHeight = 15.sp)
+                    TechAction("Use scanned fingerprint…") { pinPrompt.request(); pinConfirmShowing = true }
                 }
             }
+            if (pinConfirmShowing) ScannedPinConfirmation(
+                address = pinPrompt.address ?: address,
+                fp = pinPrompt.fingerprint ?: scanned?.fingerprint.orEmpty(),
+                onPin = { pinPrompt.confirm()?.let { fingerprint = it }; pinConfirmShowing = false },
+                onCancel = { pinPrompt.cancel(); pinConfirmShowing = false },
+            )
             FlowRow(horizontalArrangement = Arrangement.spacedBy(Tech.Space12), verticalArrangement = Arrangement.spacedBy(Tech.Space8)) {
                 TechAction(if (anyOpen) "Add connection" else "Connect", active = true, enabled = address.isNotBlank() && (if (passwordMode) user else tokenId).isNotBlank() && deskState.manualSecretPresent) {
                     if (desk.connectManual(address, if (passwordMode) user else tokenId, fingerprint, kind, otp = if (passwordMode) otp.ifBlank { null } else null)) onOpenWorkspace()
                 }
                 TechAction("Explore demo") { if (desk.exploreDemo()) onOpenWorkspace() }
             }
+        }
+    }
+}
+
+@Composable private fun ScannedPinConfirmation(address: String, fp: String, onPin: () -> Unit, onCancel: () -> Unit) {
+    TechPanel(Modifier.widthIn(max = 560.dp).fillMaxWidth(), rail = Tech.Amber) {
+        Text("Pin this fingerprint?", fontSize = Tech.Section)
+        Text("A scan cannot verify the server. Whoever answers on this address can present their own certificate.", color = Tech.Muted, fontSize = 13.sp)
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(address, fontFamily = Tech.Mono, fontSize = 12.sp, color = Tech.Ink)
+            Text(fp, fontFamily = Tech.Mono, fontSize = 12.sp, color = Tech.Amber)
+        }
+        Text("Compare with the fingerprint the server itself shows. Proxmox: node › System › Certificates.", color = Tech.Muted, fontFamily = Tech.Mono, fontSize = 11.sp, lineHeight = 15.sp)
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(Tech.Space12), verticalArrangement = Arrangement.spacedBy(Tech.Space8)) {
+            TechAction("Pin this fingerprint", onClick = onPin)
+            TechAction("Cancel", active = true, onClick = onCancel)
         }
     }
 }

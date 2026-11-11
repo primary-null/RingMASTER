@@ -40,13 +40,17 @@ class ToolsSession(private val scope: CoroutineScope) {
     var status by mutableStateOf("Ready")
     var statusBad by mutableStateOf(false); private set
     var revision by mutableStateOf(0); private set
+    /** In the browser without --allow-host-actions this is false; the UI sets it from LocalAppHost. */
+    var hostActions: Boolean = true
     val lines = mutableStateListOf<String>()
     val samples = mutableStateListOf<ToolChartSample>()
     var confirmCommand by mutableStateOf<List<String>?>(null); private set
     private val drafts = mutableStateMapOf<String, androidx.compose.runtime.snapshots.SnapshotStateMap<String, String>>()
-    private val confirmed = mutableSetOf<String>()
+    private val approvals = mutableMapOf<String, PluginApproval>()
     private val badges = mutableStateMapOf<String, ToolAvailability>()
     private var confirmId: String? = null
+    private var confirmValues: Map<String, String>? = null
+    private var confirmManifestCommand: List<String>? = null
     private var job: Job? = null
 
     init { reload() }
@@ -54,7 +58,10 @@ class ToolsSession(private val scope: CoroutineScope) {
     fun reload() {
         if (running) return
         val catalog = loadToolCatalog()
-        catalog.plugins.filterIsInstance<UserToolPlugin>().forEach { it.confirmed = it.id in confirmed }
+        catalog.plugins.filterIsInstance<UserToolPlugin>().forEach { plugin ->
+            val saved = approvals[plugin.id]
+            if (saved != null && saved.command == plugin.manifestCommand) plugin.approval = saved
+        }
         plugins = catalog.plugins
         skipped = catalog.skipped
         badges.clear()
@@ -75,10 +82,16 @@ class ToolsSession(private val scope: CoroutineScope) {
         return map
     }
 
-    fun badge(plugin: ToolPlugin): ToolAvailability = when (plugin) {
-        is Iperf3Plugin -> plugin.availableFor(mapOf("executable" to drafts[plugin.id]?.get("executable").orEmpty()))
-        is WireGuardToolPlugin -> plugin.available()
-        else -> badges[plugin.id] ?: plugin.available()
+    fun badge(plugin: ToolPlugin): ToolAvailability {
+        if (!hostActions) {
+            val values = drafts[plugin.id]?.toMap() ?: emptyMap()
+            browserRefusal(plugin, values)?.let { return ToolAvailability(false, it) }
+        }
+        return when (plugin) {
+            is Iperf3Plugin -> plugin.availableFor(mapOf("executable" to drafts[plugin.id]?.get("executable").orEmpty()))
+            is WireGuardToolPlugin -> plugin.available()
+            else -> badges[plugin.id] ?: plugin.available()
+        }
     }
 
     fun bump() { revision++ }
@@ -91,28 +104,81 @@ class ToolsSession(private val scope: CoroutineScope) {
     fun requestRun(plugin: ToolPlugin) {
         if (running) { stop(); return }
         val values = draft(plugin).toMap()
+        if (!hostActions) {
+            browserRefusal(plugin, values)?.let { status = it; statusBad = true; return }
+        }
         val ready = badge(plugin)
         if (!ready.ready) { status = ready.reason ?: "This tool is not available."; statusBad = true; return }
         try {
             validateToolValues(plugin.inputs, values)
-            if (plugin is UserToolPlugin && !plugin.confirmed) confirmCommand = plugin.commandFor(values).also { confirmId = plugin.id }
+            if (plugin is UserToolPlugin) {
+                val argv = plugin.commandFor(values)
+                val a = plugin.approval
+                if (a == null || a.command != plugin.manifestCommand || a.argv != argv) {
+                    confirmCommand = argv
+                    confirmId = plugin.id
+                    confirmValues = values
+                    confirmManifestCommand = plugin.manifestCommand
+                    return
+                }
+            }
+            if (plugin is Iperf3Plugin) {
+                val raw = values["executable"].orEmpty()
+                if (raw.isNotBlank()) {
+                    val argv = plugin.previewCommand(values)
+                    if (argv != null && plugin.approvedExecutable != argv.first()) {
+                        confirmCommand = argv
+                        confirmId = plugin.id
+                        confirmValues = values
+                        confirmManifestCommand = null
+                        return
+                    }
+                }
+            }
         } catch (e: ToolInputException) {
             status = e.message ?: "Check the inputs."; statusBad = true; return
         }
-        if (plugin is UserToolPlugin && !plugin.confirmed) return
         start(plugin, values)
     }
 
     fun acceptCommand() {
-        val plugin = plugins.filterIsInstance<UserToolPlugin>().firstOrNull { it.id == confirmId } ?: return
-        plugin.confirmed = true
-        confirmed += plugin.id
-        confirmCommand = null
-        confirmId = null
-        start(plugin, draft(plugin).toMap())
+        val plugin = plugins.firstOrNull { it.id == confirmId } ?: return
+        val argv = confirmCommand ?: return
+        val savedValues = confirmValues ?: return
+        if (!hostActions) {
+            browserRefusal(plugin, savedValues)?.let {
+                status = it; statusBad = true
+                confirmCommand = null; confirmId = null; confirmValues = null; confirmManifestCommand = null
+                return
+            }
+        }
+        when (plugin) {
+            is UserToolPlugin -> {
+                val savedCommand = confirmManifestCommand ?: return
+                if (plugin.manifestCommand != savedCommand) {
+                    status = "The plug-in changed. Please try again."
+                    statusBad = true
+                    confirmCommand = null; confirmId = null; confirmValues = null; confirmManifestCommand = null
+                    return
+                }
+                val approval = PluginApproval(savedCommand, argv)
+                plugin.approval = approval
+                approvals[plugin.id] = approval
+                confirmCommand = null; confirmId = null; confirmValues = null; confirmManifestCommand = null
+                start(plugin, savedValues)
+            }
+            is Iperf3Plugin -> {
+                plugin.approvedExecutable = argv.first()
+                confirmCommand = null; confirmId = null; confirmValues = null; confirmManifestCommand = null
+                start(plugin, savedValues)
+            }
+            else -> {
+                confirmCommand = null; confirmId = null; confirmValues = null; confirmManifestCommand = null
+            }
+        }
     }
 
-    fun dismissCommand() { confirmCommand = null; confirmId = null }
+    fun dismissCommand() { confirmCommand = null; confirmId = null; confirmValues = null; confirmManifestCommand = null }
 
     fun stop() { job?.cancel() }
 
@@ -166,6 +232,7 @@ class ToolsSession(private val scope: CoroutineScope) {
 
 @Composable fun ToolsScreen(session: ToolsSession) {
     val web = LocalAppHost.current.web
+    session.hostActions = LocalAppHost.current.hostActions
     LaunchedEffect(Unit) { session.reload() }
     val plugin = session.plugins.firstOrNull { it.id == session.selectedId } ?: session.plugins.firstOrNull()
     Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp)) {

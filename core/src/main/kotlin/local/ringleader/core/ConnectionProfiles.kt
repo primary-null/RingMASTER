@@ -384,8 +384,12 @@ private fun directoryPermissions() = setOf(
 private fun filePermissions() = setOf(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE)
 
 private fun grantUserOnly(path: Path, directory: Boolean) {
-    if (!supportsPosix(path) || !Files.exists(path, LinkOption.NOFOLLOW_LINKS) || Files.isSymbolicLink(path)) return
-    Files.setPosixFilePermissions(path, if (directory) directoryPermissions() else filePermissions())
+    if (!Files.exists(path, LinkOption.NOFOLLOW_LINKS) || Files.isSymbolicLink(path)) return
+    if (supportsPosix(path)) {
+        Files.setPosixFilePermissions(path, if (directory) directoryPermissions() else filePermissions())
+    } else if (!directory) {
+        restrictToCurrentUser(path)
+    }
 }
 
 private fun decodeUtf8(bytes: ByteArray): String = try {

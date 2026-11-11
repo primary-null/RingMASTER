@@ -26,7 +26,7 @@ class WebServer(val options: WebOptions, key: String? = System.getenv("RINGMASTE
     private val active = AtomicInteger()
     private var engine: EmbeddedServer<*, *>? = null
     var port: Int = options.port; private set
-    val origin get() = "${if(options.keystore == null) "http" else "https"}://${if (':' in options.bind) "[${options.bind}]" else options.bind}:$port"
+    val origin get() = options.publicOrigin ?: "${if(options.keystore == null) "http" else "https"}://${if (':' in options.bind) "[${options.bind}]" else options.bind}:$port"
     val loginUrl get() = "$origin/login?key=${java.net.URLEncoder.encode(accessKey, java.nio.charset.StandardCharsets.UTF_8)}"
     fun start(wait: Boolean = false) {
 
@@ -49,22 +49,22 @@ class WebServer(val options: WebOptions, key: String? = System.getenv("RINGMASTE
                     if(tokens.size >= 128) tokens.entries.removeIf { System.currentTimeMillis() - it.value > 1800000 }
                     if(tokens.size >= 128) { call.respond(HttpStatusCode.TooManyRequests); return@get }
                     val token = random(); tokens[token] = System.currentTimeMillis()
-                    call.response.cookies.append(Cookie("ringmaster", token, path = "/", httpOnly = true, secure = options.keystore != null, extensions = mapOf("SameSite" to "Strict")))
+                    call.response.cookies.append(Cookie("ringmaster", token, path = "/", httpOnly = true, secure = options.keystore != null || options.publicOrigin != null, extensions = mapOf("SameSite" to "Strict")))
                     call.respondRedirect("/")
                 }
                 get("/") {
                     call.response.header(HttpHeaders.CacheControl, "no-store")
                     call.respondText(if(valid(call)) WebServer::class.java.getResource("/web/index.html")!!.readText() else "<p>Open the link printed by RingMASTER</p>", ContentType.Text.Html)
                 }
-                intercept(ApplicationCallPipeline.Call) {
-                    if(call.request.path() == "/session" && (!valid(call) || call.request.header(HttpHeaders.Origin) != origin)) {
-                        call.respond(HttpStatusCode.Forbidden); finish()
+                route("/session") {
+                    intercept(ApplicationCallPipeline.Call) {
+                        if (!valid(call) || call.request.header(HttpHeaders.Origin) != origin) { call.respond(HttpStatusCode.Forbidden); finish() }
                     }
-                }
-                webSocket("/session") {
-                    if(active.incrementAndGet() > options.maxSessions) { active.decrementAndGet(); close(CloseReason(CloseReason.Codes.TRY_AGAIN_LATER, "Session limit")); return@webSocket }
-                    val trace = Trace.begin(TraceSource.Web, "Browser client connected", session=true)
-                    try { WebScene().use { it.run(this) } } finally { trace.end(); active.decrementAndGet() }
+                    webSocket {
+                        if(active.incrementAndGet() > options.maxSessions) { active.decrementAndGet(); close(CloseReason(CloseReason.Codes.TRY_AGAIN_LATER, "Session limit")); return@webSocket }
+                        val trace = Trace.begin(TraceSource.Web, "Browser client connected", session=true)
+                        try { WebScene(options.hostActions).use { it.run(this) } } finally { trace.end(); active.decrementAndGet() }
+                    }
                 }
             }
         }

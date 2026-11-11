@@ -27,6 +27,13 @@ class TraceTest {
         )
         cases.forEach { assertFalse("synthetic-token" in Redact.text(it),it.substringBefore('=')) }
     }
+    @Test fun ticketPrefixesAreMaskedAndHostStaysReadable() {
+        assertFalse("synthetic-value" in Redact.text("PVEVNC:demo@pve:synthetic-value"))
+        assertFalse("synthetic-value" in Redact.text("PVESPICEPROXY:demo@pve:synthetic-value"))
+        assertFalse("synthetic-value" in Redact.text("PVNC:demo@pve:synthetic-value"))
+        assertFalse("synthetic-value" in Redact.text("PTERM:demo@pve:synthetic-value"))
+        assertEquals("pve1.example:8006", Redact.text("pve1.example:8006"))
+    }
     @Test fun urlKeepsRoutingAndDropsSensitiveValues() {
         val url=Redact.url("https://example.invalid:8006/api2/json/nodes/demo/vncwebsocket?port=5900&vncticket=synthetic-one&password=synthetic-two&token=synthetic-three&secret=synthetic-four&ticket=synthetic-five")
         assertTrue(url.startsWith("https://example.invalid:8006/api2/json/nodes/demo/vncwebsocket?port=5900"))

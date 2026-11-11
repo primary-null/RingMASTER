@@ -35,6 +35,7 @@ private val hoodTime = DateTimeFormatter.ofPattern("HH:mm:ss.SSS").withZone(Zone
 
 @OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
 @Composable fun UnderTheHoodScreen(state: WorkspaceState) {
+    if (!LocalAppHost.current.traceView) { Text("Not available in the browser"); return }
     val probe = LocalHoodProbe.current
     val window = androidx.compose.ui.awt.LocalAwtWindow.current as? androidx.compose.ui.awt.ComposeWindow
     val clipboard = LocalClipboardManager.current

@@ -3,6 +3,7 @@ package local.ringleader.core
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
+import java.util.Base64
 import kotlinx.serialization.json.*
 
 /**
@@ -64,14 +65,19 @@ internal val wireGuardFailures = mapOf(
  */
 internal fun wireGuardImportScript(exe: String, name: String, source: String): String {
     val store = psQuote(wireGuardStore(exe))
+    // The source path is carried in the script as base64 of its UTF-16LE bytes, never as script text: -Verb RunAs does
+    // not carry the caller's environment, so a quoted string would be the only alternative and would have to be shaped
+    // past every PowerShell quote. One decode into ${'$'}source keeps the real path off the command line.
+    val sourceB64 = Base64.getEncoder().encodeToString(source.toByteArray(Charsets.UTF_16LE))
     return """
         ${'$'}ErrorActionPreference = 'Stop'
         try {
+            ${'$'}source = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('$sourceB64'))
             if (-not (Test-Path -LiteralPath $store -PathType Container)) { exit 4 }
             ${'$'}target = Join-Path $store ${psQuote("$name.conf")}
             if ((Test-Path -LiteralPath ${'$'}target) -or (Test-Path -LiteralPath (${'$'}target + '.dpapi')) -or (Get-Service -Name ${service(name)} -ErrorAction SilentlyContinue)) { exit 3 }
-            if (-not (Test-Path -LiteralPath ${psQuote(source)} -PathType Leaf)) { exit 7 }
-            Copy-Item -LiteralPath ${psQuote(source)} -Destination ${'$'}target
+            if (-not (Test-Path -LiteralPath ${'$'}source -PathType Leaf)) { exit 7 }
+            Copy-Item -LiteralPath ${'$'}source -Destination ${'$'}target
             exit 0
         } catch { exit 9 }
     """.trimIndent()

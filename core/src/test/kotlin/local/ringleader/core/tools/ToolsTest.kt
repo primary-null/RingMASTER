@@ -145,6 +145,54 @@ class ToolsTest {
         assertEquals(0.432, path[0].rttMs)
     }
 
+    @Test fun browserRefusalTable() {
+        val reason = "Not available in the browser without --allow-host-actions."
+        assertNull(browserRefusal(PingPlugin(), emptyMap()))
+        assertNull(browserRefusal(TraceroutePlugin(), emptyMap()))
+        assertNull(browserRefusal(PortCheckPlugin(), emptyMap()))
+        assertNull(browserRefusal(DnsPlugin(), emptyMap()))
+        assertNull(browserRefusal(HttpTlsPlugin(), emptyMap()))
+        assertNull(browserRefusal(WireGuardToolPlugin(), emptyMap()))
+        val iperf = Iperf3Plugin()
+        assertNull(browserRefusal(iperf, emptyMap()))
+        assertNull(browserRefusal(iperf, mapOf("server" to "false", "executable" to "")))
+        assertEquals(reason, browserRefusal(iperf, mapOf("server" to "true")))
+        assertEquals(reason, browserRefusal(iperf, mapOf("executable" to "/usr/bin/iperf3")))
+        assertEquals(reason, browserRefusal(iperf, mapOf("server" to "true", "executable" to "/usr/bin/iperf3")))
+        val user = (readUserPlugin("u.json", """{"id":"u","name":"U","summary":"s","command":["ping"],"inputs":[]}""") as ManifestRead.Ok).plugin
+        assertEquals(reason, browserRefusal(user, emptyMap()))
+    }
+
+    @Test fun iperfCustomPathRequiresApproval() = runBlocking {
+        val a = Files.createTempFile("ringmaster-iperf-a-", "")
+        val b = Files.createTempFile("ringmaster-iperf-b-", "")
+        try {
+            val before = RunningTools.lastCommand
+            val plugin = Iperf3Plugin()
+            val args = mapOf("server" to "false", "host" to "127.0.0.1", "port" to "5201", "duration" to "1", "parallel" to "1", "reverse" to "false", "udp" to "false", "executable" to a.toString())
+            val refused = plugin.run(args) {}
+            assertFalse(refused.ok)
+            assertTrue(refused.summary.contains("Confirm"), refused.summary)
+            assertEquals(before, RunningTools.lastCommand)
+
+            plugin.approvedExecutable = b.toString()
+            val stillRefused = plugin.run(args) {}
+            assertFalse(stillRefused.ok)
+            assertTrue(stillRefused.summary.contains("Confirm"), stillRefused.summary)
+            assertEquals(before, RunningTools.lastCommand)
+        } finally {
+            Files.deleteIfExists(a)
+            Files.deleteIfExists(b)
+        }
+    }
+
+    @Test fun iperfEmptyPathUsesPath() = runBlocking {
+        val plugin = Iperf3Plugin(which = { null })
+        val result = plugin.run(mapOf("server" to "false", "host" to "127.0.0.1", "port" to "5201", "duration" to "1", "parallel" to "1", "reverse" to "false", "udp" to "false", "executable" to "")) {}
+        assertFalse(result.ok)
+        assertTrue(result.summary.contains("iperf3 was not found"), result.summary)
+    }
+
     @Test fun parsesIperfIntervals() {
         val interval = parseIperfLine("[  5]   0.00-1.00   sec  1.25 MBytes  10.5 Mbits/sec")
         assertNotNull(interval)
@@ -291,7 +339,7 @@ class ToolsTest {
         assertFalse(unconfirmed.ok)
         assertTrue(unconfirmed.summary.contains("Confirm"))
         assertEquals(before, RunningTools.lastCommand)
-        plugin.confirmed = true
+        plugin.approval = PluginApproval(plugin.manifestCommand, plugin.commandFor(mapOf("host" to "127.0.0.1", "count" to "1")))
         val ran = plugin.run(mapOf("host" to "127.0.0.1", "count" to "1")) {}
         assertTrue(ran.ok, ran.summary)
         assertFalse(RunningTools.lastCommand.any { it.contains(";") || it.contains("|") || it == "cmd.exe" || it == "sh" })
