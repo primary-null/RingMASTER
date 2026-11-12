@@ -1,12 +1,12 @@
 # RingMASTER
 
-A desktop client for **Proxmox VE** and **Proxmox Datacenter Manager**, for **Windows** and **Linux** (Debian 13, Ubuntu 26.04, Fedora 45 and Arch Linux).
+A desktop app for **Proxmox VE** and **Proxmox Datacenter Manager**, for **Windows** and **Linux** (Debian 13, Ubuntu 26.04, Fedora 45 and Arch Linux).
 
 <p align="center"><img src="design/icon/final/ringmaster-icon.svg" width="160" height="160" alt="The RingMASTER emblem: a ringmaster raising a top hat inside a ring"></p>
 
-Your nodes, guests, consoles and tasks in one native window, with live charts. It asks before it changes anything, and it reports a change as done only when Proxmox says it finished.
+Watch every node and guest with live charts, open their consoles, and start, stop or snapshot them, without opening the Proxmox web interface. RingMASTER asks you to confirm each change, and it tells you an action worked only after the task on the server has finished.
 
-![Fleet overview: guests grouped by node, with live CPU, memory and network, and the inspector for the selected guest](docs/images/fleet.png)
+![Fleet overview with live sparklines for every guest and the inspector open on a container](docs/images/fleet.png)
 
 <sub>All pictures use the built-in demo mode or invented sample data.</sub>
 
@@ -22,7 +22,7 @@ Get the latest version from the [Releases page](https://github.com/primary-null/
 | Fedora 45, x86_64 | `ringmaster-<version>-fedora-45-x86_64.rpm` |
 | Arch Linux, x86_64 | `ringmaster-<version>-arch-x86_64.pkg.tar.zst` |
 
-Every package includes its own Java runtime, so there is nothing else to install. Windows 10 may work but is not tested. When a new version is out, RingMASTER can tell you (Settings > Updates) and open this page. Install the new package the same way.
+Every package includes its own Java runtime, so there is nothing else to install. Windows 10 may work but is not tested. To upgrade, install the newer package the same way. RingMASTER can tell you when one is out (Settings > Updates).
 
 ### Windows
 
@@ -41,7 +41,7 @@ sudo apt install ./ringmaster-<version>-debian-13-amd64.deb       # Debian 13
 sudo apt install ./ringmaster-<version>-ubuntu-26.04-amd64.deb    # Ubuntu 26.04
 ```
 
-Each package is built on its own distribution, because the two name some libraries differently. RingMASTER appears in the application menu under System, or run `/opt/ringmaster/bin/ringmaster`. Remove it with `sudo apt remove ringmaster`.
+The two distributions name some libraries differently, so each has its own package. RingMASTER appears in the application menu under System, or run `/opt/ringmaster/bin/ringmaster`. Remove it with `sudo apt remove ringmaster`.
 
 Optional: `virt-viewer` (SPICE consoles), BlueZ (Bluetooth scans), `iperf3` (iPerf3 tests), and the Tailscale or WireGuard tools (VPN page).
 
@@ -51,7 +51,7 @@ Optional: `virt-viewer` (SPICE consoles), BlueZ (Bluetooth scans), `iperf3` (iPe
 sudo dnf install ./ringmaster-<version>-fedora-45-x86_64.rpm
 ```
 
-The package is not GPG-signed, so check it against `SHA256SUMS` first (see [Checking a download](#checking-a-download)). This is for Fedora Workstation or Server 45; rpm-ostree systems such as Silverblue are not supported. RingMASTER appears under System, or run `/opt/ringmaster/bin/ringmaster`. Remove it with `sudo dnf remove ringmaster`. GNOME on Wayland has not been checked yet; the window runs through XWayland.
+The package is for Fedora Workstation or Server 45; rpm-ostree systems such as Silverblue are not supported. It is not GPG-signed, so check it against `SHA256SUMS` before you install it (see [Checking a download](#checking-a-download)). RingMASTER appears under System, or run `/opt/ringmaster/bin/ringmaster`. Remove it with `sudo dnf remove ringmaster`. GNOME on Wayland has not been checked yet; the window runs through XWayland.
 
 Optional: `virt-viewer`, `bluez`, `iperf3`, `tailscale`, `wireguard-tools`.
 
@@ -61,7 +61,7 @@ Optional: `virt-viewer`, `bluez`, `iperf3`, `tailscale`, `wireguard-tools`.
 sudo pacman -U ./ringmaster-<version>-arch-x86_64.pkg.tar.zst
 ```
 
-RingMASTER appears under System, or run `ringmaster`. Remove it with `sudo pacman -R ringmaster`. Arch is a rolling distribution: if RingMASTER stops starting after a system update, a library it uses has probably changed. Install the newest release, or build the package yourself (see [Building from source](#building-from-source)). The package is for Arch Linux itself; derivatives such as Manjaro are not supported, and the update check does not offer them a package.
+RingMASTER appears under System, or run `ringmaster`. Remove it with `sudo pacman -R ringmaster`. The package is for Arch Linux itself; derivatives such as Manjaro are not supported, and the update check does not offer them a package. Arch is a rolling distribution: if RingMASTER stops starting after a system update, a library it uses has probably changed. Install the newest release, or build the package yourself (see [Building from source](#building-from-source)).
 
 Optional: `virt-viewer`, `bluez`, `bluez-utils`, `gtk3` (file dialogs), `iperf3`, `tailscale`, `wireguard-tools`.
 
@@ -79,87 +79,98 @@ Get-FileHash .\RingMASTER-<version>.msi -Algorithm SHA256
 sha256sum -c SHA256SUMS --ignore-missing
 ```
 
-Release files are built by GitHub Actions from the tagged source, never on a personal computer, and GitHub keeps a signed record of each build. With the [GitHub CLI](https://cli.github.com/) you can check that a file came from this repository's workflow:
+Release files are built by GitHub Actions from the tagged source, never on a personal computer, and GitHub keeps a signed record of each build. With the [GitHub CLI](https://cli.github.com/) you can check that a file came from this repository's workflow. The same command works for every release file:
 
 ```sh
 gh attestation verify RingMASTER-<version>.msi --repo primary-null/RingMASTER
 ```
 
-The same command works for every release file.
-
 ## What it does
 
 **Connect**
-- Saved connections to Proxmox VE and Proxmox Datacenter Manager, with an API token or a password, including TOTP and recovery codes for two-factor accounts.
-- Secrets are never written to disk by RingMASTER: each connection asks for its secret when it opens.
-- Remember on this computer, if you choose it for a saved connection: your operating system's password vault keeps the secret (Windows Credential Manager, or the Secret Service on Linux, such as GNOME Keyring or KeePassXC), and only after that sign-in has worked. It is off until you tick it, and there is no file fallback: with no vault you type the secret as before. Forget, changing the server or user, deleting the connection, or Clear everything removes it. Programs you run under the same account can read what the vault holds.
-- Quick sign-in: choosing Password fills in root@pam, and a name without a realm signs in as name@pam. Picking a saved connection puts the cursor in the password field and Enter connects. Password managers with auto-type can match the window title, which names the connection while its sign-in form is open.
+- Saved connections to Proxmox VE and Proxmox Datacenter Manager. Sign in with an API token or a password, with a TOTP or recovery code on two-factor accounts.
+- RingMASTER never writes a secret to its own files. Each connection asks for its secret when it opens, unless you tick **Remember on this computer**. Then your operating system's password vault keeps it: Windows Credential Manager, or the Secret Service on Linux (such as GNOME Keyring or KeePassXC). The secret is stored only after a sign-in with it has worked. There is no file fallback: without a vault you type the secret each time. Forget removes it, and so do deleting the connection, changing its server, user, token ID or certificate pin, and Clear everything. Other programs you run under the same account can read what the vault holds.
+- Quicker sign-in: choosing Password fills in root@pam, and a user without a realm signs in as name@pam. Choosing a saved connection puts the cursor in the password field, so Enter connects. While a connection's sign-in form is open, the window title names it, so a password manager's auto-type can match it.
 - Normal TLS validation, or a SHA-256 certificate pin you enter. There is no trust-on-first-use and no switch to ignore certificate errors.
-- Up to six connections open side by side, each with its own live data, tasks and secret.
+- Up to six connections open at once, each with its own live data, tasks and secret.
 - A demo mode with clearly labelled sample data, to look around without a server.
 
-**Fleet**
-- Guests grouped by node (or by PDM remote, then node), with search, filters, live CPU, memory, network and disk, and sparklines. Refreshes every 5 s, 10 s, 30 s or 2 min, pauses while minimised and backs off on errors.
-- History charts for nodes and guests, from an hour to a year: drag to zoom, a shared crosshair, CSV export.
-- Hover any live chart or gauge to read the value and the time. Click it to open it large over the page, with live samples or server history from an hour to a year; Esc or a click outside closes it.
-- Guest pages: summary, hardware, snapshots (create with RAM, roll back, delete), backups, Bluetooth, console and actions.
-- Power actions (start, shut down, reboot, stop, reset, suspend, resume). One confirmation names the server, node, guest and action, and the task is followed to its final status.
-- Node tools: services, the system log with follow, and available package updates (read-only). A storage page with usage and contents.
-- Permissions: what the signed-in account may do, feature by feature, and which privilege each needs.
-- Pins: keep a guest, one of its tabs, or a web page it serves in the sidebar, with a live dot for the guest's state.
-- Tags show state at a glance: template, HA, lock, protected backup, unplugged network card, firewall, shared storage.
+![The connection desk with a saved connection selected and the Remember on this computer option](docs/images/sign-in.png)
 
-![Guest summary with gauges and history charts for CPU, memory, network and disk](docs/images/guest-summary-debian.png)
-*A guest's summary and history charts, on Debian 13.*
+**Fleet**
+- Guests grouped by node (or by PDM remote, then node), with search and filters, and live CPU, memory, network and disk with sparklines. The view refreshes every 5 s, 10 s, 30 s or 2 min, pauses while the window is minimised, and backs off after errors.
+- History charts for nodes and guests, from an hour to a year, with drag to zoom, a shared crosshair and CSV export.
+- Hover any live chart or gauge to read its value and time. Click it to open it large over the page, with live samples and, for nodes and guests, server history from an hour to a year. Esc or a click outside closes it.
+- Guest pages: summary, hardware, snapshots (create with RAM, roll back, delete), backups, Bluetooth, console and actions.
+- Power actions: start, shut down, reboot, stop, reset, suspend and resume. The confirmation names the server, node, guest and action.
+- Node tools: services, the system log with follow, and available package updates (read-only). A storage page with usage and contents.
+- Permissions: what the signed-in account may do, feature by feature, and which privilege each feature needs.
+- Pins: keep a guest, one of its tabs, or a web page it serves in the sidebar, with a live dot for the guest's state.
+- Tags mark templates, HA, locks, protected backups, unplugged network cards, firewalls and shared storage.
+
+![A virtual machine's summary with CPU and memory gauges and an hour of history charts](docs/images/guest-summary.png)
+
+![Hovering the CPU chart shows each sample's value and time; a click opens the chart in a large lens](docs/images/chart-lens.gif)
 
 **Consoles**
-- In-app VNC console for VMs, and in-app terminals for containers, nodes and serial ports.
-- A guest list beside the console, with each guest's last screen, to click through consoles; Ctrl+Alt+PageUp and Ctrl+Alt+PageDown move through it. The keyboard-captured note fades after a moment and a toolbar chip shows where keys go.
-- Immersive console: Ctrl+Alt+Enter or F11 fills the screen with the guest and hides the rest of the app; the console bar returns when the pointer rests at the top edge.
-- A console you leave stays connected, paused, for a keep time you choose (Off to 1 hour, 10 minutes by default; at most 4 per connection). Switching back shows the live picture at once, without reconnecting.
-- SPICE through remote-viewer for VMs with a SPICE display.
+- An in-app VNC console for VMs, and in-app terminals for containers, nodes and serial ports. VMs with a SPICE display open in remote-viewer.
+- A list of guests beside the console, each with its last screen, so you can click from one console to the next. Ctrl+Alt+PageUp and Ctrl+Alt+PageDown do the same from the keyboard. When the console takes the keyboard, a short note says so and fades, and a toolbar chip keeps showing where your keys go.
+- Immersive console: Ctrl+Alt+Enter or F11 fills the screen with the guest and hides the rest of the app. The console bar comes back when the pointer rests at the top edge.
+- A console you leave stays connected, paused, for a time you choose: Off, 5, 10 or 30 minutes, or 1 hour (10 minutes by default), at most 4 per connection. Going back shows the live picture at once, without reconnecting.
+
+![The console page with the guest list beside a running console; another guest's console is kept open](docs/images/console.png)
 
 **Activity**
-- The cluster's tasks with outcome counts, and a live task log you can follow, copy and save. A task that ends with warnings counts as done and is marked amber.
+- The cluster's tasks with counts by outcome, and a live task log you can follow, copy and save. A task that ends with warnings counts as succeeded and is marked amber.
 
-![Recent tasks with running, succeeded and failed counts](docs/images/activity.png)
+![Recent activity listing sample tasks with status, start time in UTC and duration](docs/images/activity.png)
 
 **Network and devices**
-- A scan of your private networks for Proxmox VE, Backup Server and Datacenter Manager, Pi-hole, AdGuard Home, Home Assistant and other web services. It sends no credentials. Certificates are shown for you to compare, never trusted automatically.
+- A scan of your private networks that finds Proxmox VE, Backup Server and Datacenter Manager, Pi-hole, AdGuard Home, Home Assistant and other web services. It sends no credentials, and it shows each certificate for you to compare rather than trusting it.
 - Network tools: ping, traceroute, port check, DNS, HTTP/TLS, iPerf3 and WireGuard, plus [your own tools](docs/plugins/README.md) described in small JSON files.
 - VPN: Tailscale and WireGuard status, up and down, exit node, and WireGuard import.
 - Bluetooth: a live scan on this computer (Windows, or BlueZ on Linux) and inside a VM through the guest agent.
 
-![A network scan sweeping a /24 and finding Proxmox servers and other services](docs/images/scan.gif)
+![A network scan sweeping a /24: Proxmox servers and other services appear as the sweep reaches their addresses](docs/images/scan.gif)
 
-![Network tools: ping with a live latency chart, on Debian 13](docs/images/network-tools-debian.png)
-*Network tools on Debian 13.*
+![Network tools after a ping, with the latency chart and the ping output](docs/images/network-tools.png)
 
 **The app**
-- Its own dark window frame, which on Windows snaps like any other window (Snap Layouts, screen edges, Win+Arrow); Light, Dark and Pitch Black themes (Pitch Black is true black for OLED screens), which crossfade when you switch; custom backgrounds, an interface size for each display, and Reduce motion (which follows the operating system unless you choose).
+- Its own window frame in place of the system title bar, in the colours of the theme you choose. On Windows it snaps like any other window: Snap Layouts, screen edges and Win+Arrow.
+- Dark, Pitch Black (true black for OLED screens) and Light themes, or follow the system. Switching crossfades the whole window. Custom backgrounds, an interface size for each display, and Reduce motion, which follows the operating system unless you set it.
 - Under the Hood: a live trace of every API call, socket, process, refresh and task poll, with latency, counts per source and the slowest and failed operations. Request bodies and secrets are never recorded.
-- Browser mode: started with `--web`, RingMASTER serves itself to a browser on this computer only, unless you allow remote access. Pass `--allow-host-actions` to let the browser run tools that act on the server host (JSON plug-ins, iperf's server and custom-path modes, VPN changes); without it the browser stays read-only for those. Pass `--public-origin` with an `https://` address when a reverse proxy or tunnel terminates TLS in front of the server. A network address needs `--allow-remote` and TLS: either `--tls-keystore` or `--public-origin`. `--bind 0.0.0.0` and `--bind ::` are accepted only with `--public-origin`. Each login link works once; press Enter in the terminal (or New link in Settings) for another. A fixed `RINGMASTER_WEB_KEY` of 24 or more characters can be reused and is never printed. Sessions end after 30 minutes idle or 12 hours, and the page has a Sign out button.
+- Browser mode: start RingMASTER with `--web` and it serves itself to a browser on this computer. Each login link works once; press Enter in the terminal (or New link in Settings) for another. A fixed `RINGMASTER_WEB_KEY` of 24 or more characters can be reused and is never printed. Sessions end after 30 minutes idle or 12 hours, and the page has a Sign out button.
+  - To serve a network address, add `--allow-remote` and TLS: either `--tls-keystore`, or `--public-origin` with the `https://` address of a reverse proxy or tunnel that terminates TLS in front of RingMASTER. `--bind 0.0.0.0` and `--bind ::` are accepted only with `--public-origin`.
+  - Tools that act on the computer running RingMASTER (JSON plug-ins, iperf's server and custom-path modes, VPN changes) stay read-only in the browser unless you pass `--allow-host-actions`.
 - Showcase blur for screenshots (Ctrl+Shift+B; hold Alt to peek).
-- Keyboard: Ctrl 1-9 for pages, Ctrl , for settings, Ctrl B for the sidebar, Ctrl F to search, F5 to refresh.
+- Keyboard: Ctrl 1-9 for pages, Ctrl , for settings, Ctrl B for the sidebar, Ctrl F to search the fleet, F5 to refresh, and Ctrl +, Ctrl - and Ctrl 0 for the interface size.
 
-![Under the Hood: the live operation stream, engine counters and latency](docs/images/under-the-hood-debian.png)
-*Under the Hood on Debian 13.*
+![The fleet overview fading smoothly from the Dark theme to Pitch Black, then to Light, and back to Dark](docs/images/theme.gif)
 
-**Not yet:** saved secrets, guest editing, backup and restore, node actions, storage changes, firewall, SDN, notifications, the scheduler, a file manager, and installing updates in place.
+![The Settings sheet over the fleet, showing the theme choices](docs/images/settings.png)
+
+![Under the Hood showing a stream of synthetic API calls, latency bands and the slowest requests](docs/images/under-the-hood.png)
+
+**Not yet:** guest editing, creating or restoring backups, node actions, storage changes, firewall, SDN, notifications, the scheduler, a file manager, and installing updates in place.
 
 ## Privacy and network use
 
 - No telemetry, no analytics and no account.
 - RingMASTER connects only to the servers you add, the networks you scan and the hosts you test.
-- Update checks are optional and it asks before the first one. A check downloads `ringmaster-update.json` and its signature from this repository's latest release: two HTTPS requests with `User-Agent: RingMASTER/<version>` and nothing about you or your servers. It offers only releases signed with the project's key, never offers a downgrade, and opens the download page rather than installing anything. Set `RINGMASTER_DISABLE_UPDATES=1` to turn checks off entirely.
-- The console does not download a browser engine. The VNC console is a client in the app. An older Chromium engine download, if one is still in the cache, is left alone.
-- Settings live in `~/.config/ringmaster` (Windows: `%USERPROFILE%\.config\ringmaster`) and the cache in `~/.cache/ring-leader` (Windows: `%USERPROFILE%\.cache\ring-leader`). Settings > About > Clear everything removes saved connections, appearance, window and update preferences, configuration backups, and a leftover console browser profile if one is present. It keeps your tool plugins folder and the rest of the cache, including an older Chromium engine download. Nothing on any server is changed. The settings folder is backed up whenever the version changes (three copies kept).
+- Update checks are optional, and RingMASTER asks before the first one. A check downloads `ringmaster-update.json` and its signature from this repository's latest release: two HTTPS requests with `User-Agent: RingMASTER/<version>` and nothing about you or your servers. It offers only releases signed with the project's key, never offers a downgrade, and opens the download page rather than installing anything. Set `RINGMASTER_DISABLE_UPDATES=1` to turn checks off entirely.
+- The consoles are part of the app, so RingMASTER does not download a browser engine. An older Chromium engine download, if one is still in the cache, is left alone.
+- What RingMASTER keeps stays on this computer: settings and a cache in your home folder, and remembered secrets in your password vault. [Removing RingMASTER](#removing-ringmaster) says where.
 
 ## Removing RingMASTER
 
-Uninstalling the app leaves the settings and cache folders in place. Remove `~/.config/ringmaster` and `~/.cache/ring-leader` yourself if you want them gone (on Windows, `%USERPROFILE%\.config\ringmaster` and `%USERPROFILE%\.cache\ring-leader`).
+Uninstalling the app leaves its data in place:
 
-Remembered secrets live in your password vault, not in those folders. Use Clear everything (Settings, About) before uninstalling, or delete the entries named `RingMASTER/...` in the vault.
+- Settings: `~/.config/ringmaster` (Windows: `%USERPROFILE%\.config\ringmaster`). The folder is backed up whenever the version changes, and the three newest copies are kept.
+- Cache: `~/.cache/ring-leader` (Windows: `%USERPROFILE%\.cache\ring-leader`).
+- If `XDG_CONFIG_HOME` or `XDG_CACHE_HOME` is set, the matching folder is under it instead.
+- Remembered secrets: in your password vault, not in those folders. Windows Credential Manager lists them as `RingMASTER/...`; in a Linux vault their labels start with `RingMASTER:`.
+
+Before uninstalling, use Settings > About > Clear everything. It removes saved connections, remembered secrets, appearance, window, refresh and update preferences, configuration backups, and a leftover console browser profile if one is present, then RingMASTER quits. It keeps your tool plugins folder and the rest of the cache, and nothing on any server is changed. Delete the two folders yourself if you want them gone too.
 
 ## Building from source
 
@@ -173,7 +184,7 @@ Requires JDK 21.
 ./gradlew :desktop:packageRpm         # .rpm for Fedora (build on Fedora)
 ```
 
-On Arch Linux, wrap the app image with the in-tree PKGBUILD:
+Build each `.deb` or `.rpm` on the distribution it is for. On Arch Linux, wrap the app image with the in-tree PKGBUILD:
 
 ```sh
 ./gradlew :desktop:createDistributable
@@ -183,7 +194,7 @@ cp ../../LICENSE ../../NOTICE ../../desktop/icons/ringmaster.png .
 RINGMASTER_VERSION=<version> makepkg -si    # run as your user, not root; -i installs the result
 ```
 
-On Windows, the Bluetooth helper in `native/ringmaster-bt` (Rust) is built when `cargo` is installed. Without it, RingMASTER uses a PowerShell scanner instead. Build each `.deb` or `.rpm` on the distribution it is for.
+On Windows, the Bluetooth helper in `native/ringmaster-bt` (Rust) is built when `cargo` is installed. Without it, RingMASTER uses a PowerShell scanner instead.
 
 How releases and the signed update feed are made: [RELEASING.md](RELEASING.md).
 
