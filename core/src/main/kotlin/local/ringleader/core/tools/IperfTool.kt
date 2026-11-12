@@ -98,7 +98,7 @@ class Iperf3Plugin(private val which: (String) -> String? = ::findExecutable) : 
     }
 }
 
-internal const val IPERF_MISSING = "iperf3 was not found. Install it with winget install iperf3 or apt install iperf3."
+internal const val IPERF_MISSING = "iperf3 was not found. Install the iperf3 package, then try again."
 
 internal fun resolveIperf(configured: String, which: (String) -> String?): String? {
     val path = configured.trim()

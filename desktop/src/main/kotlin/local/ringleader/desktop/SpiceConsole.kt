@@ -50,7 +50,7 @@ object SpiceViewer {
     fun installHint(): String = when {
         windows -> "remote-viewer was not found. Install virt-viewer for Windows (virt-manager.org), then try again."
         mac -> "remote-viewer was not found. Install it with: brew install virt-viewer"
-        else -> "remote-viewer was not found. Install it with: sudo apt install virt-viewer"
+        else -> "remote-viewer was not found. Install the virt-viewer package, then try again."
     }
 
     /** Starts remote-viewer and waits briefly so an immediate failure can be reported. Returns once the viewer is up. */

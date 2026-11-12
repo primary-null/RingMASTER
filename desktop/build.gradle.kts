@@ -66,17 +66,19 @@ compose.desktop {
     application {
         mainClass = "local.ringleader.desktop.MainKt"
         nativeDistributions {
-            targetFormats(TargetFormat.Deb, TargetFormat.Msi)
+            targetFormats(TargetFormat.Deb, TargetFormat.Rpm, TargetFormat.Msi)
             appResourcesRootDir.set(project.layout.projectDirectory.dir("resources"))
             packageName = "ringmaster"
             packageVersion = project.version.toString()
             description = "RingMASTER desktop infrastructure client"
             vendor = "RingMASTER"
+            licenseFile.set(rootProject.file("LICENSE"))
             modules("java.net.http", "jdk.crypto.ec", "jdk.unsupported", "java.management", "java.naming")
             linux {
                 shortcut = true
                 menuGroup = "System"
                 appCategory = "System"
+                rpmLicenseType = "Apache-2.0"
                 iconFile.set(project.file("icons/ringmaster.png"))
             }
             windows {

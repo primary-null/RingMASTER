@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=RingMASTER
+Comment=RingMASTER desktop infrastructure client
+Exec=/opt/ringmaster/bin/ringmaster
+Icon=ringmaster
+Terminal=false
+Type=Application
+Categories=System;
+StartupWMClass=ringmaster

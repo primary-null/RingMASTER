@@ -1,6 +1,6 @@
 # RingMASTER
 
-A desktop client for **Proxmox VE** and **Proxmox Datacenter Manager**, for **Windows** and **Linux** (Debian 13 and Ubuntu 26.04).
+A desktop client for **Proxmox VE** and **Proxmox Datacenter Manager**, for **Windows** and **Linux** (Debian 13, Ubuntu 26.04, Fedora 45 and Arch Linux).
 
 Your nodes, guests, consoles and tasks in one native window, with live charts. It asks before it changes anything, and it reports a change as done only when Proxmox says it finished.
 
@@ -17,8 +17,10 @@ Get the latest version from the [Releases page](https://github.com/primary-null/
 | Windows 11, 64-bit | `RingMASTER-<version>.msi` |
 | Debian 13 (trixie), amd64 | `ringmaster-<version>-debian-13-amd64.deb` |
 | Ubuntu 26.04 LTS, amd64 | `ringmaster-<version>-ubuntu-26.04-amd64.deb` |
+| Fedora 45, x86_64 | `ringmaster-<version>-fedora-45-x86_64.rpm` |
+| Arch Linux, x86_64 | `ringmaster-<version>-arch-x86_64.pkg.tar.zst` |
 
-Every package includes its own Java runtime, so there is nothing else to install. Windows 10 may work but is not tested.
+Every package includes its own Java runtime, so there is nothing else to install. Windows 10 may work but is not tested. When a new version is out, RingMASTER can tell you (Settings > Updates) and open this page. Install the new package the same way.
 
 ### Windows
 
@@ -39,7 +41,27 @@ sudo apt install ./ringmaster-<version>-ubuntu-26.04-amd64.deb    # Ubuntu 26.04
 
 Each package is built on its own distribution, because the two name some libraries differently. RingMASTER appears in the application menu under System, or run `/opt/ringmaster/bin/ringmaster`. Remove it with `sudo apt remove ringmaster`.
 
-Optional: `virt-viewer` (for SPICE consoles), BlueZ (for Bluetooth scans), and the Tailscale or WireGuard tools (for the VPN page).
+Optional: `virt-viewer` (SPICE consoles), BlueZ (Bluetooth scans), `iperf3` (iPerf3 tests), and the Tailscale or WireGuard tools (VPN page).
+
+### Fedora 45
+
+```sh
+sudo dnf install ./ringmaster-<version>-fedora-45-x86_64.rpm
+```
+
+The package is not GPG-signed, so check it against `SHA256SUMS` first (see [Checking a download](#checking-a-download)). This is for Fedora Workstation or Server 45; rpm-ostree systems such as Silverblue are not supported. RingMASTER appears under System, or run `/opt/ringmaster/bin/ringmaster`. Remove it with `sudo dnf remove ringmaster`. GNOME on Wayland has not been checked yet; the window runs through XWayland.
+
+Optional: `virt-viewer`, `bluez`, `iperf3`, `tailscale`, `wireguard-tools`.
+
+### Arch Linux
+
+```sh
+sudo pacman -U ./ringmaster-<version>-arch-x86_64.pkg.tar.zst
+```
+
+RingMASTER appears under System, or run `ringmaster`. Remove it with `sudo pacman -R ringmaster`. Arch is a rolling distribution: if RingMASTER stops starting after a system update, a library it uses has probably changed. Install the newest release, or build the package yourself (see [Building from source](#building-from-source)). The package is for Arch Linux itself; derivatives such as Manjaro are not supported, and the update check does not offer them a package.
+
+Optional: `virt-viewer`, `bluez`, `bluez-utils`, `gtk3` (file dialogs), `iperf3`, `tailscale`, `wireguard-tools`.
 
 ### Checking a download
 
@@ -60,6 +82,8 @@ Release files are built by GitHub Actions from the tagged source, never on a per
 ```sh
 gh attestation verify RingMASTER-<version>.msi --repo primary-null/RingMASTER
 ```
+
+The same command works for every release file.
 
 ## What it does
 
@@ -132,9 +156,20 @@ Requires JDK 21.
 ./gradlew :desktop:run                # run from source
 ./gradlew :desktop:packageMsi         # Windows installer
 ./gradlew :desktop:packageDeb         # .deb for the distribution you build on
+./gradlew :desktop:packageRpm         # .rpm for Fedora (build on Fedora)
 ```
 
-On Windows, the Bluetooth helper in `native/ringmaster-bt` (Rust) is built when `cargo` is installed. Without it, RingMASTER uses a PowerShell scanner instead. Build each `.deb` on the distribution it is for.
+On Arch Linux, wrap the app image with the in-tree PKGBUILD:
+
+```sh
+./gradlew :desktop:createDistributable
+cd packaging/arch
+tar -C ../../desktop/build/compose/binaries/main/app -czf ringmaster-app.tar.gz ringmaster
+cp ../../LICENSE ../../NOTICE ../../desktop/icons/ringmaster.png .
+RINGMASTER_VERSION=<version> makepkg -si    # run as your user, not root; -i installs the result
+```
+
+On Windows, the Bluetooth helper in `native/ringmaster-bt` (Rust) is built when `cargo` is installed. Without it, RingMASTER uses a PowerShell scanner instead. Build each `.deb` or `.rpm` on the distribution it is for.
 
 How releases and the signed update feed are made: [RELEASING.md](RELEASING.md).
 

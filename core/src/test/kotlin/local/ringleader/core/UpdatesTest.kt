@@ -38,7 +38,8 @@ class UpdatesTest {
             json.replace("https://example.com", "https://user:pass@example.com"), json.replace("https://example.com", "https:///nohost"),
             json.replace("a".repeat(64),"a".repeat(63)), json.replace("a".repeat(64),"z".repeat(64)),
             json.replace("1048576","1048575"), json.replace("1048576","1073741825"),
-            json.replace("windows-x64-msi","unknown"), json.replace("Plain notes", "bad\\tnotes"), json.replace("Plain notes", "bad\\u0007notes"), json.replace("stable", "stable\\n"),
+            json.replace("windows-x64-msi","Bad Id!"), json.replace("windows-x64-msi","a..b"), json.replace("windows-x64-msi","a-."),
+            json.replace("Plain notes", "bad\\tnotes"), json.replace("Plain notes", "bad\\u0007notes"), json.replace("stable", "stable\\n"),
             json.replace("Plain notes", "x".repeat(8001)), json.replace("0.22.0","v0.22.0"),
             json.replace("2026-11-10T00:00:00Z","yesterday"),
             json.replace("\"assets\"", "\"notesUrl\":\"http://example.com\",\"assets\""),
@@ -48,16 +49,37 @@ class UpdatesTest {
             json.replace("\"assets\"", "\"extra\":\"value\\u007f\",\"assets\""))
         bad.forEachIndexed { i,s -> assertFails("case $i") { parseUpdateManifest(s.toByteArray()) } }
         assertFails { parseUpdateManifest(ByteArray(MANIFEST_LIMIT+1) { 32 }) }
+        fun withAsset(platform: String, sha: String = "b".repeat(64), url: String = "https://example.com/b.bin", size: Long = 1_048_576L) =
+            json.replace("]}", """,{"platform":"$platform","url":"$url","sha256":"$sha","size":$size}]}""")
+        val skipped = parseUpdateManifest(withAsset("future-99-x86_64-rpm").toByteArray())
+        assertEquals(listOf("windows-x64-msi"), skipped.assets.map { it.platform })
+        assertEquals(listOf("windows-x64-msi"), parseUpdateManifest(withAsset("x86_64-flatpak").toByteArray()).assets.map { it.platform })
+        assertFails { parseUpdateManifest(withAsset("a".repeat(65)).toByteArray()) }
+        assertEquals(2, parseUpdateManifest(withAsset("fedora-45-x86_64-rpm").toByteArray()).assets.size)
+        assertFails { parseUpdateManifest(withAsset("future-99-x86_64-rpm", "b".repeat(63)).toByteArray()) }
+        assertFails { parseUpdateManifest(withAsset("windows-x64-msi").toByteArray()) }
+        val unknown = withAsset("future-99-x86_64-rpm")
+        assertFails { parseUpdateManifest(unknown.replace("]}", """,{"platform":"future-99-x86_64-rpm","url":"https://example.com/c.bin","sha256":"${"c".repeat(64)}","size":1048576}]}""").toByteArray()) }
+        assertFails { parseUpdateManifest(withAsset("future-99-x86_64-rpm", url = "http://example.com/b.bin").toByteArray()) }
+        assertFails { parseUpdateManifest(withAsset("future-99-x86_64-rpm", size = 1_048_575L).toByteArray()) }
+        assertFails { parseUpdateManifest(json.replace("]}", """,{"platform":"future-99-x86_64-rpm","url":"https://example.com/b.bin","sha256":"${"b".repeat(64)}"}]}""").toByteArray()) }
+        assertTrue(parseUpdateManifest(json.replace("windows-x64-msi","future-99-x86_64-rpm").toByteArray()).assets.isEmpty())
     }
     @Test fun versionsAndPlatforms() {
         assertEquals(0,compareUpdateVersions("1.2.3.99","1.2.3.0"))
         assertTrue(compareUpdateVersions("0.22.0","0.21.99") > 0)
         assertTrue(compareUpdateVersions("999999999999.0","2") > 0)
-        assertEquals("windows-x64-msi",updatePlatform("Windows 11",""))
-        assertEquals("debian-13-amd64-deb",updatePlatform("Linux","ID=debian\nVERSION_ID=\"13\""))
-        assertEquals("ubuntu-26.04-amd64-deb",updatePlatform("Linux","ID=ubuntu\nVERSION_ID=26.04"))
-        assertNull(updatePlatform("Linux","ID=ubuntu\nVERSION_ID=24.04"))
-        assertNull(updatePlatform("Mac OS X",""))
+        assertEquals("windows-x64-msi",updatePlatform("Windows 11","", "amd64"))
+        assertEquals("debian-13-amd64-deb",updatePlatform("Linux","ID=debian\nVERSION_ID=\"13\"", "amd64"))
+        assertEquals("ubuntu-26.04-amd64-deb",updatePlatform("Linux","ID=ubuntu\nVERSION_ID=26.04", "x86_64"))
+        assertEquals("fedora-45-x86_64-rpm",updatePlatform("Linux","ID=fedora\nVERSION_ID=45", "amd64"))
+        assertEquals("arch-x86_64-pkg",updatePlatform("Linux","ID=arch\nBUILD_ID=rolling", "x86_64"))
+        assertNull(updatePlatform("Linux","ID=ubuntu\nVERSION_ID=24.04", "amd64"))
+        assertNull(updatePlatform("Linux","ID=fedora\nVERSION_ID=44", "amd64"))
+        assertNull(updatePlatform("Linux","ID=manjaro\nID_LIKE=arch", "amd64"))
+        assertNull(updatePlatform("Linux","ID=debian\nVERSION_ID=13", "aarch64"))
+        assertNull(updatePlatform("Windows 11","", "aarch64"))
+        assertNull(updatePlatform("Mac OS X","", "amd64"))
     }
     @Test fun consentDisabledAndEmptyKeysNeverRequest() = runTest {
         val k=publicKey(pair()); var requests=0
@@ -87,6 +109,9 @@ class UpdatesTest {
         assertEquals(RELEASE_PAGE, stale2.releasePage)
         assertIs<UpdateState.Skipped>(checked(skip="0.22.0"))
         assertEquals(RELEASE_PAGE,assertIs<UpdateState.Failed>(checked(platform=null)).releasePage)
+        val noBuild = assertIs<UpdateState.Failed>(checked(json.replace("windows-x64-msi","future-99-x86_64-rpm")))
+        assertEquals("No build for this system.", noBuild.reason)
+        assertEquals(RELEASE_PAGE, noBuild.releasePage)
         val min=json.replace("\"assets\"", "\"minVersion\":\"0.21.9\",\"assets\"")
         assertTrue(assertIs<UpdateState.Failed>(checked(min)).reason.contains("in-between"))
     }

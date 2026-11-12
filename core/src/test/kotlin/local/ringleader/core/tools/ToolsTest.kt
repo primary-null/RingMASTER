@@ -212,8 +212,7 @@ class ToolsTest {
             iperfCommand("iperf3", false, "10.0.0.2", 5201, 10, 2, true, true),
         )
         assertEquals(listOf("iperf3", "-s", "-1", "-p", "5201", "--forceflush"), iperfCommand("iperf3", true, "", 5201, 10, 1, false, false))
-        assertTrue(IPERF_MISSING.contains("winget install iperf3"))
-        assertTrue(IPERF_MISSING.contains("apt install iperf3"))
+        assertTrue("iperf3 package" in IPERF_MISSING)
         assertNull(resolveIperf("not a path", { null }))
     }
 

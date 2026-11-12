@@ -19,7 +19,11 @@ const val UPDATE_FEED = "https://github.com/primary-null/RingMASTER/releases/lat
 const val RELEASE_PAGE = "https://github.com/primary-null/RingMASTER/releases/latest"
 const val MANIFEST_LIMIT = 256 * 1024
 const val SIGNATURE_LIMIT = 1024
-private val platforms = setOf("windows-x64-msi", "debian-13-amd64-deb", "ubuntu-26.04-amd64-deb")
+private val platforms = setOf(
+    "windows-x64-msi", "debian-13-amd64-deb", "ubuntu-26.04-amd64-deb",
+    "fedora-45-x86_64-rpm", "arch-x86_64-pkg",
+)
+private val platformId = Regex("^[a-z0-9][a-z0-9_]*(?:[.-][a-z0-9_]+)*$")
 data class UpdateAsset(val platform: String, val url: String, val sha256: String, val size: Long)
 data class UpdateManifest(val version: String, val published: Instant, val notes: String, val notesUrl: String?, val minVersion: String?, val assets: List<UpdateAsset>)
 data class OfferedUpdate(val manifest: UpdateManifest, val asset: UpdateAsset)
@@ -55,14 +59,16 @@ fun parseUpdateManifest(bytes: ByteArray): UpdateManifest {
     val notes = str("notes").replace("\r\n", "\n").also { require(it.length <= 8000 && it.none { c -> c.isISOControl() && c != '\n' }) }
     val notesUrl = root["notesUrl"]?.let { str("notesUrl").also(::updateHttps) }
     val min = root["minVersion"]?.let { str("minVersion").also(::versionFields) }
-    val assets = root.getValue("assets").jsonArray.map { e ->
+    val seen = mutableSetOf<String>()
+    val assets = root.getValue("assets").jsonArray.mapNotNull { e ->
         val a = e.jsonObject
         fun s(k: String) = a.getValue(k).jsonPrimitive.also { require(it.isString) }.content
-        UpdateAsset(s("platform").also { require(it in platforms) }, s("url").also(::updateHttps),
+        val id = s("platform").also { require(it.length in 1..64 && it.matches(platformId) && seen.add(it)) }
+        val asset = UpdateAsset(id, s("url").also(::updateHttps),
             s("sha256").also { require(it.matches(Regex("[0-9a-fA-F]{64}"))) },
             a.getValue("size").jsonPrimitive.also { require(!it.isString) }.long.also { require(it in 1_048_576L..1_073_741_824L) })
+        asset.takeIf { it.platform in platforms }
     }
-    require(assets.map { it.platform }.distinct().size == assets.size)
     return UpdateManifest(version,published,notes,notesUrl,min,assets)
 }
 fun verifyUpdateSignature(bytes: ByteArray, signature: ByteArray, keys: List<String>): Boolean {
@@ -75,11 +81,19 @@ fun verifyUpdateSignature(bytes: ByteArray, signature: ByteArray, keys: List<Str
         }.getOrDefault(false) }
     }.getOrDefault(false)
 }
-fun updatePlatform(os: String, osRelease: String): String? {
+fun updatePlatform(os: String, osRelease: String, arch: String = System.getProperty("os.arch")): String? {
+    val amd64 = arch.equals("amd64", ignoreCase = true) || arch.equals("x86_64", ignoreCase = true)
+    if (!amd64) return null
     if (os.lowercase().startsWith("windows")) return "windows-x64-msi"
     if (!os.lowercase().contains("linux")) return null
     val p = osRelease.lineSequence().filter { '=' in it }.associate { it.substringBefore('=').trim() to it.substringAfter('=').trim().trim('"', '\'') }
-    return when (p["ID"] to p["VERSION_ID"]) { "debian" to "13" -> "debian-13-amd64-deb"; "ubuntu" to "26.04" -> "ubuntu-26.04-amd64-deb"; else -> null }
+    return when (p["ID"]) {
+        "debian" -> if (p["VERSION_ID"] == "13") "debian-13-amd64-deb" else null
+        "ubuntu" -> if (p["VERSION_ID"] == "26.04") "ubuntu-26.04-amd64-deb" else null
+        "fedora" -> if (p["VERSION_ID"] == "45") "fedora-45-x86_64-rpm" else null
+        "arch" -> "arch-x86_64-pkg"
+        else -> null
+    }
 }
 data class UpdateResponse(val status: Int, val bytes: ByteArray = byteArrayOf(), val location: String? = null)
 fun interface UpdateTransport { fun get(url: String, limit: Int, userAgent: String): UpdateResponse }

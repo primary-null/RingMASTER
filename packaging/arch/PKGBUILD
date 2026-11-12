@@ -1,0 +1,36 @@
+# Maintainer: RingMASTER
+pkgname=ringmaster
+pkgver=${RINGMASTER_VERSION:?set RINGMASTER_VERSION}
+pkgrel=1
+pkgdesc='RingMASTER desktop infrastructure client'
+arch=(x86_64)
+url='https://github.com/primary-null/RingMASTER'
+license=(Apache-2.0)
+depends=(glibc libstdc++ libgcc libglvnd harfbuzz lcms2 giflib zlib
+         libjpeg-turbo libpng freetype2 fontconfig xdg-utils ttf-font
+         libx11 libxext libxi libxrender libxtst alsa-lib hicolor-icon-theme
+         nss at-spi2-core libcups libxkbcommon libxcomposite libxdamage libxrandr
+         mesa pango cairo libdrm)
+optdepends=(
+  'virt-viewer: SPICE consoles'
+  'bluez: Bluetooth daemon'
+  'bluez-utils: bluetoothctl'
+  'gtk3: file dialogs and open-folder'
+  'iperf3: iPerf3 tests'
+  'wireguard-tools: WireGuard'
+  'tailscale: Tailscale'
+)
+options=(!strip !debug)
+source=('ringmaster-app.tar.gz' 'ringmaster.desktop' 'LICENSE' 'NOTICE' 'ringmaster.png')
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+
+package() {
+  install -d "$pkgdir/opt"
+  cp -a "$srcdir/ringmaster" "$pkgdir/opt/ringmaster"
+  install -d "$pkgdir/usr/bin"
+  ln -s /opt/ringmaster/bin/ringmaster "$pkgdir/usr/bin/ringmaster"
+  install -Dm644 "$srcdir/ringmaster.desktop" "$pkgdir/usr/share/applications/ringmaster.desktop"
+  install -Dm644 "$srcdir/ringmaster.png" "$pkgdir/usr/share/icons/hicolor/512x512/apps/ringmaster.png"
+  install -Dm644 "$srcdir/LICENSE" "$pkgdir/usr/share/licenses/ringmaster/LICENSE"
+  install -Dm644 "$srcdir/NOTICE" "$pkgdir/usr/share/licenses/ringmaster/NOTICE"
+}

@@ -1,6 +1,6 @@
 name: Release
 
-# A version tag (v0.24.0) builds the three packages from that tag and creates a draft release.
+# A version tag (v0.24.0) builds the five packages from that tag and creates a draft release.
 # Running the workflow by hand (Actions > Release > Run workflow) builds and tests without releasing.
 # The update feed is signed offline afterwards; no signing key is ever given to this workflow (see RELEASING.md).
 on:
@@ -90,9 +90,173 @@ jobs:
           path: dist/
           if-no-files-found: error
 
+  fedora:
+    name: Fedora 45 RPM
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    container: fedora:45
+    steps:
+      - name: Install the build tools
+        run: |
+          # Fedora 45 ships OpenJDK 25 only. Temurin 21 comes from setup-java after git is present.
+          dnf -y install rpm-build binutils git fontconfig dejavu-sans-fonts mesa-libGL \
+            libjpeg-turbo libX11 libXext libXrender libXtst libXi freetype alsa-lib tar gzip which
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Read the version
+        run: |
+          version=$(sed -n 's/.*version = "\([0-9][0-9.]*\)".*/\1/p' build.gradle.kts | head -n 1)
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match version $version in build.gradle.kts"; exit 1
+          fi
+      - name: Test and package
+        run: |
+          chmod +x gradlew
+          ./gradlew :core:test :desktop:test :desktop:packageRpm --console=plain
+      - name: Collect
+        run: |
+          mkdir dist
+          rpm=$(echo desktop/build/compose/binaries/main/rpm/ringmaster-${VERSION}-*.x86_64.rpm)
+          test -f "$rpm"
+          cp "$rpm" "dist/ringmaster-${VERSION}-fedora-45-x86_64.rpm"
+          rpm -qpi dist/*.rpm
+          rpm -qpR dist/*.rpm
+          rpm -qpl dist/*.rpm | grep -qx /opt/ringmaster/bin/ringmaster
+      - name: Install
+        run: |
+          dnf -y install "./dist/ringmaster-${VERSION}-fedora-45-x86_64.rpm"
+          test -f /opt/ringmaster/lib/runtime/lib/server/libjvm.so
+          fail=/tmp/ringmaster-requires-missing
+          : > "$fail"
+          req=$(rpm -qR ringmaster)
+          while IFS= read -r so; do
+            while IFS= read -r need; do
+              case "$need" in linux-vdso.so*|ld-linux*) continue ;; esac
+              if find /opt/ringmaster -name "$need" ! -name '*.sha256' | grep -q .; then
+                continue
+              fi
+              resolved=$(ldconfig -p | awk -v n="$need" '$1==n {print $NF; exit}')
+              if [ -z "$resolved" ]; then
+                echo "unresolved $need in $so" >> "$fail"
+                continue
+              fi
+              owner=$(rpm -qf --qf '%{NAME}' "$resolved" 2>/dev/null || true)
+              if [ -z "$owner" ]; then
+                echo "unowned $need from $so ($resolved)" >> "$fail"
+                continue
+              fi
+              if printf '%s\n' "$req" | awk '{print $1}' | grep -Fqx "$owner"; then
+                continue
+              fi
+              if printf '%s\n' "$req" | grep -F "$need" >/dev/null; then
+                continue
+              fi
+              echo "requires missing $owner ($need from $so)" >> "$fail"
+            done < <(readelf -d "$so" 2>/dev/null | awk '/NEEDED/ {gsub(/[][]/,"",$NF); print $NF}')
+          done < <(find /opt/ringmaster -type f \( -name '*.so' -o -name '*.so.*' \) ! -name '*.sha256')
+          if [ -s "$fail" ]; then cat "$fail"; exit 1; fi
+          ld_path=/opt/ringmaster/lib/runtime/lib/server:/opt/ringmaster/lib/runtime/lib:/opt/ringmaster/lib/app:/opt/ringmaster/lib
+          if find /opt/ringmaster -type f \( -name '*.so' -o -name '*.so.*' \) ! -name '*.sha256' | xargs -r env LD_LIBRARY_PATH="$ld_path" ldd | grep 'not found'; then
+            echo 'ldd missing system library'; exit 1
+          fi
+          rpm -V ringmaster
+      - uses: actions/upload-artifact@v6
+        with:
+          name: fedora-45-x86_64-rpm
+          path: dist/
+          if-no-files-found: error
+
+  arch:
+    name: Arch Linux package
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    container: archlinux:base-devel
+    steps:
+      - name: Install the build tools
+        run: |
+          pacman-key --init
+          pacman-key --populate archlinux
+          pacman -Sy --noconfirm archlinux-keyring
+          pacman -Syu --noconfirm jdk21-openjdk git fontconfig ttf-dejavu mesa libxtst libxi libxrender alsa-lib binutils
+          archlinux-java set java-21-openjdk
+          java -version 2>&1 | grep -E '21[\."]'
+      - uses: actions/checkout@v5
+      - name: Read the version
+        run: |
+          version=$(sed -n 's/.*version = "\([0-9][0-9.]*\)".*/\1/p' build.gradle.kts | head -n 1)
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match version $version in build.gradle.kts"; exit 1
+          fi
+      - name: Test and package
+        run: |
+          chmod +x gradlew
+          ./gradlew :core:test :desktop:test :desktop:createDistributable --console=plain
+      - name: Collect
+        run: |
+          app=desktop/build/compose/binaries/main/app/ringmaster
+          test -d "$app"
+          tar -C desktop/build/compose/binaries/main/app -czf packaging/arch/ringmaster-app.tar.gz ringmaster
+          cp LICENSE NOTICE packaging/arch/
+          cp desktop/icons/ringmaster.png packaging/arch/ringmaster.png
+          useradd -m builder
+          chown -R builder packaging/arch
+          su builder -c "cd packaging/arch && RINGMASTER_VERSION=$VERSION makepkg --nodeps --noconfirm"
+          pkg=$(echo packaging/arch/ringmaster-${VERSION}-*-x86_64.pkg.tar.zst)
+          test -f "$pkg"
+          mkdir dist
+          cp "$pkg" "dist/ringmaster-${VERSION}-arch-x86_64.pkg.tar.zst"
+          # System NEEDED sonames must belong to a package listed in depends.
+          # Bundled JRE/Skiko libs resolve via RPATH inside /opt/ringmaster.
+          pacman -U --noconfirm "$pkg"
+          export RINGMASTER_VERSION=$VERSION
+          # shellcheck disable=SC1091
+          . packaging/arch/PKGBUILD
+          fail=/tmp/ringmaster-depends-missing
+          : > "$fail"
+          while IFS= read -r so; do
+            while IFS= read -r need; do
+              case "$need" in linux-vdso.so*|ld-linux*) continue ;; esac
+              if find /opt/ringmaster -name "$need" ! -name '*.sha256' | grep -q .; then
+                continue
+              fi
+              resolved=$(ldconfig -p | awk -v n="$need" '$1==n {print $NF; exit}')
+              if [ -z "$resolved" ]; then
+                echo "unresolved $need in $so" >> "$fail"
+                continue
+              fi
+              owner=$(pacman -Qqo "$resolved" 2>/dev/null || true)
+              if [ -z "$owner" ]; then
+                echo "unowned $need from $so ($resolved)" >> "$fail"
+                continue
+              fi
+              listed=0
+              for dep in "${depends[@]}"; do
+                if [ "$dep" = "$owner" ]; then listed=1; break; fi
+              done
+              [ "$listed" = 1 ] || echo "depends missing $owner ($need from $so)" >> "$fail"
+            done < <(readelf -d "$so" 2>/dev/null | awk '/NEEDED/ {gsub(/[][]/,"",$NF); print $NF}')
+          done < <(find /opt/ringmaster -type f \( -name '*.so' -o -name '*.so.*' \) ! -name '*.sha256')
+          if [ -s "$fail" ]; then cat "$fail"; exit 1; fi
+          test -f /opt/ringmaster/lib/runtime/lib/server/libjvm.so
+          ld_path=/opt/ringmaster/lib/runtime/lib/server:/opt/ringmaster/lib/runtime/lib:/opt/ringmaster/lib/app:/opt/ringmaster/lib
+          if find /opt/ringmaster -type f \( -name '*.so' -o -name '*.so.*' \) ! -name '*.sha256' | xargs -r env LD_LIBRARY_PATH="$ld_path" ldd | grep 'not found'; then
+            echo 'ldd missing system library'; exit 1
+          fi
+          pacman -Qkk ringmaster
+      - uses: actions/upload-artifact@v6
+        with:
+          name: arch-x86_64-pkg
+          path: dist/
+          if-no-files-found: error
+
   release:
     name: Draft release
-    needs: [windows, linux]
+    needs: [windows, linux, fedora, arch]
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -116,6 +280,8 @@ jobs:
           subject-path: |
             dist/*.msi
             dist/*.deb
+            dist/*.rpm
+            dist/*.pkg.tar.zst
       - name: Create the draft release
         env:
           GH_TOKEN: ${{ github.token }}
