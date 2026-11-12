@@ -266,7 +266,7 @@ internal fun guestHasPage(state: WorkspaceState, guest: Guest): Boolean = state.
     val clicks = remember { RowClicks() }
     val currentSelection by rememberUpdatedState(selected)
     val onSelect: (Guest) -> Unit = { guest ->
-        when (clicks.register(guest.resource, System.nanoTime() / 1_000_000L)) {
+        when (clicks.register(guest.resource, rowClickClock())) {
             RowClick.Open -> onOpen(guest)
             RowClick.Select -> if (currentSelection?.resource != guest.resource) onSelectGuest(guest)
         }
@@ -385,6 +385,9 @@ internal enum class RowClick { Select, Open }
 internal fun doubleClickMillis(): Long = runCatching {
     if (java.awt.GraphicsEnvironment.isHeadless()) null else (java.awt.Toolkit.getDefaultToolkit().getDesktopProperty("awt.multiClickInterval") as? Int)?.toLong()
 }.getOrNull()?.coerceIn(200L, 900L) ?: 500L
+
+/** The clock row clicks are timed with, in milliseconds. A test replaces it so a double-click does not depend on how busy the machine is. */
+internal var rowClickClock: () -> Long = { System.nanoTime() / 1_000_000L }
 
 /** Tells a double-click on one row from two clicks on different rows. A third quick click starts over, so it selects. */
 internal class RowClicks(private val window: Long = doubleClickMillis()) {

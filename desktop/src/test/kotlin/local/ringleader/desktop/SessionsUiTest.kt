@@ -16,7 +16,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.yield
 import local.ringleader.core.*
 import java.io.File
@@ -29,9 +28,9 @@ import kotlin.test.assertTrue
 
 /**
  * The fleet list's clicks and the desk and rail with several connections open, driven through rendered scenes.
- * Scenes run in the test's own event loop (runBlocking) with a yield after each frame, on one thread as in the app. On the
- * default Unconfined context an effect could resume on the AWT thread while this thread laid out or closed the scene,
- * and Compose then threw an IllegalArgumentException (seen on a Linux build runner, at scene.close()).
+ * Scenes run on the AWT thread through [runSceneTest], with a yield after each frame: on one thread, as in the app.
+ * Drawn from the JUnit thread they failed at random on build runners, because Compose's snapshot notifications arrive
+ * on the AWT thread. Row clicks use a clock of their own, so the double-click does not depend on the machine's load.
  */
 class SessionsUiTest {
     private class FakeGateway : InventoryGateway {
@@ -39,10 +38,13 @@ class SessionsUiTest {
         override suspend fun details(connection: Connection, guest: Guest) = demoDetails(guest)
     }
 
-    @Test fun aDoubleClickOpensTheGuestAndAClickOnTheSelectedRowReadsNothingAgain() = runBlocking<Unit> {
+    @Test fun aDoubleClickOpensTheGuestAndAClickOnTheSelectedRowReadsNothingAgain() = runSceneTest {
         val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
         val workspace = Workspace(scope)
         workspace.exploreDemo(); workspace.setLive(false)
+        var now = 1_000_000L
+        val realClock = rowClickClock
+        rowClickClock = { now }
         val scene = ImageComposeScene(1400, 900, Density(1f), coroutineContext = coroutineContext) {
             MaterialTheme(colorScheme = ringColors) { CompositionLocalProvider(LocalReduceMotion provides true) {
                 Surface(Modifier.fillMaxSize(), color = Tech.Canvas, contentColor = Tech.Ink) {
@@ -60,7 +62,7 @@ class SessionsUiTest {
             val pause = doubleClickMillis() + 60
             var row: Offset? = null
             for (y in 150 until 860 step 18) {
-                Thread.sleep(pause)
+                now += pause
                 click(Offset(300f, y.toFloat()))
                 val picked = workspace.state.value.selected
                 if (picked != null && picked.status != "running" && !picked.template) { row = Offset(300f, y.toFloat()); break }
@@ -70,18 +72,18 @@ class SessionsUiTest {
             assertNull(workspace.state.value.inspection, "single clicks only select")
             // A slow second click on the selected row: nothing is read again and nothing opens.
             val readAt = workspace.state.value.detailsUpdatedAt
-            Thread.sleep(pause); click(at)
+            now += pause; click(at)
             assertEquals(readAt, workspace.state.value.detailsUpdatedAt, "the selected row was read again")
             assertNull(workspace.state.value.inspection)
             // Two quick clicks: the guest's page opens (its inspection is requested) and the selection stays.
-            Thread.sleep(pause); click(at); click(at)
+            now += pause; click(at); now += 20; click(at)
             assertEquals(guest.resource, workspace.state.value.selected?.resource)
             assertEquals(guest.resource, workspace.state.value.inspection?.resource, "the double-click did not open the guest")
             assertEquals(readAt, workspace.state.value.detailsUpdatedAt, "the double-click read the details again")
-        } finally { scene.close(); workspace.close(); scope.cancel() }
+        } finally { rowClickClock = realClock; scene.close(); workspace.close(); scope.cancel() }
     }
 
-    @Test fun theDeskAndTheRailListEveryOpenConnection() = runBlocking<Unit> {
+    @Test fun theDeskAndTheRailListEveryOpenConnection() = runSceneTest {
         val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
         val directory = Files.createTempDirectory("sessions-ui")
         val sessions = Sessions(scope) { Workspace(scope, FakeGateway()) }
