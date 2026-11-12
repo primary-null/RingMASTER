@@ -196,8 +196,12 @@ private val ConnectPanelWidth = 520.dp
     Column(modifier, verticalArrangement = Arrangement.spacedBy(Tech.Space8)) {
         SectionLabel("Saved connections", suffix = deskState.profiles.size.takeIf { it > 0 }?.toString())
         if (deskState.profiles.isNotEmpty()) {
-            HelpTip("Profiles save the server, token ID and optional verified certificate pin. Secrets stay in memory.") {
-                Text("Secrets stay in memory", fontSize = 10.sp, color = Tech.Muted, fontFamily = Tech.Mono)
+            // "Secrets stay in memory" alone stopped being the whole truth when Remember arrived. It still is where Remember
+            // cannot be used: in the browser, and without a password safe.
+            val canRemember = !LocalAppHost.current.web && deskState.vaultStatus is VaultStatus.Available
+            HelpTip(if (canRemember) "Profiles save the server, token ID and optional verified certificate pin. A secret stays in memory unless you tick Remember on this computer for that connection; then ${deskState.vaultName} keeps it."
+                else "Profiles save the server, token ID and optional verified certificate pin. Secrets stay in memory.") {
+                Text(if (canRemember) "Secrets stay in memory unless you choose Remember" else "Secrets stay in memory", fontSize = 10.sp, color = Tech.Muted, fontFamily = Tech.Mono)
             }
         }
         deskState.storeMessage?.let {

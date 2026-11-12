@@ -17,7 +17,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshots.Snapshot
 import androidx.compose.ui.ImageComposeScene
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -63,7 +62,6 @@ class OverlayDismissTest {
             step()
         }
         suspend fun escape() { scene.sendKeyEvent(KeyEvent(Key.Escape, KeyEventType.KeyDown)); scene.sendKeyEvent(KeyEvent(Key.Escape, KeyEventType.KeyUp)); step() }
-        suspend fun wheel(at: Offset, lines: Float) { scene.sendPointerEvent(PointerEventType.Scroll, at, scrollDelta = Offset(0f, lines)); step(8) }
 
         /** Every semantics node of every layer (the page and each open dialog), merged as a screen reader sees them. */
         fun nodes(): List<SemanticsNode> {
@@ -315,5 +313,98 @@ class OverlayDismissTest {
             click(Offset(700f, 400f))
             assertEquals(1, closed, "a click beside the panel still closes it")
         }
+    }
+
+    @Test fun theRealClearEverythingOverSettingsTakesTheFirstEscape() {
+        val workspace = Workspace(CoroutineScope(Dispatchers.Unconfined))
+        val stack = ModalStack()
+        var settings by mutableStateOf(true)
+        var wiped = 0
+        try {
+            withScene(stack, {}, {
+                if (settings) SettingsDialog(WorkspaceState(), workspace, SettingsSection.About, {}, { settings = false }) { wiped++ }
+            }) {
+                assertNull(find("Clear everything?"), "the wipe dialog starts closed")
+                // Opened through the button's own click action: a pointer click could land on Open or the project link.
+                val button = assertNotNull(nodes().firstOrNull { node ->
+                    node.config.getOrNull(SemanticsActions.OnClick) != null &&
+                        node.config.getOrNull(SemanticsProperties.Text)?.joinToString("") { it.text } == "CLEAR EVERYTHING…"
+                }, "the About section shows Clear everything")
+                button.config[SemanticsActions.OnClick].action!!.invoke()
+                step(6)
+                assertNotNull(find("Clear everything?"), "the real Clear everything dialog is open")
+                assertEquals(ModalKind.Dialog, stack.top?.kind, "and it is the top overlay, over Settings")
+                click(Offset(4f, 4f))
+                assertNotNull(find("Clear everything?"), "a click outside the confirmation does nothing")
+                assertTrue(settings, "and does not reach Settings")
+                escape()
+                assertNull(find("Clear everything?"), "the first Escape closes only Clear everything")
+                assertTrue(settings, "Settings stays open")
+                assertEquals(ModalKind.Settings, stack.top?.kind)
+                step()
+                escape()
+                assertFalse(settings, "the second Escape closes Settings")
+                assertEquals(0, wiped, "nothing was cleared")
+            }
+        } finally { workspace.close() }
+    }
+
+    @Test fun theChartLensHoldsPageShortcutsWhileOpen() {
+        val workspace = Workspace(CoroutineScope(Dispatchers.Unconfined))
+        val stack = ModalStack()
+        var lens: ChartLensState? = null
+        var pageCalls = 0
+        val page: (KeyEvent) -> Boolean = { pageCalls++; true }
+        val ctrl2 = KeyEvent(Key.Two, KeyEventType.KeyDown, isCtrlPressed = true)
+        try {
+            withScene(stack, {}, {
+                ChartLensHost(WorkspaceState(), workspace) { lens = LocalChartLens.current }
+            }) {
+                assertFalse(stack.open)
+                lens!!.open(LensRequest(LensSubject.Cluster, lensChart(LiveMetric.Cpu, false)))
+                step(12)
+                assertEquals(ModalKind.Overlay, stack.top?.kind, "the open lens is recorded")
+                assertFalse(Shortcuts.handle(ctrl2, page, stack), "Ctrl+2 does nothing behind the lens")
+                assertEquals(0, pageCalls)
+                assertTrue(Shortcuts.handle(KeyEvent(Key.Escape, KeyEventType.KeyDown), page, stack), "Escape at the window closes it")
+                step(12)
+                assertEquals(null, lens!!.request)
+                assertFalse(stack.open, "a closed lens leaves the stack")
+                assertTrue(Shortcuts.handle(ctrl2, page, stack))
+                assertEquals(1, pageCalls, "page shortcuts are back")
+            }
+        } finally { workspace.close() }
+    }
+
+    @Test fun aCapturedConsoleKeepsKeysOnlyWithNothingOrTheShellOnTop() {
+        // Pure decision first: zoom keys are never sent where they would be handled (they save real settings).
+        assertFalse(consoleOwnsKeys(false, null))
+        assertTrue(consoleOwnsKeys(true, null))
+        assertTrue(consoleOwnsKeys(true, ModalKind.Shell))
+        for (kind in listOf(ModalKind.Settings, ModalKind.Dialog, ModalKind.Overlay)) assertFalse(consoleOwnsKeys(true, kind), "$kind holds the keyboard")
+        val comma = KeyEvent(Key.Comma, KeyEventType.KeyDown, isCtrlPressed = true)
+        var pageCalls = 0
+        val page: (KeyEvent) -> Boolean = { pageCalls++; true }
+        withCapture(true) {
+            val stack = ModalStack()
+            assertFalse(Shortcuts.handle(KeyEvent(Key.Two, KeyEventType.KeyDown, isCtrlPressed = true), page, stack), "with nothing open the guest keeps Ctrl+2")
+            assertFalse(Shortcuts.handle(KeyEvent(Key.Equals, KeyEventType.KeyDown, isCtrlPressed = true), page, stack), "and zoom keys")
+            var settingsClosed = 0
+            val settings = stack.push(ModalKind.Settings) { settingsClosed++ }
+            assertTrue(Shortcuts.handle(comma, page, stack), "Ctrl+, over a captured console reaches Settings")
+            assertEquals(1, settingsClosed)
+            var guestsClosed = 0
+            val guests = stack.push(ModalKind.Overlay) { guestsClosed++ }
+            assertTrue(Shortcuts.handle(KeyEvent(Key.Escape, KeyEventType.KeyDown), page, stack))
+            assertEquals(1, guestsClosed, "Escape closes the guests list even while the console had the keyboard")
+            stack.remove(guests)
+            val shell = stack.push(ModalKind.Shell, null)
+            assertFalse(Shortcuts.handle(comma, page, stack), "the node shell keeps Ctrl+,")
+            assertFalse(Shortcuts.handle(KeyEvent(Key.Equals, KeyEventType.KeyDown, isCtrlPressed = true), page, stack), "and zoom keys")
+            assertFalse(Shortcuts.handle(KeyEvent(Key.Escape, KeyEventType.KeyDown), page, stack), "and Escape")
+            assertEquals(1, settingsClosed)
+            stack.remove(shell); stack.remove(settings)
+        }
+        assertEquals(0, pageCalls, "no page shortcut ran")
     }
 }
