@@ -142,6 +142,22 @@ class WindowsNativeFrameProbeTest {
                                     assertEquals(HTRIGHT, right)
                                     assertEquals(HTBOTTOM, bottom)
                                     assertEquals(HTTOP, top)
+                                    // The answers above come from asking the frame directly. Windows does not: it asks the
+                                    // window under the pointer, and that is the child Compose draws into. In 0.23.6 that
+                                    // child said "client" everywhere, so the frame was never asked and the window could
+                                    // not be moved, resized or maximised. The child must step aside (-1, transparent)
+                                    // wherever the frame has an answer, and keep ordinary content for itself.
+                                    val kids = installed.childWindows()
+                                    assertTrue(kids.isNotEmpty(), "Compose draws into a child window; without one this probe proves nothing")
+                                    val maxAt = at(maximize!!).first to at(maximize!!).second.coerceAtLeast(floating.y + 10)
+                                    val kidCaption = kids.map { installed.sendHitTestTo(it, floating.x + 80, floating.y + 16) }
+                                    val kidLeft = kids.map { installed.sendHitTestTo(it, floating.x + 2, floating.y + floating.height / 2) }
+                                    val kidBottom = kids.map { installed.sendHitTestTo(it, floating.x + floating.width / 2, floating.y + floating.height - 2) }
+                                    val kidMax = kids.map { installed.sendHitTestTo(it, maxAt.first, maxAt.second) }
+                                    val kidClient = kids.map { installed.sendHitTestTo(it, floating.x + floating.width / 2, floating.y + floating.height / 2) }
+                                    note("children=${kids.size} caption=$kidCaption left=$kidLeft bottom=$kidBottom max=$kidMax client=$kidClient")
+                                    assertTrue((kidCaption + kidLeft + kidBottom + kidMax).all { it == -1 }, "a child window still claims a zone that belongs to the frame")
+                                    assertTrue(kidClient.all { it == HTCLIENT }, "a child window gave up ordinary content")
                                     val before = installed.windowBox()
                                     applyMaximizedBounds(window)
                                     val frameBounds = (window as? java.awt.Frame)?.maximizedBounds

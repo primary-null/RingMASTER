@@ -31,6 +31,12 @@ internal class WindowsNativeFrame private constructor(private val window: Window
     @Volatile private var snapshot = FrameSnapshot(EMPTY_REGIONS, FrameMode.Floating)
     // A nested class, not an inner one: JNA calls this from native code, and a hidden outer pointer would shift the arguments.
     private val callback: FrameProc = Proc(this)
+    // Compose draws into a child window (an AWT canvas) that covers the whole frame, and Windows asks the window under
+    // the pointer, which is that child. Left alone it answers "client" everywhere, so the frame is never asked and the
+    // caption, the resize edges and the maximise button are dead. This procedure sits on every child and answers
+    // "transparent" wherever the frame has something to say, which makes Windows ask the frame next.
+    private val childCallback: FrameProc = ChildProc(this)
+    private val children = java.util.concurrent.ConcurrentHashMap<Long, Long>()   // child window -> its own procedure
     private var previous: Long = 0
     private var originalStyle: Int = 0
     private var installed = false
@@ -55,6 +61,7 @@ internal class WindowsNativeFrame private constructor(private val window: Window
         val modeChanged = snapshot.mode != mode
         snapshot = FrameSnapshot(regions, mode)
         if (!installed) return
+        syncChildren()
         if (modeChanged) applyMode(mode)
         if (modeChanged || this.dark != dark || this.border != border) {
             this.dark = dark
@@ -68,9 +75,11 @@ internal class WindowsNativeFrame private constructor(private val window: Window
         installed = false
         synchronized(active) { active.remove(window) }
         try {
+            val childrenRestored = releaseChildren()
             val mine = Pointer.nativeValue(CallbackReference.getFunctionPointer(callback))
-            val restored = user32.GetWindowLongPtrW(hwnd, GWLP_WNDPROC) == mine
-            if (restored) user32.SetWindowLongPtrW(hwnd, GWLP_WNDPROC, previous)
+            val frameRestored = user32.GetWindowLongPtrW(hwnd, GWLP_WNDPROC) == mine
+            if (frameRestored) user32.SetWindowLongPtrW(hwnd, GWLP_WNDPROC, previous)
+            val restored = frameRestored && childrenRestored
             setStyle(originalStyle)
             frameChanged()
             // Only now may the thunk be collected. If something subclassed the window after this frame, the thunk is
@@ -122,6 +131,7 @@ internal class WindowsNativeFrame private constructor(private val window: Window
             previous = user32.SetWindowLongPtrW(hwnd, GWLP_WNDPROC, thunk)
             if (previous == 0L) error("no previous procedure")
             subclassed = true
+            syncChildren()
             frameChanged()
             dark = !Appearance.palette.light
             border = colorRef(Appearance.palette.edge)
@@ -131,6 +141,7 @@ internal class WindowsNativeFrame private constructor(private val window: Window
             installed = true
             synchronized(active) { active.add(window) }
         } catch (thrown: Throwable) {
+            runCatching { releaseChildren() }
             if (subclassed) runCatching { user32.SetWindowLongPtrW(hwnd, GWLP_WNDPROC, previous) }
             if (styled) runCatching { setStyle(originalStyle); frameChanged() }
             live.remove(this)
@@ -169,6 +180,7 @@ internal class WindowsNativeFrame private constructor(private val window: Window
                 return 0L
             }
             WM_STYLECHANGED -> if (wParam.toInt() == GWL_STYLE) ensureForMode()
+            WM_PARENTNOTIFY -> if ((wParam.toInt() and 0xFFFF) == WM_CREATE) EventQueue.invokeLater { if (installed) runCatching { syncChildren() } }
         }
         return callPrevious(hwnd, msg, wParam, lParam)
     }
@@ -370,6 +382,67 @@ internal class WindowsNativeFrame private constructor(private val window: Window
         if (previous != 0L) user32.CallWindowProcW(previous, hwnd, msg, wParam, lParam)
         else user32.DefWindowProcW(hwnd, msg, wParam, lParam)
 
+    /** Puts [childCallback] on every child window that does not have it yet. Safe to call often and from any thread. */
+    private fun syncChildren() {
+        val mine = Pointer.nativeValue(CallbackReference.getFunctionPointer(childCallback))
+        for (child in childWindows()) {
+            val current = user32.GetWindowLongPtrW(child, GWLP_WNDPROC)
+            if (current == mine || current == 0L) continue
+            // Recorded before the procedure is swapped, so a message that arrives in between already finds it.
+            children[Pointer.nativeValue(child)] = current
+            user32.SetWindowLongPtrW(child, GWLP_WNDPROC, mine)
+        }
+    }
+
+    /** Gives every child its own procedure back. False when one could not be restored: the thunk must then stay alive. */
+    private fun releaseChildren(): Boolean {
+        val mine = Pointer.nativeValue(CallbackReference.getFunctionPointer(childCallback))
+        var all = true
+        for ((key, own) in children.entries.toList()) {
+            val child = Pointer(key)
+            val restored = runCatching {
+                if (user32.GetWindowLongPtrW(child, GWLP_WNDPROC) == mine) user32.SetWindowLongPtrW(child, GWLP_WNDPROC, own)
+                true
+            }.getOrDefault(false)
+            if (restored) children.remove(key) else all = false
+        }
+        return all
+    }
+
+    private fun dispatchChild(child: Pointer, msg: Int, wParam: Long, lParam: Long): Long {
+        val key = Pointer.nativeValue(child)
+        val own = children[key] ?: 0L
+        // Anywhere the frame would not answer "client", this child steps aside and Windows asks the frame.
+        if (msg == WM_NCHITTEST && installed && hitTest(lParam) != HTCLIENT) return HTTRANSPARENT
+        if (msg == WM_NCDESTROY) children.remove(key)
+        return if (own != 0L) user32.CallWindowProcW(own, child, msg, wParam, lParam) else user32.DefWindowProcW(child, msg, wParam, lParam)
+    }
+
+    internal fun childWindows(): List<Pointer> {
+        val found = ArrayList<Pointer>()
+        val collect = object : EnumChildProc {
+            override fun invoke(child: Pointer, lParam: Long): Boolean { found += child; return true }
+        }
+        user32.EnumChildWindows(hwnd, collect, 0)
+        return found
+    }
+
+    internal fun sendHitTestTo(window: Pointer, screenX: Int, screenY: Int): Int =
+        user32.SendMessageW(window, WM_NCHITTEST, 0, packHitPoint(screenX, screenY)).toInt()
+
+    private class ChildProc(private val frame: WindowsNativeFrame) : FrameProc {
+        override fun invoke(hwnd: Pointer, msg: Int, wParam: Long, lParam: Long): Long = try {
+            frame.dispatchChild(hwnd, msg, wParam, lParam)
+        } catch (_: Throwable) {
+            try {
+                val own = frame.children[Pointer.nativeValue(hwnd)] ?: 0L
+                if (own != 0L) user32.CallWindowProcW(own, hwnd, msg, wParam, lParam) else user32.DefWindowProcW(hwnd, msg, wParam, lParam)
+            } catch (_: Throwable) {
+                0L
+            }
+        }
+    }
+
     private class Proc(private val frame: WindowsNativeFrame) : FrameProc {
         override fun invoke(hwnd: Pointer, msg: Int, wParam: Long, lParam: Long): Long {
             frame.calls.incrementAndGet()
@@ -461,6 +534,10 @@ private const val WM_NCMOUSEMOVE = 0x00A0
 private const val WM_NCLBUTTONDOWN = 0x00A1
 private const val WM_NCLBUTTONUP = 0x00A2
 private const val WM_NCMOUSELEAVE = 0x02A2
+private const val WM_NCDESTROY = 0x0082
+private const val WM_PARENTNOTIFY = 0x0210
+private const val WM_CREATE = 0x0001
+private const val HTTRANSPARENT = -1L
 private const val TME_LEAVE = 0x00000002
 private const val TME_NONCLIENT = 0x00000010
 private const val MONITOR_DEFAULTTONEAREST = 2
@@ -471,6 +548,10 @@ private const val SM_CXFRAME = 32
 private const val SM_CXPADDEDBORDER = 92
 
 /** One native window-procedure method. Public to the JVM so JNA can bind it. */
+internal interface EnumChildProc : StdCallLibrary.StdCallCallback {
+    fun invoke(child: Pointer, lParam: Long): Boolean
+}
+
 internal interface FrameProc : StdCallLibrary.StdCallCallback {
     fun invoke(hwnd: Pointer, msg: Int, wParam: Long, lParam: Long): Long
 }
@@ -491,6 +572,7 @@ internal interface User32 : StdCallLibrary {
     fun TrackMouseEvent(event: TRACKMOUSEEVENT): Boolean
     fun PostMessageW(hwnd: Pointer, msg: Int, wParam: Long, lParam: Long): Boolean
     fun SendMessageW(hwnd: Pointer, msg: Int, wParam: Long, lParam: Long): Long
+    fun EnumChildWindows(parent: Pointer, callback: EnumChildProc, lParam: Long): Boolean
 }
 
 internal interface DwmApi : StdCallLibrary {
