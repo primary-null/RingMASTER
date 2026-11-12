@@ -16,6 +16,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.yield
 import local.ringleader.core.*
 import java.io.File
 import java.nio.file.Files
@@ -25,18 +27,23 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-/** The fleet list's clicks and the desk and rail with several connections open, driven through rendered scenes. */
+/**
+ * The fleet list's clicks and the desk and rail with several connections open, driven through rendered scenes.
+ * Scenes run in the test's own event loop (runBlocking) with a yield after each frame, on one thread as in the app. On the
+ * default Unconfined context an effect could resume on the AWT thread while this thread laid out or closed the scene,
+ * and Compose then threw an IllegalArgumentException (seen on a Linux build runner, at scene.close()).
+ */
 class SessionsUiTest {
     private class FakeGateway : InventoryGateway {
         override suspend fun overview(connection: Connection) = Overview(1, listOf(Guest(connection.remoteKey, 100, "alpha", "node-a", "VM", "running")))
         override suspend fun details(connection: Connection, guest: Guest) = demoDetails(guest)
     }
 
-    @Test fun aDoubleClickOpensTheGuestAndAClickOnTheSelectedRowReadsNothingAgain() {
+    @Test fun aDoubleClickOpensTheGuestAndAClickOnTheSelectedRowReadsNothingAgain() = runBlocking<Unit> {
         val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
         val workspace = Workspace(scope)
         workspace.exploreDemo(); workspace.setLive(false)
-        val scene = ImageComposeScene(1400, 900, Density(1f)) {
+        val scene = ImageComposeScene(1400, 900, Density(1f), coroutineContext = coroutineContext) {
             MaterialTheme(colorScheme = ringColors) { CompositionLocalProvider(LocalReduceMotion provides true) {
                 Surface(Modifier.fillMaxSize(), color = Tech.Canvas, contentColor = Tech.Ink) {
                     val state by workspace.state.collectAsState()
@@ -46,8 +53,8 @@ class SessionsUiTest {
         }
         try {
             var time = 0L
-            fun settle() { repeat(3) { time += 16_000_000L; scene.render(time).close() } }
-            fun click(at: Offset) { scene.sendPointerEvent(PointerEventType.Move, at); scene.sendPointerEvent(PointerEventType.Press, at); scene.sendPointerEvent(PointerEventType.Release, at); settle() }
+            suspend fun settle() { repeat(3) { time += 16_000_000L; scene.render(time).close(); yield() } }
+            suspend fun click(at: Offset) { scene.sendPointerEvent(PointerEventType.Move, at); scene.sendPointerEvent(PointerEventType.Press, at); scene.sendPointerEvent(PointerEventType.Release, at); settle() }
             settle()
             // Find the row of a stopped guest: walk down the list one click at a time, slower than a double-click.
             val pause = doubleClickMillis() + 60
@@ -74,7 +81,7 @@ class SessionsUiTest {
         } finally { scene.close(); workspace.close(); scope.cancel() }
     }
 
-    @Test fun theDeskAndTheRailListEveryOpenConnection() {
+    @Test fun theDeskAndTheRailListEveryOpenConnection() = runBlocking<Unit> {
         val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
         val directory = Files.createTempDirectory("sessions-ui")
         val sessions = Sessions(scope) { Workspace(scope, FakeGateway()) }
@@ -87,7 +94,7 @@ class SessionsUiTest {
             val open = sessions.state.value
             assertEquals(3, open.open.size)
             for ((name, expanded) in listOf("expanded" to true, "collapsed" to false)) {
-                val scene = ImageComposeScene(1500, 900, Density(1f)) {
+                val scene = ImageComposeScene(1500, 900, Density(1f), coroutineContext = coroutineContext) {
                     MaterialTheme(colorScheme = ringColors) { CompositionLocalProvider(LocalReduceMotion provides true) {
                         Surface(Modifier.fillMaxSize(), color = Tech.Canvas, contentColor = Tech.Ink) {
                             val all by sessions.state.collectAsState()
@@ -104,7 +111,7 @@ class SessionsUiTest {
                 }
                 try {
                     var time = 0L
-                    fun frame() = run { time += 16_000_000L; scene.render(time) }
+                    suspend fun frame() = run { time += 16_000_000L; scene.render(time).also { yield() } }
                     repeat(3) { frame().close() }
                     val file = File("build/probe/sessions-$name.png"); file.parentFile.mkdirs()
                     frame().use { file.writeBytes(it.encodeToData()!!.bytes) }

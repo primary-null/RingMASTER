@@ -116,6 +116,8 @@ class ConfigGuardTest {
         }
         val oldest=Files.list(root.resolve("backups")).use { it.toList() }.filter { !it.fileName.toString().startsWith(".") }.minBy { it.fileName.toString() }
         val posix=root.fileSystem.supportedFileAttributeViews().contains("posix")
+        // Root (the release workflow's containers) deletes through a read-only folder, so the failed prune cannot be staged there.
+        if (posix) org.junit.jupiter.api.Assumptions.assumeTrue(readOnlyFolderBlocksDelete(), "A read-only folder does not stop deletes here (running as root?)")
         if (posix) Files.setPosixFilePermissions(oldest, setOf(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_EXECUTE))
         else Files.setAttribute(oldest.resolve("profiles.json"), "dos:readonly", true)
         try {
@@ -132,6 +134,17 @@ class ConfigGuardTest {
         } finally {
             if (posix) Files.setPosixFilePermissions(oldest, ownerDirectoryPermissions())
             else runCatching { Files.setAttribute(oldest.resolve("profiles.json"), "dos:readonly", false) }
+        }
+    }
+    /** True when a file inside an r-x folder cannot be deleted. Root and some file systems ignore that. Probes a throwaway folder. */
+    private fun readOnlyFolderBlocksDelete(): Boolean {
+        val probe=Files.createTempDirectory("guard-probe")
+        val file=Files.writeString(probe.resolve("f"),"x")
+        Files.setPosixFilePermissions(probe, setOf(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_EXECUTE))
+        return try { runCatching { Files.delete(file) }.isFailure } finally {
+            Files.setPosixFilePermissions(probe, ownerDirectoryPermissions())
+            Files.deleteIfExists(file)
+            Files.deleteIfExists(probe)
         }
     }
     @Test fun backupCopiesAreOwnerOnlyOnPosix() {
