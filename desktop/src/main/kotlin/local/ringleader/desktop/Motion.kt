@@ -88,6 +88,9 @@ fun ambientTickMs(tier: MotionTier): Long = if (tier == MotionTier.Lite) MotionD
     }
     CompositionLocalProvider(LocalMotionPhase provides phase, LocalNow provides now, content = content)
 }
+/** Non-secret: the manual form's last Password (true) or API token (false) choice. */
+internal const val DESK_PASSWORD_MODE = "desk.passwordMode"
+
 class MotionPreferences(private val file: java.nio.file.Path = profileFile().resolveSibling("motion.txt")) {
  private fun loadProperties() = ConfigSchemas.properties(file).apply {
   if (runCatching { Files.readString(file).trim() == "reduce" }.getOrDefault(false)) setProperty("reduce","true")

@@ -109,6 +109,8 @@ class ConnectionProfilesTest {
             }
             assertFailsWith<IllegalArgumentException> { profileFromDraft(ProfileDraft(null, "Lab", "http://pve.example.test", token, "")) }
             assertFailsWith<IllegalArgumentException> { profileFromDraft(ProfileDraft(null, "Lab", origin, "not a token", "")) }
+            // A bare user is still rejected here. The desk completes it to user@pam before a profile or connection is built.
+            assertFailsWith<IllegalArgumentException> { profileFromDraft(ProfileDraft(null, "Lab", origin, "root", "")) }
             assertFailsWith<IllegalArgumentException> { profileFromDraft(ProfileDraft(null, "Lab", origin, token, "abcd")) }
             val canonical = profileFromDraft(ProfileDraft(null, "  Lab  ", "$origin/", " $token ", pin.chunked(2).joinToString(":")))
             assertEquals("Lab", canonical.displayName)
@@ -328,7 +330,8 @@ class ConnectionProfilesTest {
             store.save(listOf(direct, pdm))
             val text = Files.readString(file)
             assertFalse(text.contains("secret"))
-            assertFalse(text.contains("8443"))
+            // The PDM port is not added to the origin. Checked with its colon: the ids are random UUIDs, and one held "8443".
+            assertFalse(text.contains(":8443"))
             assertEquals(listOf(direct, pdm), ProfileStore(file).load())
             val implicit = profileFromDraft(ProfileDraft(null, "Lab", "https://pdm.example.test:8443", token, ""))
             assertEquals(DIRECT_PVE_KIND, implicit.kind)

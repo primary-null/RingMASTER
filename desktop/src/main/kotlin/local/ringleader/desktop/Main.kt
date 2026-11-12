@@ -49,7 +49,7 @@ fun desktopMain() = application {
     var reduce by remember { mutableStateOf(preferences.read()) }
     var settings by remember { mutableStateOf(false) }
     var preferenceError by remember { mutableStateOf(false) }
-    Window(onCloseRequest = { ConsoleHost.close(); exitApplication() }, title = "RingMASTER", icon = AppIcon.large, onPreviewKeyEvent = { desktopShortcuts?.invoke(it) ?: false },
+    Window(onCloseRequest = { ConsoleHost.close(); exitApplication() }, title = WindowTitle.text, icon = AppIcon.large, onPreviewKeyEvent = { desktopShortcuts?.invoke(it) ?: false },
         // Compose's own undecorated resizer is off (zero thickness): WindowResizeFrame below is the only resizer.
         decoration = WindowDecoration.Undecorated(0.dp), resizable = true, state = windowState) {
         InstallDisplayFit(window, windowState) { Appearance.useDisplay(it) }
@@ -58,7 +58,24 @@ fun desktopMain() = application {
             if (windowState.placement == WindowPlacement.Maximized) windowState.placement = WindowPlacement.Floating
             else { applyMaximizedBounds(window); windowState.placement = WindowPlacement.Maximized }
         }
-        LaunchedEffect(windowState.placement) { WindowMemory.rememberMaximized(windowState.placement == WindowPlacement.Maximized) }
+        // Fullscreen is the immersive console. The placement from before it is restored on exit, and it is not written
+        // into the maximise memory: a later start would otherwise come back floating. DisplayFit only re-maximises
+        // while placement is Maximized, and only saves bounds while Floating, so Fullscreen needs no guard there.
+        val immersive = remember {
+            var before = windowState.placement
+            ImmersiveState { full ->
+                if (full) {
+                    if (windowState.placement != WindowPlacement.Fullscreen) before = windowState.placement
+                    windowState.placement = WindowPlacement.Fullscreen
+                } else if (windowState.placement == WindowPlacement.Fullscreen) {
+                    if (before == WindowPlacement.Maximized) { applyMaximizedBounds(window); windowState.placement = WindowPlacement.Maximized }
+                    else windowState.placement = WindowPlacement.Floating
+                }
+            }
+        }
+        LaunchedEffect(windowState.placement) {
+            if (windowState.placement != WindowPlacement.Fullscreen) WindowMemory.rememberMaximized(windowState.placement == WindowPlacement.Maximized)
+        }
         var focused by remember { mutableStateOf(window.isFocused) }
         DisposableEffect(window) {
             val listener = object : java.awt.event.WindowFocusListener {
@@ -79,7 +96,7 @@ fun desktopMain() = application {
             // Interface size: scales layout and text together on top of the OS display scaling.
             CompositionLocalProvider(androidx.compose.ui.platform.LocalDensity provides androidx.compose.ui.unit.Density(base.density * Appearance.uiScale, base.fontScale * Appearance.textScale)) {
             BackdropHost { Surface(Modifier.fillMaxSize(), color = androidx.compose.ui.graphics.Color.Transparent, contentColor = Tech.Ink) { Column {
-                WindowDraggableArea(Modifier.fillMaxWidth()) {
+                if (!immersive.active) WindowDraggableArea(Modifier.fillMaxWidth()) {
                     Row(Modifier.fillMaxWidth().background(Tech.Raised).height(32.dp).padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                         // Observe presses without consuming them: a consuming tap detector here swallowed the
                         // press and WindowDraggableArea never started a drag (verified on Debian/Xfce 0.11.0).
@@ -106,7 +123,7 @@ fun desktopMain() = application {
                         WindowControl(WindowGlyph.Close) { ConsoleHost.close();exitApplication() }
                     }
                 }
-                Box(Modifier.weight(1f)) { RingApp(host, windowState.isMinimized, focused) }
+                Box(Modifier.weight(1f)) { RingApp(host, windowState.isMinimized, focused, immersive) }
             } } } }
             // Resize edges only while floating; they sit outside the interface-size scaling so they keep their physical width.
             if (windowState.placement == WindowPlacement.Floating) WindowResizeFrame(window, titleBar = 32.dp * Appearance.uiScale)
@@ -116,18 +133,19 @@ fun desktopMain() = application {
 
 private var desktopShortcuts: ((KeyEvent) -> Boolean)? = null
 
-@Composable fun RingApp(host: AppHost, minimized: Boolean = false, focused: Boolean = true) {
+@Composable fun RingApp(host: AppHost, minimized: Boolean = false, focused: Boolean = true, immersive: ImmersiveState? = null) {
+    val immersiveState = immersive ?: remember { ImmersiveState() }
     if (!host.web) { CompositionLocalProvider(LocalAppHost provides host) { UpdateLifecycle() } }
     val motionPreferences = remember { MotionPreferences() }
     var webReduceMotion by remember { mutableStateOf(motionPreferences.read()) }
     val reduceMotion = if (host.web) webReduceMotion else LocalReduceMotion.current
     val setReduceMotion = if (host.web) { value: Boolean -> motionPreferences.write(value); webReduceMotion = value } else LocalSetReduceMotion.current
-    CompositionLocalProvider(LocalAppHost provides host, LocalReduceMotion provides reduceMotion, LocalSetReduceMotion provides setReduceMotion) {
+    CompositionLocalProvider(LocalAppHost provides host, LocalReduceMotion provides reduceMotion, LocalSetReduceMotion provides setReduceMotion, LocalImmersive provides immersiveState) {
     MaterialTheme(colorScheme = ringColors) {
     val base = androidx.compose.ui.platform.LocalDensity.current
     CompositionLocalProvider(androidx.compose.ui.platform.LocalDensity provides androidx.compose.ui.unit.Density(if(host.web) base.density * Appearance.uiScale else base.density, if (host.web) base.fontScale * Appearance.textScale else base.fontScale)) {
     // The motion system (tier, tokens, operating-system preference, the spark overlay) wraps the desktop app.
-    if (!host.web) ProvideMotionSystem { RingLeader(host, minimized, focused) } else ThemeCrossfade(Modifier.fillMaxSize()) { BackdropHost { Surface(Modifier.fillMaxSize(), color = androidx.compose.ui.graphics.Color.Transparent, contentColor = Tech.Ink) { Column { Row(Modifier.fillMaxWidth().background(Tech.Raised).padding(6.dp), verticalAlignment = Alignment.CenterVertically) { androidx.compose.foundation.Image(AppIcon.small, contentDescription = null, modifier = Modifier.size(14.dp)); Spacer(Modifier.width(6.dp)); Text("RingMASTER / Browser", color = Tech.Amber, fontSize = 11.sp) }; Box(Modifier.weight(1f)) { RingLeader(host, minimized, focused) } } } } }
+    if (!host.web) ProvideMotionSystem { RingLeader(host, minimized, focused) } else ThemeCrossfade(Modifier.fillMaxSize()) { BackdropHost { Surface(Modifier.fillMaxSize(), color = androidx.compose.ui.graphics.Color.Transparent, contentColor = Tech.Ink) { Column { if (!immersiveState.active) Row(Modifier.fillMaxWidth().background(Tech.Raised).padding(6.dp), verticalAlignment = Alignment.CenterVertically) { androidx.compose.foundation.Image(AppIcon.small, contentDescription = null, modifier = Modifier.size(14.dp)); Spacer(Modifier.width(6.dp)); Text("RingMASTER / Browser", color = Tech.Amber, fontSize = 11.sp) }; Box(Modifier.weight(1f)) { RingLeader(host, minimized, focused) } } } } }
     } } }
 }
 
@@ -185,7 +203,8 @@ private var desktopShortcuts: ((KeyEvent) -> Boolean)? = null
     ProvideMotionBook(state) {
     // Shortcuts are handled at the window, so they work even when nothing inside the page has focus.
     val pageKeys by rememberUpdatedState<(androidx.compose.ui.input.key.KeyEvent) -> Boolean>({
-        if (it.type == KeyEventType.KeyDown && it.key == Key.F5) {
+        if (page == "Fleet" && ConsoleKeys.handler?.invoke(it) == true) true
+        else if (it.type == KeyEventType.KeyDown && it.key == Key.F5) {
             when (page) {
                 "Fleet" -> { workspace.refresh(); true }
                 "Storage" -> { workspace.refreshStorageContent(); true }
@@ -237,11 +256,13 @@ private var desktopShortcuts: ((KeyEvent) -> Boolean)? = null
         page = "Fleet"
         fleetRequest = FleetRequest(guest.resource, if (pin.target == PIN_VIEW) pin.tab ?: "Summary" else "Summary", System.nanoTime())
     }
+    val consoleImmersive = LocalImmersive.current?.active == true
     Row(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         val updateState by DesktopUpdates.checker.state.collectAsState()
-        NavigationRail(state,page,platform,workspace,railToggle, updateAvailable = !host.web && updateState is UpdateState.Available, onSettings = { settingsOpen = true }, onAbout = { settingsSection = SettingsSection.About; settingsOpen = true }, pins = pins, connectionKey = connectionKey, onPin = ::openPin,
+        if (!consoleImmersive) NavigationRail(state,page,platform,workspace,railToggle, updateAvailable = !host.web && updateState is UpdateState.Available, onSettings = { settingsOpen = true }, onAbout = { settingsSection = SettingsSection.About; settingsOpen = true }, pins = pins, connectionKey = connectionKey, onPin = ::openPin,
             sessions = sessionsState.open, activeSession = session.id, profiles = deskState.profiles, onSession = sessions::show) { page=it }
-        Column(Modifier.weight(1f).fillMaxHeight().padding(16.dp), verticalArrangement = Arrangement.spacedBy(Tech.Space8)) {
+        Column(Modifier.weight(1f).fillMaxHeight().padding(if (consoleImmersive) 0.dp else 16.dp), verticalArrangement = Arrangement.spacedBy(if (consoleImmersive) 0.dp else Tech.Space8)) {
+            if (!consoleImmersive) {
             Row(Modifier.fillMaxWidth().height(40.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     // With several connections open, the heading names the one in view.
@@ -260,6 +281,7 @@ private var desktopShortcuts: ((KeyEvent) -> Boolean)? = null
                 }
             }
             linkNote?.let { Text(it, fontSize = 12.sp, color = Tech.Muted) }
+            }
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 val activeProfile = deskState.profiles.find { it.id == deskState.connectedProfileId }
                 // Fade plus a 12dp slide in the navigation direction; a fade only on Lite, nothing under Reduce motion.
@@ -268,7 +290,7 @@ private var desktopShortcuts: ((KeyEvent) -> Boolean)? = null
                 val slidePx = with(androidx.compose.ui.platform.LocalDensity.current) { pageSlideDp(reduceMotion, motion).dp.roundToPx() }
                 AnimatedContent(page,transitionSpec = { (fadeIn(tween(pageMs, easing = MotionEase.Standard)) + slideInHorizontally(tween(pageMs, easing = MotionEase.Standard)) { if(ringPages.indexOf(targetState)>ringPages.indexOf(initialState)) slidePx else -slidePx }) togetherWith fadeOut(tween(pageMs)) }) { targetPage ->
                 when (targetPage) {
-                    "Fleet" -> InventoryScreen(state, workspace, activeProfile?.let { "${it.displayName} · ${it.origin}" }, search, { search = it }, filter, { filter = it }, { page = "Desk" }, disconnectInView, pins, connectionKey, fleetRequest) { fleetRequest = null }
+                    "Fleet" -> ChartLensHost(state, workspace) { InventoryScreen(state, workspace, activeProfile?.let { "${it.displayName} · ${it.origin}" }, search, { search = it }, filter, { filter = it }, { page = "Desk" }, disconnectInView, pins, connectionKey, fleetRequest) { fleetRequest = null } }
                     "Activity" -> ActivityScreen(state, workspace, activeProfile?.let { "${it.displayName} · ${it.origin}" }, { page = "Desk" }, disconnectInView)
                     "Scan" -> ScanScreen(scanSession, deskState.profiles.map { it.origin }) { scannedSelection = it; desk.discardSecrets(); page = "Desk" }
                     "Bluetooth" -> BluetoothScreen(bluetoothScanner)

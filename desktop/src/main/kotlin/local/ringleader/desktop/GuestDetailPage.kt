@@ -16,13 +16,17 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.input.key.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import local.ringleader.core.*
 
-@Composable fun GuestDetailPage(state: WorkspaceState, workspace: Workspace, onBack: () -> Unit, onAction: (PowerAction, SnapshotRequest?) -> Unit, initialTab: String = "Summary", initialScroll: Int = 0, tabNonce: Long = 0, pins: PinStore? = null, connectionKey: String? = null) {
+/** Set by a test. Runs while the guest header is composed, so immersive mode can prove the header left. */
+internal var guestHeaderProbe: (() -> Unit)? = null
+
+@Composable fun GuestDetailPage(state: WorkspaceState, workspace: Workspace, onBack: () -> Unit, onAction: (PowerAction, SnapshotRequest?) -> Unit, initialTab: String = "Summary", initialScroll: Int = 0, tabNonce: Long = 0, pins: PinStore? = null, connectionKey: String? = null, onSwitchGuest: ((Guest) -> Unit)? = null) {
     val guest = state.selected ?: return
     val tabs = if (guest.kind == "VM") listOf("Summary","Console","Hardware","Snapshots","Backups","Bluetooth","Actions") else listOf("Summary","Console","Hardware","Snapshots","Backups","Actions")
     var tab by remember { mutableStateOf(if (initialTab in tabs) initialTab else "Summary") }
@@ -53,7 +57,49 @@ import local.ringleader.core.*
         else -> null
     }
     val scroll = rememberScrollState(initialScroll)
-    Column(Modifier.fillMaxSize().then(if (tab != "Console") Modifier.verticalScroll(scroll) else Modifier).padding(16.dp),verticalArrangement = Arrangement.spacedBy(Tech.Space12)) {
+    // Remembered here, not inside the Console branch, so the call order stays put when the tab changes.
+    val switcher = remember { ConsoleSwitcherState() }
+    var guestsOpen by remember { mutableStateOf(false) }
+    val immersive = LocalImmersive.current
+    val consoleImmersive = immersive?.active == true && tab == "Console"
+    val overlayClicks = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
+    // A dropped connection leaves immersive. Demo is not a connection, so it does not.
+    LaunchedEffect(state.connected, state.demo) { if (!state.connected && !state.demo) immersive?.exit() }
+    LaunchedEffect(consoleImmersive) { if (!consoleImmersive) guestsOpen = false }
+    val onShortcut = rememberUpdatedState<(ConsoleShortcut) -> Unit> { shortcut ->
+        val list = switcherGuests(state, guest.resource, switcher.runningOnly, switcher.filter)
+        when (shortcut) {
+            ConsoleShortcut.PreviousGuest -> if (onSwitchGuest != null) neighbourGuest(list, guest.resource, -1)?.let(onSwitchGuest)
+            ConsoleShortcut.NextGuest -> if (onSwitchGuest != null) neighbourGuest(list, guest.resource, 1)?.let(onSwitchGuest)
+            ConsoleShortcut.Immersive -> immersive?.toggle()
+        }
+    }
+    val shortcutHandler = rememberUpdatedState<(androidx.compose.ui.input.key.KeyEvent) -> Boolean> { event ->
+        val decision = consoleHostDecision(event, guestsOpen, immersive?.active == true, immersive != null)
+        if (!decision.consume) return@rememberUpdatedState false
+        when (decision.action) {
+            ConsoleHostAction.Previous -> onShortcut.value(ConsoleShortcut.PreviousGuest)
+            ConsoleHostAction.Next -> onShortcut.value(ConsoleShortcut.NextGuest)
+            ConsoleHostAction.ToggleImmersive -> immersive?.toggle()
+            ConsoleHostAction.CloseGuests -> guestsOpen = false
+            ConsoleHostAction.ExitImmersive -> { guestsOpen = false; immersive?.exit() }
+            null -> Unit
+        }
+        true
+    }
+    DisposableEffect(tab) {
+        // Captured here: onDispose runs after tab has already moved, and must still know this effect was the Console one.
+        val onConsole = tab == "Console"
+        if (onConsole) ConsoleKeys.handler = { shortcutHandler.value(it) }
+        onDispose {
+            ConsoleKeys.handler = null
+            // Leaving the Console tab, or the page leaving the composition, cannot leave immersive on.
+            if (onConsole) immersive?.exit()
+        }
+    }
+    Column(Modifier.fillMaxSize().then(if (tab != "Console") Modifier.verticalScroll(scroll) else Modifier).padding(if (consoleImmersive) 0.dp else 16.dp),verticalArrangement = Arrangement.spacedBy(if (consoleImmersive) 0.dp else Tech.Space12)) {
+        if (!consoleImmersive) {
+        SideEffect { guestHeaderProbe?.invoke() }
         Row(Modifier.fillMaxWidth(),horizontalArrangement = Arrangement.spacedBy(Tech.Space12),verticalAlignment=androidx.compose.ui.Alignment.CenterVertically) {
             MiniAction("‹ Fleet", onClick = onBack)
             Row(Modifier.weight(1f),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
@@ -99,6 +145,7 @@ import local.ringleader.core.*
         TechTabs(tabs, tab, { tab = it })
         if(state.inspectionLoading) TechProgress()
         state.detailsError?.let { Text(it,color = Tech.Red) }
+        }
         when(tab) {
             "Summary" -> {
                 // Compact facts strip: status, uptime, addresses, node, kind.
@@ -124,9 +171,9 @@ import local.ringleader.core.*
                 if (runningGuest && guest.kind == "VM") LaunchedEffect(guest.resource) { autoCaptureConsoleStill(state, workspace, guest) }
                 if (runningGuest) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
                     if (guest.kind == "VM" && state.kind != PDM_KIND && !state.demo) ConsoleStillCard(state, workspace, guest, 300.dp, onOpenConsole = { tab = "Console" })
-                    ArcGauge(cpuNow, "CPU", state.details?.cpus?.let { "$it vCPU" })
-                    ArcGauge(if (runningGuest) memoryFraction(mem, cap) else null, "Memory", "${iec(mem?.toDouble())} / ${iec(cap?.toDouble())}")
-                    Sparkline(live, Modifier.weight(1f).height(56.dp))
+                    ArcGauge(cpuNow, "CPU", state.details?.cpus?.let { "$it vCPU" }, modifier = Modifier.opensLens { guestLens(guest, LiveMetric.Cpu) }, series = live, metric = { it.cpu })
+                    ArcGauge(if (runningGuest) memoryFraction(mem, cap) else null, "Memory", "${iec(mem?.toDouble())} / ${iec(cap?.toDouble())}", modifier = Modifier.opensLens { guestLens(guest, LiveMetric.Memory) }, series = live, metric = { memoryFraction(it.mem, it.memMax) })
+                    Sparkline(live, Modifier.opensLens { guestLens(guest, LiveMetric.Cpu) }.weight(1f).height(56.dp))
                 }
                 HistoryGroup(state, workspace)
             }
@@ -249,7 +296,23 @@ import local.ringleader.core.*
                 }
             }
             "Bluetooth" -> GuestBluetoothTab(state, workspace, guest, report?.hardware?.value)
-            "Console" -> if (guest.kind == "VM") VncConsoleView(state, workspace, guest, Modifier.fillMaxWidth().weight(1f)) else TerminalView(state, workspace, TerminalTarget.guest(guest), Modifier.fillMaxWidth().weight(1f))
+            "Console" -> Row(Modifier.fillMaxWidth().weight(1f), horizontalArrangement = Arrangement.spacedBy(if (consoleImmersive) 0.dp else 8.dp)) {
+                if (onSwitchGuest != null && !consoleImmersive) ConsoleSwitcher(state, guest, switcher, onSwitchGuest, Modifier.fillMaxHeight())
+                // The weight lives on this box: key() does not keep the row's scope, so the console cannot take it itself.
+                // Keyed by guest: every remembered console state belongs to one guest and starts empty for the next one.
+                Box(Modifier.weight(1f).fillMaxHeight()) {
+                    key(guest.resource) {
+                        val openGuests = if (onSwitchGuest != null) ({ guestsOpen = true }) else null
+                        if (guest.kind == "VM") VncConsoleView(state, workspace, guest, Modifier.fillMaxSize(), onHostShortcut = { onShortcut.value(it) }, onGuests = openGuests)
+                        else TerminalView(state, workspace, TerminalTarget.guest(guest), Modifier.fillMaxSize(), onHostShortcut = { onShortcut.value(it) }, onGuests = openGuests)
+                    }
+                    if (guestsOpen && consoleImmersive && onSwitchGuest != null) {
+                        // No fill: a translucent scrim would sit on the live console, and Lite cannot afford one.
+                        Box(Modifier.fillMaxSize().clickable(interactionSource = overlayClicks, indication = null) { guestsOpen = false })
+                        ConsoleSwitcher(state, guest, switcher, { picked -> guestsOpen = false; onSwitchGuest(picked) }, Modifier.align(androidx.compose.ui.Alignment.CenterStart).fillMaxHeight())
+                    }
+                }
+            }
             "Actions" -> {
                 blockedReason?.let { Text(it, color = Tech.Amber, fontFamily = Tech.Mono, fontSize = 12.sp) }
                 SectionLabel("POWER")

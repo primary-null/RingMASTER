@@ -90,6 +90,7 @@ The same command works for every release file.
 **Connect**
 - Saved connections to Proxmox VE and Proxmox Datacenter Manager, with an API token or a password, including TOTP and recovery codes for two-factor accounts.
 - Secrets are never written to disk: each connection asks for its secret when it opens.
+- Quick sign-in: choosing Password fills in root@pam, and a name without a realm signs in as name@pam. Picking a saved connection puts the cursor in the password field and Enter connects. Password managers with auto-type can match the window title, which names the connection while its sign-in form is open.
 - Normal TLS validation, or a SHA-256 certificate pin you enter. There is no trust-on-first-use and no switch to ignore certificate errors.
 - Up to six connections open side by side, each with its own live data, tasks and secret.
 - A demo mode with clearly labelled sample data, to look around without a server.
@@ -97,6 +98,7 @@ The same command works for every release file.
 **Fleet**
 - Guests grouped by node (or by PDM remote, then node), with search, filters, live CPU, memory, network and disk, and sparklines. Refreshes every 5 s, 10 s, 30 s or 2 min, pauses while minimised and backs off on errors.
 - History charts for nodes and guests, from an hour to a year: drag to zoom, a shared crosshair, CSV export.
+- Hover any live chart or gauge to read the value and the time. Click it to open it large over the page, with live samples or server history from an hour to a year; Esc or a click outside closes it.
 - Guest pages: summary, hardware, snapshots (create with RAM, roll back, delete), backups, Bluetooth, console and actions.
 - Power actions (start, shut down, reboot, stop, reset, suspend, resume). One confirmation names the server, node, guest and action, and the task is followed to its final status.
 - Node tools: services, the system log with follow, and available package updates (read-only). A storage page with usage and contents.
@@ -109,6 +111,8 @@ The same command works for every release file.
 
 **Consoles**
 - In-app VNC console for VMs, and in-app terminals for containers, nodes and serial ports.
+- A guest list beside the console, with each guest's last screen, to click through consoles; Ctrl+Alt+PageUp and Ctrl+Alt+PageDown move through it. The keyboard-captured note fades after a moment and a toolbar chip shows where keys go.
+- Immersive console: Ctrl+Alt+Enter or F11 fills the screen with the guest and hides the rest of the app; the console bar returns when the pointer rests at the top edge.
 - SPICE through remote-viewer for VMs with a SPICE display.
 
 **Activity**

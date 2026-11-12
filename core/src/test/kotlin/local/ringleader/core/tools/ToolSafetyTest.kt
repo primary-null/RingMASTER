@@ -30,6 +30,9 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import org.junit.jupiter.api.Test
 
+/** How long a test that starts a child JVM may run before it counts as hung. */
+private const val HANG_GUARD_MS = 180_000L
+
 class ToolSafetyTest {
 
     // -- Output limits --
@@ -66,13 +69,18 @@ class ToolSafetyTest {
         val lines = mutableListOf<String>()
         val before = RunningTools.pids.toSet()
         try {
-            val failure = withTimeout(60_000) {
+            // A hang guard, not a speed check: the child JVM compiles its source first, which took over a minute on a
+            // memory-starved test VM. A real hang never returns, so the longer bound still catches it.
+            val failure = withTimeout(HANG_GUARD_MS) {
                 runCatching { runToolProcess(listOf(java, source.toString())) { line -> synchronized(lines) { lines += line } } }.exceptionOrNull()
             }
             assertIs<ToolOutputLimitException>(failure)
             assertTrue(lines.isNotEmpty())
             assertTrue(lines.all { it.length <= TOOL_LINE_LIMIT + 1 }, "a line was not cut")
-            assertTrue(lines.first().endsWith("…"))
+            // A JVM started with JAVA_TOOL_OPTIONS set (the Arch build VM sets it) first prints "Picked up JAVA_TOOL_OPTIONS: …"
+            // on stderr, which the runner merges into the output. The first line of the program's own output must be cut.
+            val spew = lines.filterNot { it.startsWith("Picked up ") }
+            assertTrue(spew.isNotEmpty() && spew.first().endsWith("…"), "the first long line was not cut: ${spew.firstOrNull()?.take(60)}")
             assertTrue(RunningTools.pids.none { it !in before }, "the process is still listed")
         } finally {
             Files.deleteIfExists(source); Files.deleteIfExists(dir)
@@ -276,7 +284,7 @@ class ToolSafetyTest {
                 Regex("(?<value>(.*a){12})b"), "slow.json")
             plugin.approval = plugin.approvalFor(emptyMap())
             val lines = mutableListOf<String>()
-            val result = withTimeout(60_000) { plugin.run(emptyMap()) { if (it is ToolEvent.Line) synchronized(lines) { lines += it.text } } }
+            val result = withTimeout(HANG_GUARD_MS) { plugin.run(emptyMap()) { if (it is ToolEvent.Line) synchronized(lines) { lines += it.text } } }
             assertTrue(result.ok, result.summary)
             assertEquals(20, lines.count { it == "a".repeat(40) }, lines.toString())
             assertTrue(lines.any { it.contains("too slow") }, lines.toString())

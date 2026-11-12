@@ -62,6 +62,59 @@ class ProfileDeskTest {
         } finally { desk.close(); workspace.close(); deleteParent(file) }
     }
 
+    @Test fun passwordDefaultsAndABareUserCompletesToPam() {
+        assertEquals(DEFAULT_PASSWORD_USER, "root@pam")
+        assertEquals("root@pam", passwordUserAfterSwitch(""))
+        assertEquals("root@pam", passwordUserAfterSwitch("   "))
+        assertEquals("root@pam", passwordUserAfterSwitch("root@pam!monitor"))
+        assertEquals("root@pam", passwordUserAfterSwitch("!monitor"))
+        assertEquals("admin@pve", passwordUserAfterSwitch(" admin@pve "))
+        assertEquals("root", passwordUserAfterSwitch(" root "))
+        assertEquals("root@pam", completeLoginUser("root"))
+        assertEquals("admin@pve", completeLoginUser("admin@pve"))
+        assertEquals("", completeLoginUser(""))
+        assertEquals("", completeLoginUser("   "))
+        assertEquals("root@pam", completeLoginUser(" root "))
+        assertEquals("root@pam!monitor", completeLoginUser(" root@pam!monitor "))
+    }
+
+    @Test fun saveAndConnectCompleteABarePasswordUserBeforeTheConnectionExists() = runTest {
+        lateinit var seen: Connection
+        val fake = FakeGateway()
+        fake.inventory = { seen = it; Overview(1, listOf(guest(it.remoteKey, 100, "alpha"))) }
+        val (desk, file, workspace) = open(fake)
+        try {
+            desk.beginCreate()
+            desk.updateDraft("Lab", origin, " root ", "")
+            assertTrue(desk.saveDraft(passwordLogin = true))
+            assertEquals("root@pam", desk.state.value.profiles.single().tokenId)
+            assertEquals("root@pam", desk.state.value.draft.tokenId)
+            desk.beginCreate()
+            desk.updateDraft("Token", origin, "root@pam!monitor", "")
+            assertFalse(desk.saveDraft(passwordLogin = true))
+            assertEquals("root@pam!monitor", desk.state.value.draft.tokenId)
+            assertTrue(desk.state.value.formError!!.contains("API token ID"))
+            desk.setManualSecret(secret)
+            assertTrue(desk.connectManual(origin, "admin@pve", "", passwordLogin = true))
+            runCurrent()
+            assertEquals("admin@pve", seen.tokenId)
+            workspace.disconnect()
+            desk.setManualSecret(secret)
+            assertFalse(desk.connectManual(origin, "   ", "", passwordLogin = true))
+            assertFalse(workspace.state.value.connected)
+            desk.setManualSecret(secret)
+            assertFalse(desk.connectManual(origin, "root!monitor", "", passwordLogin = true))
+            assertTrue(desk.state.value.formError!!.contains("API token ID"))
+            assertTrue(desk.hasManualSecret())
+            assertTrue(desk.connectManual(origin, " root ", "", passwordLogin = true))
+            runCurrent()
+            assertEquals("root@pam", seen.tokenId)
+            assertTrue(seen.passwordLogin)
+            assertFalse(desk.hasManualSecret())
+            assertFalse(Files.readString(file).contains(secret))
+        } finally { desk.close(); workspace.close(); deleteParent(file) }
+    }
+
     @Test fun authChoiceOnlyAppliesToDirectPve() {
         assertNull(authChoiceMismatch(false, "root@pam!t", DIRECT_PVE_KIND))
         assertNull(authChoiceMismatch(true, "root@pam", DIRECT_PVE_KIND))

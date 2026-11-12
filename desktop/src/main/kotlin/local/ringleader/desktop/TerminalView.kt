@@ -32,7 +32,7 @@ private fun terminalColor(c: TerminalColor?, default: Color): Color {
     return if(i<16) Color(0xff000000L or ansi[i].toLong()) else if(i<232) { val n=i-16; fun part(v:Int): Int { return if(v==0) 0 else 55+40*v }; Color(part(n/36),part(n/6%6),part(n%6)) } else { val v=8+10*(i-232); Color(v,v,v) }
 }
 
-@Composable fun TerminalView(state: WorkspaceState, workspace: Workspace, target: TerminalTarget, modifier: Modifier = Modifier) {
+@Composable internal fun TerminalView(state: WorkspaceState, workspace: Workspace, target: TerminalTarget, modifier: Modifier = Modifier, onHostShortcut: ((ConsoleShortcut) -> Unit)? = null, onGuests: (() -> Unit)? = null) {
     var retry by remember(target) { mutableStateOf(0) }
     var session by remember(target,retry,state.connectionEpoch) { mutableStateOf<TerminalSession?>(null) }
     var reason by remember(target,retry,state.connectionEpoch) { mutableStateOf("Connecting") }
@@ -48,10 +48,10 @@ private fun terminalColor(c: TerminalColor?, default: Color): Color {
     val model=session?.model
     val fallback=remember(target,retry) { TerminalModel() }
     DisposableEffect(fallback) { onDispose { fallback.close() } }
-    TerminalPane(model ?: fallback,session,reason, { retry++ },modifier)
+    TerminalPane(model ?: fallback, session, reason, { retry++ }, modifier, onHostShortcut, onGuests)
 }
 
-@Composable internal fun TerminalPane(model: TerminalModel, session: TerminalSession?, initialStatus: String, reconnect: () -> Unit, modifier: Modifier=Modifier) {
+@Composable internal fun TerminalPane(model: TerminalModel, session: TerminalSession?, initialStatus: String, reconnect: () -> Unit, modifier: Modifier = Modifier, onHostShortcut: ((ConsoleShortcut) -> Unit)? = null, onGuests: (() -> Unit)? = null) {
     var font by remember { mutableStateOf(13) }
     var tick by remember { mutableStateOf(0) }
     var offset by remember { mutableStateOf(0) }
@@ -86,13 +86,29 @@ private fun terminalColor(c: TerminalColor?, default: Color): Color {
     }
     fun copy() { clipboard.setText(AnnotatedString(selected())) }
     fun paste() { clipboard.getText()?.text?.let { session?.input(model.paste(it)) } }
-    Column(modifier.fillMaxSize().background(Tech.Black)) {
+    // Held while a host shortcut's key is down, so a key repeat does not switch guests again. Not snapshot state.
+    val swallowed = remember { object { var key: Key? = null } }
+    // A node terminal has no host shortcut, so it never grows an immersive control.
+    val immersiveState = if (onHostShortcut != null) LocalImmersive.current else null
+    val immersiveNow = immersiveState?.active == true
+    val edgeResting = remember { mutableStateOf(false) }
+    LaunchedEffect(immersiveNow) { if (!immersiveNow) edgeResting.value = false }
+    val toolbar: @Composable () -> Unit = {
         Row(Modifier.fillMaxWidth().height(32.dp),verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(6.dp)) {
             Text(if (tick < 0) "" else session?.reason ?: if(session?.ready==true) "Connected $cols×$rows" else initialStatus,Modifier.weight(1f),color=Tech.Muted,fontFamily=Tech.Mono,fontSize=11.sp,maxLines=1)
             MiniAction("Copy") { copy() }; MiniAction("Paste",enabled=session?.ready==true) { paste() }
             MiniAction("Reconnect",onClick=reconnect)
             MiniAction("−",enabled=font>9) { font-- }; Text("$font",color=Tech.Muted,fontSize=11.sp); MiniAction("+",enabled=font<28) { font++ }
+            if (immersiveNow) {
+                if (onGuests != null) MiniAction("Guests ▾") { onGuests() }
+                HelpTip("Ctrl+Alt+Enter") { MiniAction("Exit immersive") { immersiveState?.exit() } }
+            } else if (immersiveState != null) MiniAction("⛶ Immersive") { immersiveState.enter() }
         }
+    }
+    // The screen stays the second child, so entering immersive does not rebuild the terminal.
+    Box(modifier.fillMaxSize().background(Tech.Black).then(if (immersiveState != null) Modifier.consoleTopRest(immersiveNow) { edgeResting.value = it } else Modifier)) {
+    Column(Modifier.fillMaxSize()) {
+        Box(Modifier.fillMaxWidth().height(if (immersiveNow) 0.dp else 32.dp)) { if (!immersiveNow) toolbar() }
         // Glyph layouts are cached per character and style: laying out every cell on every frame was thousands of
         // text layouts per frame at full-window sizes.
         val glyphs = remember(font, style) { HashMap<String, androidx.compose.ui.text.TextLayoutResult>() }
@@ -104,7 +120,14 @@ private fun terminalColor(c: TerminalColor?, default: Color): Color {
             Canvas(Modifier.fillMaxSize().onSizeChanged { cols=(it.width/cw).toInt().coerceIn(2,1000); rows=(it.height/ch).toInt().coerceIn(2,500) }
                 .focusRequester(focus).onFocusChanged { focused=it.isFocused; VncKeyboard.captured=it.isFocused }.focusable()
                 .onPreviewKeyEvent { e ->
-                    if(!focused) false else if(e.type!=KeyEventType.KeyDown) true else {
+                    if (!focused) false else {
+                    val host = if (onHostShortcut != null) consoleShortcut(e) else null
+                    if (host != null) {
+                        // Taken before the key-up swallow below, so the guest never sees half of Ctrl+Alt+PageUp / PageDown / Enter.
+                        if (e.type == KeyEventType.KeyDown && swallowed.key != e.key) { swallowed.key = e.key; onHostShortcut?.invoke(host) }
+                        else if (e.type == KeyEventType.KeyUp && e.key == swallowed.key) swallowed.key = null
+                        true
+                    } else if(e.type!=KeyEventType.KeyDown) true else {
                         if(e.isCtrlPressed && e.isShiftPressed && e.key==Key.C) copy()
                         else if(e.isCtrlPressed && e.isShiftPressed && e.key==Key.V) paste()
                         else {
@@ -117,6 +140,7 @@ private fun terminalColor(c: TerminalColor?, default: Color): Color {
                                 model.terminal.getCodeForKey(code,0)?.toString(Charsets.UTF_8) ?: terminalKey(name,text)
                             } else terminalKey(name,text,e.isCtrlPressed,e.isAltPressed))?.let { session?.input(it); offset=0 }
                         }; true
+                    }
                     }
                 }.pointerInput(model,cw,ch,cols,rows) { awaitPointerEventScope { while(true) {
                     val e=awaitPointerEvent(); val c=e.changes.firstOrNull() ?: continue
@@ -152,5 +176,7 @@ private fun terminalColor(c: TerminalColor?, default: Color): Color {
             }
             if (blank) Text("Press Enter to show the console's prompt", Modifier.align(Alignment.Center), color = Tech.Muted, fontFamily = Tech.Mono, fontSize = 11.sp)
         } }
+    }
+    if (immersiveNow) ImmersiveConsoleBar(edgeResting.value) { toolbar() }
     }
 }

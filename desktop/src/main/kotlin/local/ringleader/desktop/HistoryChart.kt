@@ -19,11 +19,16 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.*
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.*
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
@@ -45,6 +50,9 @@ class HistoryInteraction {
     var zoom by mutableStateOf<ClosedFloatingPointRange<Double>?>(null)
 }
 private val LocalHistoryInteraction = staticCompositionLocalOf { HistoryInteraction() }
+
+/** Set only by a test, so it can click the expand button without a semantics finder. */
+internal val LocalExpandBounds = staticCompositionLocalOf<((Rect) -> Unit)?> { null }
 private object HistoryPreference { var timeframe = "hour"; var cf = "AVERAGE" }
 
 /** The history load key and whether this view should read now. A stale inventory cannot read, so the charts reload once it recovers. */
@@ -110,7 +118,14 @@ internal class HistoryLoadGate {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     charts.chunked(perRow).forEach { row ->
                         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            row.forEach { (title, keys) -> Box(Modifier.weight(1f)) { HistoryChart(title, points, keys, if (state.chartHistoryLoading) "Loading history…" else "No samples in this window") } }
+                            row.forEach { (title, keys) ->
+                                var origin by remember(title, keys) { mutableStateOf<Rect?>(null) }
+                                val lens = LocalChartLens.current
+                                Box(Modifier.weight(1f).onGloballyPositioned { origin = it.boundsInWindow() }) {
+                                    HistoryChart(title, points, keys, if (state.chartHistoryLoading) "Loading history…" else "No samples in this window",
+                                        onExpand = lens?.let { { it.open(historyLensRequest(state, node, title, keys, timeframe, cf, origin)) } })
+                                }
+                            }
                             if (row.size < perRow) Spacer(Modifier.weight(1f))
                         }
                     }
@@ -121,7 +136,7 @@ internal class HistoryLoadGate {
 }
 
 /** Joined segmented choice used for the timeframe and the consolidation. */
-@Composable private fun HistorySegments(items: List<Pair<String, String>>, selected: String, onSelect: (String) -> Unit) {
+@Composable internal fun HistorySegments(items: List<Pair<String, String>>, selected: String, onSelect: (String) -> Unit) {
     Row(Modifier.height(28.dp).border(1.dp, Tech.Edge, Tech.Control)) {
         items.forEachIndexed { i, (key, label) ->
             if (i > 0) Box(Modifier.width(1.dp).fillMaxHeight().background(Tech.Edge))
@@ -147,8 +162,9 @@ internal fun historyChartDescription(title: String, latest: String?, min: String
  * Hover is cheap: the shared cursor is read only while drawing (the crosshair and the markers) and by [HistoryReadout],
  * never by this composable's body, so moving the pointer does not rebuild the cached stroke and fill paths.
  */
-@Composable fun HistoryChart(title: String, points: List<HistoryPoint>, keys: List<String>, emptyNote: String = "No samples yet — new guests take a few minutes") {
+@Composable fun HistoryChart(title: String, points: List<HistoryPoint>, keys: List<String>, emptyNote: String = "No samples yet — new guests take a few minutes", plotHeight: Dp = 150.dp, onExpand: (() -> Unit)? = null) {
     val shared = LocalHistoryInteraction.current
+    KeepCrosshair(shared, points)
     var hidden by remember(keys) { mutableStateOf(emptySet<String>()) }
     val activeKeys = keys.filterNot { it in hidden }
     val colors = listOf(Tech.Amber, Tech.Green)
@@ -189,22 +205,28 @@ internal fun historyChartDescription(title: String, latest: String?, min: String
                 }
             }
             Spacer(Modifier.weight(1f))
+            if (onExpand != null) {
+                val report = LocalExpandBounds.current
+                Box(Modifier.onGloballyPositioned { report?.invoke(it.boundsInRoot()) }) {
+                    HelpTip("Open large") { MiniAction("⤢", onClick = onExpand) }
+                }
+            }
             Text(format(latest), fontSize = 13.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold, fontFamily = Tech.Mono, color = primary?.let { seriesColor(it) } ?: Tech.Ink, maxLines = 1)
         }
         Text(if (primaryValues.isEmpty()) " " else "MIN ${format(primaryValues.min())}   AVG ${format(primaryValues.average())}   MAX ${format(primaryValues.max())}",
             Modifier.heightIn(min = 16.dp), fontSize = 9.sp, letterSpacing = .5.sp, fontFamily = Tech.Mono, color = Tech.Muted, maxLines = 1)
         Spacer(Modifier.height(4.dp))
         if (points.none { p -> keys.any { p.values[it] != null } }) {
-            Box(Modifier.fillMaxWidth().height(150.dp), contentAlignment = androidx.compose.ui.Alignment.Center) { Text(emptyNote, color = Tech.Muted, fontSize = 11.sp, fontFamily = Tech.Mono) }
+            Box(Modifier.fillMaxWidth().height(plotHeight), contentAlignment = androidx.compose.ui.Alignment.Center) { Text(emptyNote, color = Tech.Muted, fontSize = 11.sp, fontFamily = Tech.Mono) }
             return@TechPanel
         }
         val description = if (primaryValues.isEmpty()) historyChartDescription(title, null, null, null, null)
             else historyChartDescription(title, format(latest), format(primaryValues.min()), format(primaryValues.average()), format(primaryValues.max()))
         Row {
-            Column(Modifier.width(axisWidth).height(150.dp).padding(end = 8.dp), verticalArrangement = Arrangement.SpaceBetween) {
+            Column(Modifier.width(axisWidth).height(plotHeight).padding(end = 8.dp), verticalArrangement = Arrangement.SpaceBetween) {
                 listOf(max, max * .75, max / 2, max * .25, 0.0).forEach { Text(axisFormat(it), Modifier.fillMaxWidth(), fontSize = 9.sp, color = Tech.Muted, fontFamily = Tech.Mono, textAlign = TextAlign.End, maxLines = 1) }
             }
-            Box(Modifier.weight(1f).height(150.dp).clipToBounds().onSizeChanged { chartSize = it }
+            Box(Modifier.weight(1f).height(plotHeight).clipToBounds().onSizeChanged { chartSize = it }
                 .semantics { contentDescription = description }
                 .onPointerEvent(PointerEventType.Move) { event ->
                     val x = event.changes.firstOrNull()?.position?.x ?: return@onPointerEvent
@@ -283,6 +305,28 @@ internal fun historyChartDescription(title: String, latest: String?, min: String
         Row(Modifier.fillMaxWidth().padding(start = axisWidth, top = 4.dp), horizontalArrangement = Arrangement.SpaceBetween) {
             val first = points.firstOrNull()?.time; val last = points.lastOrNull()?.time
             (0..steps).forEach { n -> Text(if (first == null || last == null) " " else clock.format(Instant.ofEpochSecond((first + (last - first) * n / steps).toLong())), fontSize = 9.sp, color = Tech.Muted, fontFamily = Tech.Mono, maxLines = 1) }
+        }
+    }
+}
+
+/** The lens's own cursor and zoom, so they never mix with the charts on the page. */
+@Composable internal fun HistoryChartPanel(title: String, points: List<HistoryPoint>, keys: List<String>, emptyNote: String, plotHeight: Dp, interaction: HistoryInteraction) {
+    CompositionLocalProvider(LocalHistoryInteraction provides interaction) {
+        HistoryChart(title, points, keys, emptyNote, plotHeight = plotHeight)
+    }
+}
+
+/**
+ * Drops a crosshair whose sample has scrolled out of [points]. The instant is read inside [snapshotFlow], not during
+ * composition, so a pointer move still rebuilds only [HistoryReadout].
+ */
+@Composable private fun KeepCrosshair(shared: HistoryInteraction, points: List<HistoryPoint>) {
+    LaunchedEffect(points) {
+        snapshotFlow { shared.instant }.collect { instant ->
+            if (instant == null) return@collect
+            val first = points.firstOrNull()?.time
+            val last = points.lastOrNull()?.time
+            if (first == null || last == null || instant < first || instant > last) shared.instant = null
         }
     }
 }

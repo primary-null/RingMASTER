@@ -1,3 +1,4 @@
+@file:OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
 package local.ringleader.desktop
 
 import androidx.compose.animation.animateColorAsState
@@ -21,6 +22,14 @@ import androidx.compose.ui.graphics.*
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.input.key.*
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.onPointerEvent
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.positionInWindow
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
@@ -29,7 +38,11 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.*
 import local.ringleader.core.*
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import java.util.Locale
+import kotlin.math.roundToInt
 
 val LocalSearchFocus = staticCompositionLocalOf { androidx.compose.ui.focus.FocusRequester() }
 
@@ -139,6 +152,94 @@ internal fun sparkLead(previous: List<Double?>, next: List<Double?>): Double? =
     if (previous.size == next.size && next.size >= 2 && previous != next) previous.first()?.takeIf { it.isFinite() && it >= 0.0 } else null
 
 /**
+ * Nearest sample to a pointer [x] inside a sparkline of [width]. The slide is ignored here: the hairline adds it when
+ * it draws, so the index stays on the sample the line is showing. Empty and a non-positive width have no sample.
+ */
+internal fun sparkNearestIndex(x: Float, width: Float, count: Int): Int? {
+    if (count <= 0 || !(width > 0f) || !x.isFinite()) return null
+    if (count == 1) return 0
+    val step = width / (count - 1).toFloat()
+    if (!(step > 0f)) return 0
+    return (x / step).roundToInt().coerceIn(0, count - 1)
+}
+
+/** Which words a series sparkline says on hover. [None] draws the hairline and no bubble. */
+enum class SparkReadout { Cpu, Memory, None }
+
+/** Hover x in the sparkline's own coordinates. Read only while drawing and inside the readout, never by the line body. */
+@Stable
+class SparkHover {
+    var x by mutableStateOf<Float?>(null)
+}
+
+/** Counts compositions of the sparkline body when a test provides it. Pointer moves must not change it. */
+internal val LocalSparkBodyCompositions = staticCompositionLocalOf<MutableIntState?> { null }
+
+internal fun sparkCpuValue(sample: Sample): String {
+    val cpu = sample.cpu
+    if (cpu == null || !cpu.isFinite() || cpu < 0.0) return "no sample"
+    return String.format(Locale.ROOT, "%.1f %%", cpu * 100)
+}
+
+internal fun sparkMemoryValue(sample: Sample): String {
+    val fraction = memoryFraction(sample.mem, sample.memMax)
+    val mem = sample.mem
+    if (fraction == null && (mem == null || mem < 0L)) return "no sample"
+    val pct = fraction?.let { String.format(Locale.ROOT, "%.0f %%", it * 100) } ?: "—"
+    val cap = sample.memMax
+    if (mem != null && mem >= 0L && cap != null && cap > 0L) return "$pct · ${gib(mem)} / ${gib(cap)} GiB"
+    return pct
+}
+
+internal fun sparkNetValue(sample: Sample): String {
+    if (sample.netInRate == null && sample.netOutRate == null) return "no sample"
+    return "IN ${formatRate(sample.netInRate)} · OUT ${formatRate(sample.netOutRate)}"
+}
+
+internal fun sparkSampleValue(sample: Sample, readout: SparkReadout): String = when (readout) {
+    SparkReadout.Memory -> sparkMemoryValue(sample)
+    else -> sparkCpuValue(sample)
+}
+
+/**
+ * The bubble text. "(no change)" is kept only when the whole line, including the time, fits [limit]; a long memory
+ * line drops it. A missing sample stays "no sample".
+ */
+internal fun sparkReadoutLine(value: String, held: Boolean, time: String?, limit: Int = 42): String {
+    val base = if (held && value != "no sample") {
+        val withHeld = "$value (no change)"
+        val extra = if (time.isNullOrBlank()) 0 else 3 + time.length
+        if (withHeld.length + extra <= limit) withHeld else value
+    } else value
+    return if (time.isNullOrBlank()) base else "$base · $time"
+}
+
+/** Local `HH:mm:ss`, or the date as well when [times] spans midnight in [zone]. */
+internal fun sparkClock(times: List<Instant>?, index: Int, zone: ZoneId = ZoneId.systemDefault()): String? {
+    if (times == null || index !in times.indices) return null
+    val days = times.asSequence().map { it.atZone(zone).toLocalDate() }.toSet()
+    val pattern = if (days.size > 1) "yyyy-MM-dd HH:mm:ss" else "HH:mm:ss"
+    return DateTimeFormatter.ofPattern(pattern).withZone(zone).format(times[index])
+}
+
+/** Exact gauge value, its detail, and the live samples' minimum, average and maximum when a series is passed. */
+internal fun gaugeExact(value: Double?): String =
+    value?.takeIf { it.isFinite() && it >= 0.0 }?.let { String.format(Locale.ROOT, "%.1f %%", it * 100) } ?: "—"
+
+internal fun gaugeStatsLine(series: Series, metric: (Sample) -> Double?): String? {
+    val values = series.samples.mapNotNull { metric(it)?.takeIf { v -> v.isFinite() && v >= 0.0 } }
+    if (values.isEmpty()) return null
+    fun one(v: Double) = String.format(Locale.ROOT, "%.1f %%", v * 100)
+    return "Last ${values.size} samples: min ${one(values.min())} · avg ${one(values.average())} · max ${one(values.max())}"
+}
+
+internal fun gaugeHoverText(value: Double?, detail: String?, series: Series?, metric: (Sample) -> Double?): String {
+    val head = if (detail.isNullOrBlank()) gaugeExact(value) else "${gaugeExact(value)} · $detail"
+    val stats = series?.let { gaugeStatsLine(it, metric) } ?: return head
+    return "$head\n$stats"
+}
+
+/**
  * The indexes a sparkline draws a point at. A sample the server had not refreshed ([held]) repeats the one before it,
  * and a point there would draw a flat step; the line runs straight through it instead. The first sample after a gap
  * and the newest sample are always drawn, so a line never starts late or stops short of the right edge.
@@ -167,7 +268,7 @@ internal fun sparkPoints(values: List<Double?>, held: List<Boolean>?): List<Int>
  * row rebuilds its paths once per new sample. The strip and the inspector pass ease = true.
  */
 @Composable fun Sparkline(values: List<Double?>, modifier: Modifier = Modifier, color: Color? = null, floor: Double = .05, ceiling: Double = 1.0, grid: Boolean = true, pulse: Boolean = true,
-    held: List<Boolean>? = null, stamp: Any? = null, ease: Boolean = pulse) {
+    held: List<Boolean>? = null, stamp: Any? = null, ease: Boolean = pulse, times: List<Instant>? = null, label: ((Int) -> String)? = null, hover: SparkHover? = null) {
     val last = values.lastOrNull { it != null }
     val tint = color ?: ramp(last ?: 0.0)
     val reduce = LocalReduceMotion.current
@@ -186,8 +287,27 @@ internal fun sparkPoints(values: List<Double?>, held: List<Boolean>?): List<Int>
     val rolled = remember { object { var seen: List<Double?> = emptyList(); var lead: Double? = null } }
     if (rolled.seen != values) { rolled.lead = sparkLead(rolled.seen, values); rolled.seen = values }
     val lead = rolled.lead
-    // Only hero sparklines read the shared pulse during draw. Table rows pass pulse = false and stay static between samples.
-    Box(modifier.clipToBounds().drawWithCache {
+    // Hover lives on its own state. This function never reads it, so a pointer move does not rebuild the paths below.
+    val owned = remember { SparkHover() }
+    val cursor = hover ?: owned
+    Box(modifier) {
+        Box(Modifier.matchParentSize().clipToBounds()) {
+            SparklineBody(values, tint, gain, grid, pulsing, held, lead, shift)
+            SparkHoverMarks(cursor, values, gain, tint, shift)
+        }
+        if (label != null) SparkReadout(cursor, count, times, held, label)
+        // Above the line, so the hit is this overlay and not the hairline drawn on top of the path.
+        if (hover == null) Box(Modifier.matchParentSize().sparkTrack(owned))
+    }
+}
+
+/** The cached stroke and fill. It does not read the pointer, so hover cannot rebuild these paths. */
+@Composable private fun SparklineBody(values: List<Double?>, tint: Color, gain: Float, grid: Boolean, pulsing: Boolean, held: List<Boolean>?, lead: Double?, shift: Animatable<Float, AnimationVector1D>) {
+    val tick = LocalSparkBodyCompositions.current
+    SideEffect { if (tick != null) tick.intValue = tick.intValue + 1 }
+    val count = values.size
+    val phase = LocalMotionPhase.current
+    Box(Modifier.fillMaxSize().drawWithCache {
         val unit = gain.toDouble()
         val n = (count - 1).coerceAtLeast(1)
         val step = size.width / n
@@ -228,8 +348,77 @@ internal fun sparkPoints(values: List<Double?>, held: List<Boolean>?): List<Int>
         }
     })
 }
-@Composable fun Sparkline(series: Series, modifier: Modifier = Modifier, pulse: Boolean = true, grid: Boolean = true, floor: Double = .05, ease: Boolean = pulse, metric: (Sample) -> Double? = { it.cpu }) =
-    Sparkline(series.samples.map(metric), modifier, floor = floor, grid = grid, pulse = pulse, held = series.samples.map { it.held }, stamp = series.samples.lastOrNull()?.at, ease = ease)
+
+/** Pointer tracking that does not take the click. Press and Release stay with the row that selects a guest. */
+private fun Modifier.sparkTrack(cursor: SparkHover): Modifier =
+    onPointerEvent(PointerEventType.Enter) { event ->
+        cursor.x = event.changes.firstOrNull()?.position?.x
+    }.onPointerEvent(PointerEventType.Move) { event ->
+        cursor.x = event.changes.firstOrNull()?.position?.x
+    }.onPointerEvent(PointerEventType.Exit) { cursor.x = null }
+
+/** Hairline and ring dot. Both are drawn from the hover state, so a pointer move does not rebuild the line. */
+@Composable private fun SparkHoverMarks(cursor: SparkHover, values: List<Double?>, gain: Float, tint: Color, shift: Animatable<Float, AnimationVector1D>) {
+    val count = values.size
+    Box(Modifier.fillMaxSize().drawBehind {
+        val x = cursor.x ?: return@drawBehind
+        if (count <= 0 || !(size.width > 0f)) return@drawBehind
+        val index = sparkNearestIndex(x, size.width, count) ?: return@drawBehind
+        val step = if (count <= 1) size.width else size.width / (count - 1)
+        val hair = (if (count <= 1) size.width else step * index + shift.value * step).coerceIn(0f, size.width)
+        drawLine(Tech.Ink.copy(alpha = .5f), Offset(hair, 0f), Offset(hair, size.height), 1f)
+        val sample = values.getOrNull(index)
+        if (sample != null && sample.isFinite() && sample >= 0.0) {
+            val pad = 2.dp.toPx()
+            val y = pad + ((size.height - pad * 2) * (1 - (sample * gain.toDouble()).coerceIn(0.0, 1.0))).toFloat()
+            val at = Offset(hair, y)
+            val radius = 3.dp.toPx()
+            drawCircle(Tech.Panel, radius, at)
+            drawCircle(tint, radius, at, style = Stroke(1.25.dp.toPx()))
+        }
+    })
+}
+
+/**
+ * The only composable that reads the hover position. Past 60% of the width the bubble sits to the left of the pointer.
+ * It stays inside the window, and inside the chart when there is no room above it (a chart that fills the scene).
+ */
+@Composable private fun BoxScope.SparkBubble(cursor: SparkHover, count: Int, textAt: (Int) -> String) {
+    val x = cursor.x ?: return
+    BoxWithConstraints(Modifier.matchParentSize()) {
+        val widthPx = constraints.maxWidth.toFloat()
+        val index = sparkNearestIndex(x, widthPx, count) ?: return@BoxWithConstraints
+        val text = textAt(index)
+        var bubble by remember { mutableStateOf(IntSize.Zero) }
+        var chartAt by remember { mutableStateOf(Offset.Zero) }
+        val window = LocalWindowInfo.current.containerSize
+        Box(Modifier.matchParentSize().onGloballyPositioned { chartAt = it.positionInWindow() }) {
+            val windowW = window.width
+            val limit = if (windowW > 0) windowW.toFloat() else widthPx
+            val originX = if (windowW > 0) chartAt.x else 0f
+            var left = if (x > widthPx * .6f) x - 8f - bubble.width else x + 8f
+            if (bubble.width > 0) {
+                if (originX + left + bubble.width > limit) left = limit - originX - bubble.width
+                if (originX + left < 0f) left = -originX
+            }
+            val top = if (window.height > 0 && bubble.height > 0 && chartAt.y >= bubble.height + 2) -bubble.height.toFloat() else 4f
+            Surface(Modifier.offset { IntOffset(left.roundToInt(), top.roundToInt()) }.onSizeChanged { bubble = it },
+                color = Tech.Raised, shape = Tech.Control, border = BorderStroke(1.dp, Tech.Edge),
+                shadowElevation = if (LocalMotion.current.lite) 0.dp else 4.dp) {
+                Text(text, Modifier.padding(horizontal = 6.dp, vertical = 3.dp), color = Tech.Ink, fontSize = 10.sp, fontFamily = Tech.Mono, maxLines = 1)
+            }
+        }
+    }
+}
+
+@Composable private fun BoxScope.SparkReadout(cursor: SparkHover, count: Int, times: List<Instant>?, held: List<Boolean>?, label: (Int) -> String) {
+    SparkBubble(cursor, count) { index -> sparkReadoutLine(label(index), held?.getOrNull(index) == true, sparkClock(times, index)) }
+}
+
+@Composable fun Sparkline(series: Series, modifier: Modifier = Modifier, pulse: Boolean = true, grid: Boolean = true, floor: Double = .05, ease: Boolean = pulse,
+    readout: SparkReadout = SparkReadout.Cpu, hover: SparkHover? = null, metric: (Sample) -> Double? = { it.cpu }) =
+    Sparkline(series.samples.map(metric), modifier, floor = floor, grid = grid, pulse = pulse, held = series.samples.map { it.held }, stamp = series.samples.lastOrNull()?.at, ease = ease,
+        times = series.samples.map { it.at }, label = if (readout == SparkReadout.None) null else { i -> sparkSampleValue(series.samples[i], readout) }, hover = hover)
 
 /**
  * Inbound (green) and outbound (amber) rates on one shared scale, at least 1 KiB/s tall. The two lines are drawn in
@@ -239,9 +428,22 @@ internal fun sparkPoints(values: List<Double?>, held: List<Boolean>?): List<Int>
     val ins = series.samples.map { it.netInRate }; val outs = series.samples.map { it.netOutRate }
     val top = sparkTop(ins + outs, floor = 1024.0, ceiling = Double.MAX_VALUE)
     val held = series.samples.map { it.held }; val stamp = series.samples.lastOrNull()?.at
+    val cursor = remember { SparkHover() }
     Box(modifier) {
-        Sparkline(ins, Modifier.matchParentSize(), color = Tech.Green, floor = top, ceiling = top, pulse = pulse, held = held, stamp = stamp, ease = ease)
-        Sparkline(outs, Modifier.matchParentSize(), color = Tech.Amber, floor = top, ceiling = top, grid = false, pulse = pulse, held = held, stamp = stamp, ease = ease)
+        Sparkline(ins, Modifier.matchParentSize(), color = Tech.Green, floor = top, ceiling = top, pulse = pulse, held = held, stamp = stamp, ease = ease, hover = cursor)
+        Sparkline(outs, Modifier.matchParentSize(), color = Tech.Amber, floor = top, ceiling = top, grid = false, pulse = pulse, held = held, stamp = stamp, ease = ease, hover = cursor)
+        Box(Modifier.matchParentSize().sparkTrack(cursor))
+        NetSparkReadout(cursor, series)
+    }
+}
+
+/** One bubble for both rates. It is the only reader of the shared hover, so the two lines are not rebuilt as the pointer moves. */
+@Composable private fun BoxScope.NetSparkReadout(cursor: SparkHover, series: Series) {
+    val samples = series.samples
+    val times = remember(samples) { samples.map { it.at } }
+    SparkBubble(cursor, samples.size) { index ->
+        val sample = samples[index]
+        sparkReadoutLine(sparkNetValue(sample), sample.held, sparkClock(times, index))
     }
 }
 
@@ -333,37 +535,61 @@ internal fun shortRate(value: Double?): String = when {
     Text(formatRate(value), fontSize = fontSize, lineHeight = fontSize * 1.2f, fontFamily = Tech.Mono, color = Tech.Ink.copy(alpha = .85f), maxLines = 1)
 }
 
-/** 240° gauge that eases to new values without overshoot, number in the centre, caption and detail below. */
-@Composable fun ArcGauge(value: Double?, caption: String, detail: String? = null, size: Dp = 84.dp) {
+/** 240° gauge that eases to new values without overshoot, number in the centre, caption and detail below. Hover names the exact value. */
+@Composable fun ArcGauge(value: Double?, caption: String, detail: String? = null, size: Dp = 84.dp, modifier: Modifier = Modifier, series: Series? = null, metric: (Sample) -> Double? = { it.cpu }) {
+    var hovered by remember { mutableStateOf(false) }
+    val setHovered = remember<(Boolean) -> Unit> { { hovered = it } }
+    Column(modifier.onPointerEvent(PointerEventType.Enter) { setHovered(true) }
+        .onPointerEvent(PointerEventType.Exit) { setHovered(false) },
+        horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Box(Modifier.size(size)) {
+            ArcGaugeFace(value, caption, size)
+            GaugeTip(hovered, value, detail, series, metric)
+        }
+        detail?.let { Text(it, fontSize = 10.sp, lineHeight = 12.sp, color = Tech.Ink.copy(alpha = .8f), fontFamily = Tech.Mono, maxLines = 1) }
+    }
+}
+
+/** The arc, the number and the caption. Hover is not a parameter, so the face is left alone when the pointer enters. */
+@Composable private fun ArcGaugeFace(value: Double?, caption: String, size: Dp) {
     val reduce = LocalReduceMotion.current
     val shown = value?.takeIf { it.isFinite() && it >= 0.0 }
     // It used to spring with a bounce, so the needle overshot and came back on every reading.
     val v by animateFloatAsState((shown ?: 0.0).toFloat().coerceIn(0f, 1f), if (reduce) snap() else tween(SPARK_SETTLE_MS, easing = FastOutSlowInEasing))
     val tint by animateColorAsState(ramp(shown ?: 0.0), tween(if (reduce) 0 else 300))
-    Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(2.dp)) {
-        Box(Modifier.size(size), contentAlignment = Alignment.Center) {
-            Box(Modifier.fillMaxSize().drawWithCache {
-                val w = 6.dp.toPx(); val inset = w / 2 + 2.dp.toPx()
-                val arcSize = Size(this.size.width - inset * 2, this.size.height - inset * 2)
-                val track = Stroke(w, cap = StrokeCap.Round); val glow = Stroke(w * 2.2f, cap = StrokeCap.Round)
-                onDrawBehind {
-                    drawArc(Tech.Edge, 150f, 240f, false, Offset(inset, inset), arcSize, style = track)
-                    // tick marks every 10%
-                    for (t in 0..10) {
-                        val a = Math.toRadians(150.0 + 24.0 * t); val r1 = this.size.minDimension / 2 - inset - w; val r2 = r1 - 3.dp.toPx()
-                        drawLine(Tech.Edge, center + Offset((r1 * Math.cos(a)).toFloat(), (r1 * Math.sin(a)).toFloat()), center + Offset((r2 * Math.cos(a)).toFloat(), (r2 * Math.sin(a)).toFloat()), 1f)
-                    }
-                    if (shown != null) {
-                        drawArc(tint.copy(alpha = .18f), 150f, 240f * v, false, Offset(inset, inset), arcSize, style = glow)
-                        drawArc(tint, 150f, 240f * v, false, Offset(inset, inset), arcSize, style = track)
-                    }
+    Box(Modifier.size(size), contentAlignment = Alignment.Center) {
+        Box(Modifier.fillMaxSize().drawWithCache {
+            val w = 6.dp.toPx(); val inset = w / 2 + 2.dp.toPx()
+            val arcSize = Size(this.size.width - inset * 2, this.size.height - inset * 2)
+            val track = Stroke(w, cap = StrokeCap.Round); val glow = Stroke(w * 2.2f, cap = StrokeCap.Round)
+            onDrawBehind {
+                drawArc(Tech.Edge, 150f, 240f, false, Offset(inset, inset), arcSize, style = track)
+                // tick marks every 10%
+                for (t in 0..10) {
+                    val a = Math.toRadians(150.0 + 24.0 * t); val r1 = this.size.minDimension / 2 - inset - w; val r2 = r1 - 3.dp.toPx()
+                    drawLine(Tech.Edge, center + Offset((r1 * Math.cos(a)).toFloat(), (r1 * Math.sin(a)).toFloat()), center + Offset((r2 * Math.cos(a)).toFloat(), (r2 * Math.sin(a)).toFloat()), 1f)
                 }
-            })
-            if (shown == null) Text("—", color = Tech.Muted, fontFamily = Tech.Mono) else AnimatedNumber(shown, fontSize = 16.sp)
-            // Caption sits in the open bottom of the arc.
-            Text(caption.uppercase(), Modifier.align(Alignment.BottomCenter).padding(bottom = 4.dp), fontSize = 9.sp, lineHeight = 11.sp, color = Tech.Muted, fontFamily = Tech.Mono, letterSpacing = 1.sp, maxLines = 1)
+                if (shown != null) {
+                    drawArc(tint.copy(alpha = .18f), 150f, 240f * v, false, Offset(inset, inset), arcSize, style = glow)
+                    drawArc(tint, 150f, 240f * v, false, Offset(inset, inset), arcSize, style = track)
+                }
+            }
+        })
+        if (shown == null) Text("—", color = Tech.Muted, fontFamily = Tech.Mono) else AnimatedNumber(shown, fontSize = 16.sp)
+        // Caption sits in the open bottom of the arc.
+        Text(caption.uppercase(), Modifier.align(Alignment.BottomCenter).padding(bottom = 4.dp), fontSize = 9.sp, lineHeight = 11.sp, color = Tech.Muted, fontFamily = Tech.Mono, letterSpacing = 1.sp, maxLines = 1)
+    }
+}
+
+/** Immediate readout. HelpTip waits 450 ms, which is too slow for a value under the pointer. */
+@Composable private fun BoxScope.GaugeTip(hovered: Boolean, value: Double?, detail: String?, series: Series?, metric: (Sample) -> Double?) {
+    if (!hovered) return
+    Box(Modifier.matchParentSize().wrapContentSize(Alignment.TopCenter, unbounded = true)) {
+        Surface(color = Tech.Raised, shape = Tech.Control, border = BorderStroke(1.dp, Tech.Edge),
+            shadowElevation = if (LocalMotion.current.lite) 0.dp else 4.dp) {
+            Text(gaugeHoverText(value, detail, series, metric), Modifier.padding(horizontal = 6.dp, vertical = 3.dp),
+                color = Tech.Ink, fontSize = 10.sp, fontFamily = Tech.Mono, textAlign = TextAlign.Center)
         }
-        detail?.let { Text(it, fontSize = 10.sp, lineHeight = 12.sp, color = Tech.Ink.copy(alpha = .8f), fontFamily = Tech.Mono, maxLines = 1) }
     }
 }
 
@@ -537,7 +763,7 @@ internal fun syncedAgo(updatedAt: java.time.Instant?, now: java.time.Instant): S
         if (total?.cpuFraction != null) {
             StripCell("CLUSTER CPU", Modifier.weight(1f).widthIn(min = textWidth(160.dp, 1.15f))) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Sparkline(state.history.cluster, Modifier.weight(1f).height(26.dp))
+                    Sparkline(state.history.cluster, Modifier.opensLens { clusterLens(LiveMetric.Cpu) }.weight(1f).height(26.dp))
                     AnimatedNumber(total.cpuFraction!!, Modifier.width(textWidth(54.dp, 1.5f)), fontSize = 16.sp)
                 }
             }
@@ -547,7 +773,7 @@ internal fun syncedAgo(updatedAt: java.time.Instant?, now: java.time.Instant): S
             val net = state.history.cluster.samples.lastOrNull()
             StripCell("GUEST NETWORK", Modifier.weight(1f).widthIn(min = textWidth(160.dp, 1.2f))) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    NetSparkline(state.history.cluster, Modifier.weight(1f).height(26.dp))
+                    NetSparkline(state.history.cluster, Modifier.opensLens { clusterLens(LiveMetric.Network) }.weight(1f).height(26.dp))
                     Column(Modifier.width(textWidth(104.dp, 1.35f)), verticalArrangement = Arrangement.spacedBy(1.dp)) {
                         RateLine("IN", net?.netInRate, Tech.Green)
                         RateLine("OUT", net?.netOutRate, Tech.Amber)
@@ -570,7 +796,7 @@ internal fun syncedAgo(updatedAt: java.time.Instant?, now: java.time.Instant): S
                         Text(hot.name.ifBlank { "Guest ${hot.id}" }, Modifier.weight(1f).identity(), fontSize = 13.sp, fontFamily = Tech.Mono, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, softWrap = false)
                         if (cpu != null) AnimatedNumber(cpu, Modifier.width(textWidth(44.dp, 1.5f)), fontSize = 13.sp)
                     }
-                    Sparkline(series ?: Series(), Modifier.fillMaxWidth().height(10.dp), grid = false, pulse = false, ease = true)
+                    Sparkline(series ?: Series(), Modifier.opensLens { guestLens(hot, LiveMetric.Cpu) }.fillMaxWidth().height(10.dp), grid = false, pulse = false, ease = true)
                 }
             }
             StripDivider()

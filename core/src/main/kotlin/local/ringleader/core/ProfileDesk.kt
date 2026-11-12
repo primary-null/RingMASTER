@@ -35,6 +35,30 @@ fun authChoiceMismatch(passwordLogin: Boolean, identity: String, kind: String): 
     }
 }
 
+/** The usual Proxmox VE user when Password is chosen and the field is blank. */
+const val DEFAULT_PASSWORD_USER = "root@pam"
+
+/** The user field after switching to Password: blank becomes root@pam, a token ID keeps its user part. */
+fun passwordUserAfterSwitch(field: String): String {
+    val id = field.trim()
+    return when {
+        id.isEmpty() -> DEFAULT_PASSWORD_USER
+        '!' in id -> id.substringBefore('!').ifBlank { DEFAULT_PASSWORD_USER }
+        else -> id
+    }
+}
+
+/**
+ * A direct-PVE password user with no realm signs in on Linux PAM, the Proxmox default.
+ * Blank stays blank. A value that contains '!' is left for [authChoiceMismatch].
+ * [Connection] rejects a user without '@', so callers complete the name before building one.
+ */
+fun completeLoginUser(user: String): String {
+    val id = user.trim()
+    if (id.isEmpty() || '@' in id || '!' in id) return id
+    return "$id@pam"
+}
+
 /**
  * Desk workflows for saved profiles and the manual connection.
  * Secrets stay in transient character arrays and are cleared on profile change, connect, cancel and leaving the desk.
@@ -131,7 +155,14 @@ class ProfileDesk(
     fun saveDraft(passwordLogin: Boolean? = null): Boolean {
         onWorkspace(workspace.state.value)
         if (refuseBlocked()) return false
-        val draft = mutableState.value.draft
+        var draft = mutableState.value.draft
+        if (passwordLogin == true && draft.kind == DIRECT_PVE_KIND) {
+            val completed = completeLoginUser(draft.tokenId)
+            if (completed != draft.tokenId) {
+                draft = draft.copy(tokenId = completed)
+                mutableState.update { it.copy(draft = draft) }
+            }
+        }
         val profile = try {
             profileFromDraft(draft, draft.id ?: newId())
         } catch (e: IllegalArgumentException) {
@@ -254,13 +285,14 @@ class ProfileDesk(
     /** [passwordLogin] is the Password / API token choice; null skips that check. */
     fun connectManual(address: String, tokenId: String, pin: String, kind: String = DIRECT_PVE_KIND, otp: String? = null, passwordLogin: Boolean? = null): Boolean {
         onWorkspace(workspace.state.value)
-        passwordLogin?.let { authChoiceMismatch(it, tokenId, kind) }?.let { message ->
+        val identity = if (passwordLogin == true && kind == DIRECT_PVE_KIND) completeLoginUser(tokenId) else tokenId.trim()
+        passwordLogin?.let { authChoiceMismatch(it, identity, kind) }?.let { message ->
             mutableState.update { it.copy(formError = message) }
             return false
         }
         val chars = manualSecret?.copyOf() ?: CharArray(0)
         return try {
-            val connection = Connection(address, tokenId.trim(), chars.concatToString(), pin, kind, otp)
+            val connection = Connection(address, identity, chars.concatToString(), pin, kind, otp)
             publishSecretClear(connectedProfileId = null, notice = null, connect = connection)
             true
         } catch (e: IllegalArgumentException) {

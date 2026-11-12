@@ -1035,6 +1035,40 @@ class Workspace(
     private val consoleStillJobs = mutableMapOf<ResourceId, Job>()
 
     /**
+     * Encodes one live console frame off the UI thread. Tests replace it. The default resumes on [scope]'s dispatcher
+     * before the caller reads [generation] or updates state.
+     */
+    internal var consoleFrameEncode: suspend (Int, Int, IntArray) -> ConsoleStill? = { width, height, argb ->
+        withContext(Dispatchers.Default) { runCatching { frameStill(RfbFrame(width, height, argb)) }.getOrNull() }
+    }
+
+    /**
+     * Keeps the last frame of a live in-app console as the guest's last known screen, so the console switcher shows where
+     * you left it. Memory only, like captured stills. Same rules: a blank frame never replaces a useful still; at most
+     * [CONSOLE_STILL_LIMIT]. Demo, PDM and a stopped guest do nothing; a frame from an older connection is dropped.
+     */
+    fun keepConsoleFrame(guest: Guest, width: Int, height: Int, argb: IntArray) {
+        val state = mutableState.value
+        if (state.demo || guest.kind != "VM" || guest.status != "running") return
+        if (width <= 0 || height <= 0 || argb.size < width * height) return
+        if (connection?.kind == PDM_KIND || guest.scope.isNotEmpty()) return
+        // The view reuses its buffer; this copy is the one the encode reads after the caller has moved on.
+        val copy = argb.copyOf(width * height)
+        val session = generation
+        val id = guest.resource
+        val encode = consoleFrameEncode
+        scope.launch {
+            val still = encode(width, height, copy) ?: return@launch
+            if (generation != session) return@launch
+            mutableState.update {
+                val keep = still.blank && it.consoleStills[id]?.blank == false
+                val stills = if (keep) it.consoleStills else (it.consoleStills - id + (id to still)).entries.toList().takeLast(CONSOLE_STILL_LIMIT).associate { entry -> entry.key to entry.value }
+                it.copy(consoleStills = stills, consoleStillErrors = it.consoleStillErrors - id)
+            }
+        }
+    }
+
+    /**
      * Opens a live console for a VM in the current direct-PVE inventory. The session holds the websocket;
      * the caller closes it. The one-time ticket never enters [WorkspaceState].
      */
@@ -1184,6 +1218,47 @@ class Workspace(
             }
         }
     }
+
+    /**
+     * One RRD read for the chart lens. Unlike [inspectHistory] it leaves [WorkspaceState.chartHistory] alone, so the page
+     * behind the lens keeps its own charts. The same refusals apply (not connected, PDM or a PDM guest, a stale inventory);
+     * the demo returns demo history. Exactly one of [guest] and [node] is given. Call it on the UI dispatcher.
+     */
+    suspend fun readHistory(guest: Guest?, node: String?, timeframe: String, cf: String): InspectionSection<List<HistoryPoint>> {
+        historySuffix(timeframe, cf)
+        if (node == null && guest == null) return InspectionSection(error = HISTORY_NOTHING_SELECTED)
+        val state = mutableState.value
+        if (state.demo) {
+            val points = if (node != null) demoNodeHistory(timeframe, cf)
+            else demoInspection(requireNotNull(guest), timeframe).history.value.orEmpty().map { point ->
+                point.copy(values = point.values.mapValues { (key, value) -> if (cf == "MAX" && key !in listOf("maxmem", "maxcpu")) value?.times(1.25) else value })
+            }
+            return InspectionSection(points)
+        }
+        val current = connection
+        val refusal = when {
+            current == null -> HISTORY_NOT_CONNECTED
+            state.kind == PDM_KIND || current.kind == PDM_KIND || (node == null && guest != null && guest.scope.isNotEmpty()) -> HISTORY_DIRECT_ONLY
+            state.stale -> HISTORY_STALE
+            else -> null
+        }
+        if (refusal != null || current == null) return InspectionSection(error = refusal ?: HISTORY_NOT_CONNECTED)
+        val session = generation
+        return try {
+            // A node wins inside historyRead when both are passed. The lens passes one.
+            InspectionSection(historyRead(current, node, guest, timeframe, cf))
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: SessionExpiredException) {
+            if (session == generation) expire()
+            InspectionSection(error = e.message ?: "The server refused this session. Connect again.")
+        } catch (e: GuestPermissionException) {
+            InspectionSection(error = "Not permitted for this token")
+        } catch (e: Exception) {
+            InspectionSection(error = e.message ?: "Unavailable")
+        }
+    }
+
     private var inspectionGeneration = 0L
     private var inspectionJob: Job? = null
     fun inspectGuest(timeframe: String = "hour") {

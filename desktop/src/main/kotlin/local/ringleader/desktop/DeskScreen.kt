@@ -36,6 +36,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
@@ -44,6 +46,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEvent
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
@@ -55,14 +66,19 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlin.math.cos
 import kotlin.math.sin
+import kotlinx.coroutines.yield
 import local.ringleader.core.ConnectionProfile
+import local.ringleader.core.DEFAULT_PASSWORD_USER
 import local.ringleader.core.DIRECT_PVE_KIND
 import local.ringleader.core.DeskState
+import local.ringleader.core.completeLoginUser
+import local.ringleader.core.passwordUserAfterSwitch
 import local.ringleader.core.OpenSession
 import local.ringleader.core.PDM_KIND
 import androidx.compose.runtime.collectAsState
@@ -83,8 +99,9 @@ private val ConnectPanelWidth = 520.dp
 @Composable fun DeskScreen(
     workspaceState: WorkspaceState, deskState: DeskState, desk: ProfileDesk, scanned: ScanHit? = null, initialScroll: Int = 0, onScan: () -> Unit = {},
     sessions: List<OpenSession> = emptyList(), activeSession: Long = 0, sessionNotice: String? = null,
-    onShowSession: (Long) -> Unit = {}, onDisconnectSession: (Long) -> Unit = {}, onOpenWorkspace: () -> Unit,
+    onShowSession: (Long) -> Unit = {}, onDisconnectSession: (Long) -> Unit = {}, motion: MotionPreferences? = null, onOpenWorkspace: () -> Unit,
 ) {
+    val motionPreferences = motion ?: remember { MotionPreferences() }
     val active = deskState.profiles.find { it.id == deskState.connectedProfileId }
     val scroll = rememberScrollState(initialScroll)
     val inViewOpen = workspaceState.connected || workspaceState.demo
@@ -114,11 +131,11 @@ private val ConnectPanelWidth = 520.dp
                     if (split) {
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.Top) {
                             SavedConnections(Modifier.weight(1f), deskState, desk, onScan, onOpenWorkspace, anyOpen, connectedProfiles)
-                            ManualConnection(Modifier.width(ConnectPanelWidth), anyOpen, deskState, desk, scanned, onOpenWorkspace)
+                            ManualConnection(Modifier.width(ConnectPanelWidth), anyOpen, deskState, desk, scanned, motionPreferences, onOpenWorkspace)
                         }
                     } else {
                         SavedConnections(Modifier.fillMaxWidth(), deskState, desk, onScan, onOpenWorkspace, anyOpen, connectedProfiles)
-                        ManualConnection(Modifier.widthIn(max = ConnectPanelWidth).fillMaxWidth(), anyOpen, deskState, desk, scanned, onOpenWorkspace)
+                        ManualConnection(Modifier.widthIn(max = ConnectPanelWidth).fillMaxWidth(), anyOpen, deskState, desk, scanned, motionPreferences, onOpenWorkspace)
                     }
                 }
             }
@@ -303,16 +320,29 @@ private val ConnectPanelWidth = 520.dp
         SectionLabel(if (deskState.profiles.any { it.id == draft.id }) "Edit profile" else "New profile")
         var passwordMode by remember(draft.id) { mutableStateOf(draft.tokenId.isNotEmpty() && !draft.tokenId.contains('!')) }
         KindChoice(draft.kind) { if (it == PDM_KIND) passwordMode = false; desk.updateDraft(draft.displayName, draft.origin, draft.tokenId, draft.sha256Pin, it) }
-        if (draft.kind == DIRECT_PVE_KIND) AuthChoice(passwordMode) { passwordMode = it }
+        if (draft.kind == DIRECT_PVE_KIND) AuthChoice(passwordMode) { chosen ->
+            passwordMode = chosen
+            if (chosen) {
+                val next = passwordUserAfterSwitch(draft.tokenId)
+                if (next != draft.tokenId) desk.updateDraft(draft.displayName, draft.origin, next, draft.sha256Pin)
+            }
+        }
         CompactDeskField(draft.displayName, { desk.updateDraft(it, draft.origin, draft.tokenId, draft.sha256Pin) }, "Display name", identity = true)
         CompactDeskField(draft.origin, { desk.updateDraft(draft.displayName, it, draft.tokenId, draft.sha256Pin) }, "Server address", originHint(draft.kind), identity = true)
-        CompactDeskField(draft.tokenId, { desk.updateDraft(draft.displayName, draft.origin, it, draft.sha256Pin) }, if (passwordMode) "User · user@realm, for example root@pam" else "API token ID · user@realm!token", identity = true)
+        CompactDeskField(draft.tokenId, { desk.updateDraft(draft.displayName, draft.origin, it, draft.sha256Pin) }, if (passwordMode) "User · user@realm, for example root@pam" else "API token ID · user@realm!token", identity = true, passwordUser = passwordMode && draft.kind == DIRECT_PVE_KIND)
         CompactDeskField(draft.sha256Pin, { desk.updateDraft(draft.displayName, draft.origin, draft.tokenId, it) }, "Trusted certificate SHA-256 · optional")
         Text("Passwords and token secrets are not part of a profile; you enter them when you connect. Saving a different server, user, token ID, certificate pin, or connection kind on the connection in use disconnects that session.", style = MaterialTheme.typography.bodySmall, color = Tech.Muted)
         if (active) Text("This profile is in use. A connection change will disconnect it instead of switching the open session.", color = Tech.Amber, fontSize = 13.sp)
         deskState.formError?.let { Text(it, color = Tech.Red, fontSize = 12.sp, fontFamily = Tech.Mono) }
         FlowRow(horizontalArrangement = Arrangement.spacedBy(Tech.Space12), verticalArrangement = Arrangement.spacedBy(Tech.Space8)) {
-            TechAction("Save profile", active = true) { desk.saveDraft(passwordLogin = passwordMode && draft.kind == DIRECT_PVE_KIND) }
+            TechAction("Save profile", active = true) {
+                val login = passwordMode && draft.kind == DIRECT_PVE_KIND
+                if (login) {
+                    val completed = completeLoginUser(draft.tokenId)
+                    if (completed != draft.tokenId) desk.updateDraft(draft.displayName, draft.origin, completed, draft.sha256Pin)
+                }
+                desk.saveDraft(passwordLogin = login)
+            }
             TechAction("Cancel", onClick = desk::cancelEdit)
         }
     }
@@ -320,31 +350,44 @@ private val ConnectPanelWidth = 520.dp
 
 @Composable private fun ProfileConnect(deskState: DeskState, desk: ProfileDesk, onOpenWorkspace: () -> Unit) {
     val profile = deskState.profiles.find { it.id == deskState.selectedId } ?: return
+    val secretFocus = remember { FocusRequester() }
+    DisposableEffect(profile.id) {
+        WindowTitle.connectTo = profile.displayName
+        onDispose { WindowTitle.connectTo = null }
+    }
+    // Once per selection and per secret clear, after the field is attached. A later recomposition does not move the cursor.
+    LaunchedEffect(profile.id, deskState.secretGeneration) {
+        yield()
+        runCatching { secretFocus.requestFocus() }
+    }
     Column(Modifier.widthIn(max = 560.dp).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(Tech.Space8)) {
         SectionLabel("Connect", suffix = profile.displayName)
         val password = profile.passwordLogin
         var otp by remember(profile.id, deskState.secretGeneration) { mutableStateOf("") }
+        val submit = {
+            if (deskState.profileSecretPresent && desk.connectSelected(otp = otp.ifBlank { null })) onOpenWorkspace()
+        }
         Text(if (password) "Enter the password for this user. It is cleared when you connect, cancel, choose another profile, or leave the desk."
             else "Enter the token secret for this session. It is cleared when you connect, cancel, choose another profile, or leave the desk.", style = MaterialTheme.typography.bodySmall, color = Tech.Muted)
-        SecretField(deskState.secretGeneration, if (password) "Password" else "API token secret") { desk.setProfileSecret(it) }
-        if (password) CompactDeskField(otp, { otp = it.filter { c -> !c.isWhitespace() }.take(64) }, "Two-factor code · only if the account uses one")
+        SecretField(deskState.secretGeneration, if (password) "Password" else "API token secret", focusRequester = secretFocus, onSubmit = submit, capsLock = password) { desk.setProfileSecret(it) }
+        if (password) CompactDeskField(otp, { otp = it.filter { c -> !c.isWhitespace() }.take(64) }, "Two-factor code · only if the account uses one", onSubmit = submit)
         FlowRow(horizontalArrangement = Arrangement.spacedBy(Tech.Space12), verticalArrangement = Arrangement.spacedBy(Tech.Space8)) {
-            TechAction("Connect", active = true, enabled = deskState.profileSecretPresent) {
-                if (desk.connectSelected(otp = otp.ifBlank { null })) onOpenWorkspace()
-            }
+            TechAction("Connect", active = true, enabled = deskState.profileSecretPresent, onClick = submit)
             TechAction("Clear secret", onClick = desk::discardSecrets)
         }
     }
 }
 
-@Composable private fun ManualConnection(modifier: Modifier, anyOpen: Boolean, deskState: DeskState, desk: ProfileDesk, scanned: ScanHit?, onOpenWorkspace: () -> Unit) {
+@Composable private fun ManualConnection(modifier: Modifier, anyOpen: Boolean, deskState: DeskState, desk: ProfileDesk, scanned: ScanHit?, motion: MotionPreferences, onOpenWorkspace: () -> Unit) {
     var address by remember(scanned) { mutableStateOf(scanned?.origin.orEmpty()) }
     var tokenId by remember { mutableStateOf("") }
-    var user by remember { mutableStateOf("") }
+    // The first start keeps API token. Password mode fills the usual user; the choice itself is the only thing remembered.
+    var passwordChoice by remember { mutableStateOf(motion.option(DESK_PASSWORD_MODE, false)) }
+    var user by remember { mutableStateOf(if (passwordChoice) DEFAULT_PASSWORD_USER else "") }
     var otp by remember(deskState.secretGeneration) { mutableStateOf("") }
-    var passwordMode by remember { mutableStateOf(false) }
     var fingerprint by remember(scanned) { mutableStateOf("") }
     var kind by remember(scanned) { mutableStateOf(if (scanned?.kind == ScanKind.PDM) PDM_KIND else DIRECT_PVE_KIND) }
+    val passwordMode = passwordChoice && kind == DIRECT_PVE_KIND
     val pinPrompt = remember(scanned) { ScannedPinPrompt().also { p -> scanned?.fingerprint?.let { p.offer(scanned.origin, it) } } }
     var pinConfirmShowing by remember(scanned) { mutableStateOf(false) }
     TechPanel(modifier) {
@@ -353,8 +396,22 @@ private val ConnectPanelWidth = 520.dp
             HelpTip("A new connection opens beside the ones already open; nothing is replaced. Verify private certificate fingerprints with your administrator.") {
                 Text(if (anyOpen) "Opens beside the open connection · secrets stay in memory" else "Connect without saving a profile · secrets stay in memory", fontSize = 11.sp, color = Tech.Muted, fontFamily = Tech.Mono)
             }
-            KindChoice(kind) { kind = it; if (it == PDM_KIND) passwordMode = false }
-            if (kind == DIRECT_PVE_KIND) AuthChoice(passwordMode) { passwordMode = it }
+            KindChoice(kind) { kind = it }
+            if (kind == DIRECT_PVE_KIND) AuthChoice(passwordMode) { chosen ->
+                passwordChoice = chosen
+                motion.put(DESK_PASSWORD_MODE, chosen)
+                if (chosen) user = passwordUserAfterSwitch(tokenId.ifBlank { user })
+            }
+            val login = passwordMode && kind == DIRECT_PVE_KIND
+            val canConnect = address.isNotBlank() && (if (passwordMode) user else tokenId).isNotBlank() && deskState.manualSecretPresent
+            val submit = {
+                if (canConnect) {
+                    val completed = if (login) completeLoginUser(user) else tokenId
+                    if (login && completed != user) user = completed
+                    if (desk.connectManual(address, if (login) completed else tokenId, fingerprint, kind, otp = if (passwordMode) otp.ifBlank { null } else null,
+                            passwordLogin = login)) onOpenWorkspace()
+                }
+            }
             // Tab order is composition order. These fields stay consecutive:
             // Server address, user or token ID, password or secret, (two-factor code), Trusted certificate SHA-256.
             CompactDeskField(address, {
@@ -364,12 +421,12 @@ private val ConnectPanelWidth = 520.dp
                 if (!pinPrompt.pending) pinConfirmShowing = false
             }, "Server address", identity = true)
             if (passwordMode) {
-                CompactDeskField(user, { user = it.trim() }, "User · user@realm, for example root@pam", identity = true)
-                SecretField(deskState.secretGeneration, "Password") { desk.setManualSecret(it) }
-                CompactDeskField(otp, { otp = it.filter { c -> !c.isWhitespace() }.take(64) }, "Two-factor code · only if the account uses one")
+                CompactDeskField(user, { user = it.trim() }, "User · user@realm, for example root@pam", identity = true, passwordUser = true)
+                SecretField(deskState.secretGeneration, "Password", onSubmit = submit, capsLock = true) { desk.setManualSecret(it) }
+                CompactDeskField(otp, { otp = it.filter { c -> !c.isWhitespace() }.take(64) }, "Two-factor code · only if the account uses one", onSubmit = submit)
             } else {
                 CompactDeskField(tokenId, { tokenId = it }, "API token ID · user@realm!token", identity = true)
-                SecretField(deskState.secretGeneration, "API token secret") { desk.setManualSecret(it) }
+                SecretField(deskState.secretGeneration, "API token secret", onSubmit = submit) { desk.setManualSecret(it) }
             }
             CompactDeskField(fingerprint, { fingerprint = it }, "Trusted certificate SHA-256 · optional")
             if (scanned != null && address == scanned.origin) {
@@ -387,10 +444,7 @@ private val ConnectPanelWidth = 520.dp
                 onCancel = { pinPrompt.cancel(); pinConfirmShowing = false },
             )
             FlowRow(horizontalArrangement = Arrangement.spacedBy(Tech.Space12), verticalArrangement = Arrangement.spacedBy(Tech.Space8)) {
-                TechAction(if (anyOpen) "Add connection" else "Connect", active = true, enabled = address.isNotBlank() && (if (passwordMode) user else tokenId).isNotBlank() && deskState.manualSecretPresent) {
-                    if (desk.connectManual(address, if (passwordMode) user else tokenId, fingerprint, kind, otp = if (passwordMode) otp.ifBlank { null } else null,
-                            passwordLogin = passwordMode && kind == DIRECT_PVE_KIND)) onOpenWorkspace()
-                }
+                TechAction(if (anyOpen) "Add connection" else "Connect", active = true, enabled = canConnect, onClick = submit)
                 TechAction("Explore demo") { if (desk.exploreDemo()) onOpenWorkspace() }
             }
         }
@@ -451,13 +505,78 @@ private val ConnectPanelWidth = 520.dp
 
 private fun originHint(kind: String) = if (kind == PDM_KIND) "https://pdm.example.test:8443" else "https://pve.example.test:8006"
 
-@Composable private fun SecretField(generation: Int, label: String, onValue: (String) -> Unit) {
+/** Caps Lock is unsupported on some Linux desktops; then the warning stays hidden. Tests can replace the reader. */
+internal var capsLockReader: () -> Boolean = {
+    runCatching { java.awt.Toolkit.getDefaultToolkit().getLockingKeyState(java.awt.event.KeyEvent.VK_CAPS_LOCK) }.getOrDefault(false)
+}
+
+internal fun capsLockOn(): Boolean = capsLockReader()
+
+/** Enter connects when [onSubmit] is set. Paste and every other key are left for the text field. */
+internal fun submitOnEnter(event: KeyEvent, onSubmit: (() -> Unit)?): Boolean {
+    return if (onSubmit != null && event.type == KeyEventType.KeyDown && (event.key == Key.Enter || event.key == Key.NumPadEnter)) {
+        onSubmit()
+        true
+    } else false
+}
+
+@Composable private fun SecretField(
+    generation: Int,
+    label: String,
+    focusRequester: FocusRequester? = null,
+    onSubmit: (() -> Unit)? = null,
+    capsLock: Boolean = false,
+    onValue: (String) -> Unit,
+) {
     var value by remember(generation) { mutableStateOf("") }
+    var revealed by remember(generation) { mutableStateOf(false) }
+    val interaction = remember { MutableInteractionSource() }
+    val focused by interaction.collectIsFocusedAsState()
+    var caps by remember { mutableStateOf(false) }
+    val showcase = Appearance.showcase
+    LaunchedEffect(focused, capsLock) {
+        if (!focused) revealed = false
+        if (focused && capsLock) caps = capsLockOn()
+    }
+    LaunchedEffect(showcase) { if (showcase) revealed = false }
+    val hidden = showcase || !revealed
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text(label, fontFamily = Tech.Mono, fontSize = 11.sp, color = Tech.Muted)
-        Box(Modifier.fillMaxWidth().height(30.dp).border(1.dp, Tech.Edge, Tech.Control).padding(horizontal = 8.dp), contentAlignment = Alignment.CenterStart) {
-            BasicTextField(value, { value = it; onValue(it) }, Modifier.fillMaxWidth(), singleLine = true, visualTransformation = PasswordVisualTransformation(), textStyle = TextStyle(color = Tech.Ink, fontSize = 12.sp), cursorBrush = SolidColor(Tech.Amber))
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Box(Modifier.weight(1f).height(30.dp).border(1.dp, Tech.Edge, Tech.Control).padding(horizontal = 8.dp), contentAlignment = Alignment.CenterStart) {
+                BasicTextField(
+                    value,
+                    { value = it; onValue(it) },
+                    Modifier.fillMaxWidth()
+                        .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
+                        .onPreviewKeyEvent { event ->
+                            if (capsLock) caps = capsLockOn()
+                            submitOnEnter(event, onSubmit)
+                        },
+                    singleLine = true,
+                    visualTransformation = if (hidden) PasswordVisualTransformation() else VisualTransformation.None,
+                    textStyle = TextStyle(color = Tech.Ink, fontSize = 12.sp),
+                    cursorBrush = SolidColor(Tech.Amber),
+                    interactionSource = interaction,
+                )
+            }
+            if (!showcase) SecretToggle(if (revealed) "Hide" else "Show") { revealed = !revealed }
         }
+        if (capsLock && focused && caps) Text("Caps Lock is on", fontFamily = Tech.Mono, fontSize = 11.sp, color = Tech.Amber)
+    }
+}
+
+/** Show / Hide sits at the end of a secret field and does not take focus, so the password stays visible while it is used. */
+@Composable private fun SecretToggle(label: String, onClick: () -> Unit) {
+    val interaction = remember { MutableInteractionSource() }
+    Box(
+        Modifier.height(26.dp).border(1.dp, Tech.Edge, Tech.Control)
+            .focusProperties { canFocus = false }
+            .clickable(interactionSource = interaction, indication = null, role = Role.Button, onClick = onClick)
+            .padding(horizontal = 10.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(label, fontFamily = Tech.Mono, fontWeight = FontWeight.Bold, fontSize = 11.sp, letterSpacing = 0.5.sp, color = Tech.Ink)
     }
 }
 
@@ -471,7 +590,7 @@ private fun sessionText(state: WorkspaceState, active: ConnectionProfile?) = whe
  * A one-line field. [identity] fields (addresses, user and token IDs, profile names) show a bullet mask under the
  * showcase blur until they are focused for editing, so the real value is never on screen during a demo.
  */
-@Composable private fun CompactDeskField(value: String, onValue: (String) -> Unit, label: String, placeholder: String? = null, identity: Boolean = false) {
+@Composable private fun CompactDeskField(value: String, onValue: (String) -> Unit, label: String, placeholder: String? = null, identity: Boolean = false, onSubmit: (() -> Unit)? = null, passwordUser: Boolean = false) {
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
     val concealed = identity && identityFieldConcealed(Appearance.showcase, focused, value)
@@ -481,9 +600,23 @@ private fun sessionText(state: WorkspaceState, active: ConnectionProfile?) = whe
             if (value.isEmpty() && placeholder != null) {
                 Text(placeholder, fontFamily = Tech.Mono, fontSize = 12.sp, color = Tech.Muted.copy(alpha = .55f), maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
-            BasicTextField(value, onValue, Modifier.fillMaxWidth().then(if (concealed) Modifier.blur(3.dp, androidx.compose.ui.draw.BlurredEdgeTreatment.Unbounded).semantics { contentDescription = "Hidden" } else Modifier),
+            BasicTextField(value, onValue, Modifier.fillMaxWidth()
+                .then(if (concealed) Modifier.blur(3.dp, androidx.compose.ui.draw.BlurredEdgeTreatment.Unbounded).semantics { contentDescription = "Hidden" } else Modifier)
+                .onPreviewKeyEvent { submitOnEnter(it, onSubmit) },
                 singleLine = true, textStyle = TextStyle(color = Tech.Ink, fontSize = 12.sp, fontFamily = Tech.Mono), cursorBrush = SolidColor(Tech.Amber), interactionSource = interaction,
-                visualTransformation = if (concealed) androidx.compose.ui.text.input.VisualTransformation { t -> androidx.compose.ui.text.input.TransformedText(androidx.compose.ui.text.AnnotatedString(identityMask(t.text)), androidx.compose.ui.text.input.OffsetMapping.Identity) } else androidx.compose.ui.text.input.VisualTransformation.None)
+                visualTransformation = if (concealed) VisualTransformation { t -> androidx.compose.ui.text.input.TransformedText(androidx.compose.ui.text.AnnotatedString(identityMask(t.text)), androidx.compose.ui.text.input.OffsetMapping.Identity) } else VisualTransformation.None)
+        }
+        if (passwordUser) {
+            val typed = value.trim()
+            if (typed.isNotEmpty() && '@' !in typed && '!' !in typed) {
+                val completed = completeLoginUser(typed)
+                val hideName = identityFieldConcealed(Appearance.showcase, focused, typed)
+                Text(
+                    "Signs in as ${if (hideName) identityMask(completed) else completed} (Linux PAM, the Proxmox default realm)",
+                    Modifier.identity(),
+                    fontFamily = Tech.Mono, fontSize = 11.sp, color = Tech.Muted,
+                )
+            }
         }
     }
 }

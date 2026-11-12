@@ -1,5 +1,7 @@
 package local.ringleader.desktop
 
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.Text
@@ -9,6 +11,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
@@ -36,8 +39,10 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlin.coroutines.coroutineContext
 import local.ringleader.core.*
 import org.jetbrains.skia.Bitmap
 import java.awt.EventQueue
@@ -252,13 +257,31 @@ private fun sendCtrlAltDel(session: VncSession) {
  * In-app VNC console. Opens [Workspace.openConsole] while composed and closes it when the guest,
  * connection, or this view leaves the composition.
  */
-@Composable fun VncConsoleView(state: WorkspaceState, workspace: Workspace, guest: Guest, modifier: Modifier = Modifier) {
+/** Set by a test. Runs once each time a console view enters composition, with no guest key of its own. */
+internal var consoleViewBirthProbe: ((ResourceId) -> Unit)? = null
+
+private class ConsoleFrameSnap {
+    var shown = false
+    var width = 0
+    var height = 0
+    var pixels = IntArray(0)
+    var guest: Guest? = null
+}
+
+@Composable internal fun VncConsoleView(state: WorkspaceState, workspace: Workspace, guest: Guest, modifier: Modifier = Modifier, onHostShortcut: ((ConsoleShortcut) -> Unit)? = null, onGuests: (() -> Unit)? = null) {
+    // Unkeyed on purpose: the guest page's key(guest.resource) is what makes a switch start from an empty view.
+    remember { consoleViewBirthProbe?.invoke(guest.resource) }
+    val frameSnap = remember { ConsoleFrameSnap() }
     var serial by remember(guest.resource) { mutableStateOf(false) }
     val serialAvailable = state.inspection?.takeIf { it.resource == guest.resource && it.node == guest.node }?.hardware?.value?.fields?.containsKey("serial0") == true
     if (serial && serialAvailable) {
+        val serialImmersive = LocalImmersive.current?.active == true
         Column(modifier.fillMaxSize()) {
-            Row(Modifier.height(32.dp)) { MiniAction("VNC") { serial = false }; Text("Serial", color = Tech.Amber) }
-            TerminalView(state, workspace, TerminalTarget.guest(guest), Modifier.weight(1f))
+            // A stable slot, so entering immersive does not rebuild the terminal under it.
+            Box(Modifier.fillMaxWidth().height(if (serialImmersive) 0.dp else 32.dp)) {
+                if (!serialImmersive) Row(Modifier.height(32.dp)) { MiniAction("VNC") { serial = false }; Text("Serial", color = Tech.Amber) }
+            }
+            TerminalView(state, workspace, TerminalTarget.guest(guest), Modifier.weight(1f), onHostShortcut, onGuests)
         }
         return
     }
@@ -299,7 +322,12 @@ private fun sendCtrlAltDel(session: VncSession) {
     // While this view is composed the guest has a live console, so the Summary page does not auto-capture a still.
     DisposableEffect(guest.resource) {
         LiveConsoles.open(guest.resource)
-        onDispose { LiveConsoles.close(guest.resource) }
+        onDispose {
+            LiveConsoles.close(guest.resource)
+            val who = frameSnap.guest
+            val kept = if (who == null) null else consoleFrameToKeep(frameSnap.shown, frameSnap.width, frameSnap.height, frameSnap.pixels)
+            if (who != null && kept != null) workspace.keepConsoleFrame(who, frameSnap.width, frameSnap.height, kept)
+        }
     }
     DisposableEffect(guest.resource, state.connectionEpoch, reconnect) {
         val uiTrace = Trace.begin(TraceSource.Console, "VNC UI attached")
@@ -343,18 +371,40 @@ private fun sendCtrlAltDel(session: VncSession) {
     val hardware = state.inspection?.takeIf { it.resource == guest.resource && it.node == guest.node }?.hardware?.value
     val spice = hardware != null && spiceDisplayAvailable(hardware.fields["vga"])
     val haveFrame = frame > 0 && fbW > 0 && fbH > 0
+    // Read on dispose. The effect below is keyed only by the guest, so values captured in onDispose would stay at the
+    // first frame. Updated before the serial early-return can remove the effect, and never cleared on that path.
+    frameSnap.shown = haveFrame
+    frameSnap.width = fbW
+    frameSnap.height = fbH
+    frameSnap.pixels = pixels.value
+    frameSnap.guest = guest
     // The first frame arrives with the CRT power-on reveal (a draw effect, so input and frames are never delayed); it replaces the old alpha fade.
     val liveAlpha = 1f
     val powerOn = if (haveFrame) session.value else null
-    Column(modifier.fillMaxSize()) {
-        ConsoleToolbar(status.value, failed.value, spice, hardware != null, session.value, fit, { fit = !fit }, { reconnect++ }, state, workspace, guest, focusManager, { serial = true })
+    val immersiveState = LocalImmersive.current
+    val immersiveNow = immersiveState?.active == true
+    val edgeResting = remember { mutableStateOf(false) }
+    LaunchedEffect(immersiveNow) { if (!immersiveNow) edgeResting.value = false }
+    val toolbar: @Composable (Boolean) -> Unit = { immersive ->
+        ConsoleToolbar(status.value, failed.value, spice, hardware != null, session.value, fit, focused, { fit = !fit }, { reconnect++ }, state, workspace, guest, focusManager, { serial = true },
+            onImmersive = if (immersive) null else immersiveState?.let { live -> { live.enter() } },
+            onGuests = if (immersive) onGuests else null,
+            onExit = if (immersive) ({ immersiveState?.exit() }) else null,
+            immersive = immersive)
+    }
+    // The picture box stays the second child, immersive or not, so its remembered session is not rebuilt.
+    Box(modifier.fillMaxSize().then(if (immersiveState != null) Modifier.consoleTopRest(immersiveNow) { edgeResting.value = it } else Modifier)) {
+    Column(Modifier.fillMaxSize()) {
+        Box(Modifier.fillMaxWidth().height(if (immersiveNow) 0.dp else if (spice) 48.dp else 32.dp)) {
+            if (!immersiveNow) toolbar(false)
+        }
         Box(Modifier.weight(1f).fillMaxWidth().background(Color.Black)) {
             val still = if (!haveFrame) rememberStillBitmap(state.consoleStills[guest.resource]) else null
             if (still != null) Image(still, "Last known screen", Modifier.fillMaxSize().alpha(0.45f), contentScale = ContentScale.Fit)
             if (screen && haveFrame) {
                 Box(Modifier.fillMaxSize().crtPowerOn(powerOn)) {
                     VncSurface(
-                        frames, frame, cursor, fbW, fbH, fit, focused, liveAlpha, session.value, focus,
+                        frames, frame, cursor, fbW, fbH, fit, focused, liveAlpha, session.value, focus, onHostShortcut,
                         onFocus = {
                             focused = it; VncKeyboard.captured = it
                             // Keys still held when the keyboard leaves would stay down in the guest.
@@ -368,12 +418,15 @@ private fun sendCtrlAltDel(session: VncSession) {
             }
         }
     }
+    if (immersiveNow) ImmersiveConsoleBar(edgeResting.value) { toolbar(true) }
+    }
 }
 
 @Composable private fun ConsoleToolbar(
-    status: String, failed: Boolean, spice: Boolean, spiceKnown: Boolean, session: VncSession?, fit: Boolean,
+    status: String, failed: Boolean, spice: Boolean, spiceKnown: Boolean, session: VncSession?, fit: Boolean, captured: Boolean,
     onFit: () -> Unit, onReconnect: () -> Unit, state: WorkspaceState, workspace: Workspace, guest: Guest,
     focusManager: androidx.compose.ui.focus.FocusManager, onSerial: () -> Unit,
+    onImmersive: (() -> Unit)? = null, onGuests: (() -> Unit)? = null, onExit: (() -> Unit)? = null, immersive: Boolean = false,
 ) {
     Column(Modifier.fillMaxWidth().height(if (spice) 48.dp else 32.dp).pointerInput(focusManager) {
         awaitPointerEventScope {
@@ -385,6 +438,11 @@ private fun sendCtrlAltDel(session: VncSession) {
     }) {
         Row(Modifier.fillMaxWidth().height(32.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             Text(status, maxLines = 1, overflow = TextOverflow.Ellipsis, fontFamily = Tech.Mono, fontSize = 11.sp, color = if (failed) Tech.Amber else if (session != null) Tech.Green else Tech.Muted)
+            // The chip sits in the toolbar, outside the guest picture, and is the lasting sign of capture.
+            if (session != null && captured) HelpTip("Keys go to the VM, Ctrl+Alt shortcuts included. Click outside the screen to release the keyboard. Ctrl+Alt+Enter: immersive. Ctrl+Alt+PageUp / PageDown: other guests.") {
+                Text("⌨ KEYS TO VM", Modifier.border(1.dp, Tech.Amber, Tech.Control).padding(horizontal = 6.dp, vertical = 2.dp),
+                    color = Tech.Amber, fontFamily = Tech.Mono, fontSize = 10.sp, maxLines = 1)
+            } else if (session != null) Text("Click the screen to type", color = Tech.Muted, fontFamily = Tech.Mono, fontSize = 10.sp, maxLines = 1)
             // The SPICE note shares the toolbar row, so it never crowds the screen below.
             Text(if (spice) "·  SPICE gives a richer console: clipboard, USB and audio." else "", Modifier.weight(1f).padding(start = 6.dp), maxLines = 1,
                 overflow = TextOverflow.Ellipsis, fontFamily = Tech.Mono, fontSize = 10.sp, color = Tech.Muted)
@@ -396,22 +454,30 @@ private fun sendCtrlAltDel(session: VncSession) {
             MiniAction("Ctrl+Alt+Del", enabled = session != null) { session?.let { sendCtrlAltDel(it) } }
             MiniAction(if (fit) "Fit" else "100 %", onClick = onFit)
             MiniAction("Reconnect", onClick = onReconnect)
+            if (immersive) {
+                if (onGuests != null) MiniAction("Guests ▾") { onGuests() }
+                HelpTip("Ctrl+Alt+Enter") { MiniAction("Exit immersive") { onExit?.invoke() } }
+            } else if (onImmersive != null) MiniAction("⛶ Immersive") { onImmersive() }
         }
     }
 }
 
 @Composable private fun VncSurface(
     frames: FramePixels, stamp: Int, cursor: VncCursor?, fbW: Int, fbH: Int, fit: Boolean,
-    focused: Boolean, alpha: Float, session: VncSession?, focus: FocusRequester,
+    focused: Boolean, alpha: Float, session: VncSession?, focus: FocusRequester, onShortcut: ((ConsoleShortcut) -> Unit)?,
     onFocus: (Boolean) -> Unit, onOutside: () -> Unit,
 ) {
     val density = LocalDensity.current
     var pointer by remember { mutableStateOf<IntOffset?>(null) }
     var inside by remember { mutableStateOf(false) }
     // The amber edge announces that the console took the keyboard, holds briefly, then fades away; it used to stay lit
-    // for as long as the console had focus. The hint at the bottom stays, in grey, as the lasting sign.
+    // for as long as the console had focus. The toolbar chip is the lasting sign. The hint on the picture names the
+    // capture and then gets out of the way.
     val edge = rememberArrivalGlow(focused, lit = focused)
     val sessionRef = rememberUpdatedState(session)
+    val onShortcutRef = rememberUpdatedState(onShortcut)
+    // The shortcut key that is still down. A repeat must not switch guests again, and its key-up must not reach the guest.
+    val swallowed = remember { object { var key: Key? = null } }
     val fitRef = rememberUpdatedState(fit)
     val sizeRef = rememberUpdatedState(fbW to fbH)
     fun point(x: Float, y: Float, viewW: Float, viewH: Float) = vncPointerPoint(x, y, viewW, viewH, sizeRef.value.first, sizeRef.value.second, fitRef.value)
@@ -423,6 +489,17 @@ private fun sendCtrlAltDel(session: VncSession) {
         .focusable()
         .onPreviewKeyEvent { event ->
             if (!VncKeyboard.captured) return@onPreviewKeyEvent false
+            // Ctrl and Alt already went to the guest as key-downs. Release them before acting, and swallow the matching
+            // key-up so the guest never sees half of the shortcut. Anything else, including AltGr letters, is forwarded.
+            consoleShortcut(event)?.let { shortcut ->
+                if (event.type == KeyEventType.KeyDown && swallowed.key != event.key) {
+                    sessionRef.value?.releaseInput()
+                    swallowed.key = event.key
+                    onShortcutRef.value?.invoke(shortcut)
+                } else if (event.type == KeyEventType.KeyUp && event.key == swallowed.key) swallowed.key = null
+                return@onPreviewKeyEvent true
+            }
+            if (event.type == KeyEventType.KeyUp && event.key == swallowed.key) { swallowed.key = null; return@onPreviewKeyEvent true }
             if (event.type != KeyEventType.KeyDown && event.type != KeyEventType.KeyUp) return@onPreviewKeyEvent false
             val live = sessionRef.value
             val keycode = vncKeycode(event)
@@ -478,7 +555,7 @@ private fun sendCtrlAltDel(session: VncSession) {
             Box(Modifier.fillMaxSize().then(input)) {
                 FrameCanvas(frames, stamp, fbW, fbH, fit = true, alpha)
                 CursorOverlay(frames, cursor, pointer, fbW, fbH, true)
-                if (focused) FocusHint { edge.value }
+                CaptureHint(focused)
             }
         } else {
             val width = with(density) { fbW.toDp() }
@@ -487,7 +564,7 @@ private fun sendCtrlAltDel(session: VncSession) {
                 Box(Modifier.size(width, height).then(input)) {
                     FrameCanvas(frames, stamp, fbW, fbH, fit = false, alpha)
                     CursorOverlay(frames, cursor, pointer, fbW, fbH, false)
-                    if (focused) FocusHint { edge.value }
+                    CaptureHint(focused)
                 }
             }
         }
@@ -501,11 +578,45 @@ private fun blankPointer(): PointerIcon = blankCursor ?: runCatching {
     PointerIcon(java.awt.Toolkit.getDefaultToolkit().createCustomCursor(image, java.awt.Point(0, 0), "vnc-hidden"))
 }.getOrDefault(PointerIcon.Default).also { blankCursor = it }
 
-/** Amber while the edge is lit ([glow] 1), grey once it has faded (0): the keyboard is still captured, quietly. */
-@Composable private fun BoxScope.FocusHint(glow: () -> Float) {
+internal const val CAPTURE_HINT_HOLD_MS = 2_500L
+internal const val CAPTURE_HINT_FADE_MS = 600
+
+/**
+ * Waits [ms] on the composition frame clock when one is present, so a test that steps rendered frames advances the
+ * hold. A caller with no frame clock (there is none today) falls back to a real delay.
+ */
+internal suspend fun awaitComposedMillis(ms: Long) {
+    val clock = coroutineContext[androidx.compose.runtime.MonotonicFrameClock]
+    if (clock == null) { delay(ms); return }
+    if (ms <= 0L) return
+    val start = clock.withFrameNanos { it }
+    var now = start
+    val span = ms * 1_000_000L
+    while (now - start < span) now = clock.withFrameNanos { it }
+}
+
+/**
+ * Names the capture when it starts, then gets out of the way: a console is for looking at the guest. It shows again
+ * each time the console takes the keyboard. The toolbar chip is the lasting sign. The 2.5 s is measured from the
+ * moment of capture, including the short entrance, so the hint is gone once the hold and the fade have both run.
+ */
+@Composable internal fun BoxScope.CaptureHint(captured: Boolean) {
+    val reduce = LocalReduceMotion.current
+    val alpha = remember { Animatable(0f) }
+    LaunchedEffect(captured) {
+        if (!captured) { alpha.snapTo(0f); return@LaunchedEffect }
+        if (reduce) alpha.snapTo(1f) else alpha.animateTo(1f, tween(MotionDur.Quick, easing = MotionEase.Enter))
+        val held = if (reduce) CAPTURE_HINT_HOLD_MS else (CAPTURE_HINT_HOLD_MS - MotionDur.Quick).coerceAtLeast(0)
+        awaitComposedMillis(held)
+        if (reduce) alpha.snapTo(0f) else alpha.animateTo(0f, tween(CAPTURE_HINT_FADE_MS, easing = MotionEase.Exit))
+    }
+    // Composed only while visible; the per-frame alpha is read in the layer, so the fade does not recompose.
+    val visible by remember { derivedStateOf { alpha.value > 0f } }
+    if (!visible) return
     Text("Keyboard captured · click outside to release",
-        Modifier.align(Alignment.BottomCenter).padding(8.dp).background(Color.Black.copy(alpha = .65f), Tech.Control).padding(horizontal = 8.dp, vertical = 3.dp),
-        color = androidx.compose.ui.graphics.lerp(Tech.Muted, Tech.Amber, glow().coerceIn(0f, 1f)), fontFamily = Tech.Mono, fontSize = 10.sp, maxLines = 1)
+        Modifier.align(Alignment.BottomCenter).padding(8.dp).graphicsLayer { this.alpha = alpha.value }
+            .background(Color.Black.copy(alpha = .65f), Tech.Control).padding(horizontal = 8.dp, vertical = 3.dp),
+        color = Tech.Amber, fontFamily = Tech.Mono, fontSize = 10.sp, maxLines = 1)
 }
 
 /**

@@ -143,6 +143,18 @@ internal fun guestHasPage(state: WorkspaceState, guest: Guest): Boolean = state.
             workspace.inspectGuest()
         }
     }
+    // Console switcher: the page stays open on the Console tab and moves to another guest of this connection.
+    val switchConsole: (Guest) -> Unit = switch@{ guest ->
+        if (!guestHasPage(state, guest) || guest.resource == state.selected?.resource) return@switch
+        // Record the target before select(): select() changes the keys of the effect above, and that effect closes
+        // the page whenever the selection and detailResource disagree.
+        detailResource = guest.resource
+        detailTab = "Console"
+        tabNonce = System.nanoTime()
+        detailOpen = true
+        workspace.select(guest)
+        workspace.inspectGuest()
+    }
     pendingPower?.let { confirmation ->
         val destructive = powerActionDestructive(confirmation.action)
         val listed = state.overview?.guests?.firstOrNull { it.resource == confirmation.resource }
@@ -195,7 +207,7 @@ internal fun guestHasPage(state: WorkspaceState, guest: Guest): Boolean = state.
         }
     }
     if (detailOpen && state.selected != null) {
-        GuestDetailPage(state,workspace, { detailOpen = false }, { action, snapshot -> pendingPower = workspace.capturePower(action,profileLabel,snapshot) }, initialTab = detailTab, tabNonce = tabNonce, pins = pins, connectionKey = connectionKey)
+        GuestDetailPage(state,workspace, { detailOpen = false }, { action, snapshot -> pendingPower = workspace.capturePower(action,profileLabel,snapshot) }, initialTab = detailTab, tabNonce = tabNonce, pins = pins, connectionKey = connectionKey, onSwitchGuest = switchConsole)
         return
     }
     BoxWithConstraints(Modifier.fillMaxSize()) {
@@ -617,8 +629,8 @@ private fun guestLockMark(guest: Guest): GuestMark? {
             val memMax = sample?.memMax ?: guest.metrics?.memoryLimitBytes
             val vcpus = guest.metrics?.maxCpu?.toInt() ?: state.details?.cpus
             if (running) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                ArcGauge(cpuNow, "CPU", vcpus?.let { "$it vCPU" })
-                ArcGauge(memoryFraction(memNow, memMax), "Memory", if (memMax != null && memMax > 0L) "${gib(memNow)} / ${gib(memMax)} GiB" else null)
+                ArcGauge(cpuNow, "CPU", vcpus?.let { "$it vCPU" }, modifier = Modifier.opensLens { guestLens(guest, LiveMetric.Cpu) }, series = live, metric = { it.cpu })
+                ArcGauge(memoryFraction(memNow, memMax), "Memory", if (memMax != null && memMax > 0L) "${gib(memNow)} / ${gib(memMax)} GiB" else null, modifier = Modifier.opensLens { guestLens(guest, LiveMetric.Memory) }, series = live, metric = { memoryFraction(it.mem, it.memMax) })
             }
             // Off or template: empty gauges say nothing, so show what the guest is allocated instead.
             else Row(Modifier.fillMaxWidth().border(1.dp, Tech.Edge, Tech.Control).background(Tech.Black.copy(alpha = .35f)).padding(horizontal = 12.dp, vertical = 10.dp),
@@ -637,12 +649,12 @@ private fun guestLockMark(guest: Guest): GuestMark? {
             if (running && live != null && live.samples.size > 1) {
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Row { Text("CPU · LAST ${live.samples.size} SAMPLES", fontSize = 9.sp, letterSpacing = 1.sp, color = Tech.Muted, fontFamily = Tech.Mono, modifier = Modifier.weight(1f)); Text(percent(cpuNow), fontSize = 9.sp, color = Tech.Muted, fontFamily = Tech.Mono) }
-                    Sparkline(live, Modifier.fillMaxWidth().height(48.dp).background(Tech.Black.copy(alpha = .35f)))
+                    Sparkline(live, Modifier.opensLens { guestLens(guest, LiveMetric.Cpu) }.fillMaxWidth().height(48.dp).background(Tech.Black.copy(alpha = .35f)))
                 }
                 MiniHeading("MEMORY", percent(memoryFraction(memNow, memMax)))
-                Sparkline(live, Modifier.fillMaxWidth().height(32.dp).background(Tech.Black.copy(alpha = .35f)), floor = .1, pulse = false, ease = true) { memoryFraction(it.mem, it.memMax) }
+                Sparkline(live, Modifier.opensLens { guestLens(guest, LiveMetric.Memory) }.fillMaxWidth().height(32.dp).background(Tech.Black.copy(alpha = .35f)), floor = .1, pulse = false, ease = true, readout = SparkReadout.Memory) { memoryFraction(it.mem, it.memMax) }
                 MiniHeading("NETWORK", "IN green · OUT amber")
-                NetSparkline(live, Modifier.fillMaxWidth().height(32.dp).background(Tech.Black.copy(alpha = .35f)), pulse = false, ease = true)
+                NetSparkline(live, Modifier.opensLens { guestLens(guest, LiveMetric.Network) }.fillMaxWidth().height(32.dp).background(Tech.Black.copy(alpha = .35f)), pulse = false, ease = true)
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     Column(Modifier.weight(1f)) { Text("NET IN", fontSize = 9.sp, color = Tech.Muted, fontFamily = Tech.Mono); Text(formatRate(sample?.netInRate), fontSize = 12.sp, fontFamily = Tech.Mono) }
                     Column(Modifier.weight(1f)) { Text("NET OUT", fontSize = 9.sp, color = Tech.Muted, fontFamily = Tech.Mono); Text(formatRate(sample?.netOutRate), fontSize = 12.sp, fontFamily = Tech.Mono) }
@@ -691,14 +703,15 @@ private fun guestLockMark(guest: Guest): GuestMark? {
     val last = cluster.samples.lastOrNull()
     SectionLabel("Cluster overview")
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-        ArcGauge(total.cpuFraction, "CPU", "${total.nodes} ${if (total.nodes == 1) "node" else "nodes"}")
+        ArcGauge(total.cpuFraction, "CPU", "${total.nodes} ${if (total.nodes == 1) "node" else "nodes"}", modifier = Modifier.opensLens { clusterLens(LiveMetric.Cpu) }, series = cluster, metric = { it.cpu })
         ArcGauge(memoryFraction(total.memoryBytes, total.memoryLimitBytes), "Memory",
-            if ((total.memoryLimitBytes ?: 0L) > 0L) "${gib(total.memoryBytes)} / ${gib(total.memoryLimitBytes)} GiB" else null)
+            if ((total.memoryLimitBytes ?: 0L) > 0L) "${gib(total.memoryBytes)} / ${gib(total.memoryLimitBytes)} GiB" else null,
+            modifier = Modifier.opensLens { clusterLens(LiveMetric.Memory) }, series = cluster, metric = { memoryFraction(it.mem, it.memMax) })
     }
     MiniHeading("CPU · LAST ${cluster.samples.size} SAMPLES", percent(total.cpuFraction))
-    Sparkline(cluster, Modifier.fillMaxWidth().height(56.dp).background(Tech.Black.copy(alpha = .35f)))
+    Sparkline(cluster, Modifier.opensLens { clusterLens(LiveMetric.Cpu) }.fillMaxWidth().height(56.dp).background(Tech.Black.copy(alpha = .35f)))
     MiniHeading("GUEST NETWORK")
-    NetSparkline(cluster, Modifier.fillMaxWidth().height(40.dp).background(Tech.Black.copy(alpha = .35f)))
+    NetSparkline(cluster, Modifier.opensLens { clusterLens(LiveMetric.Network) }.fillMaxWidth().height(40.dp).background(Tech.Black.copy(alpha = .35f)))
     Row(Modifier.fillMaxWidth()) {
         Box(Modifier.weight(1f)) { RateLine("IN", last?.netInRate, Tech.Green, 11.sp) }
         Box(Modifier.weight(1f)) { RateLine("OUT", last?.netOutRate, Tech.Amber, 11.sp) }
@@ -715,7 +728,7 @@ private fun guestLockMark(guest: Guest): GuestMark? {
         val cpuNow = latestCpu(series, row.metrics?.cpuFraction)
         Row(Modifier.fillMaxWidth().height(24.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(row.name.ifBlank { "Guest ${row.id}" }, Modifier.weight(1f).identity(), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Sparkline(series ?: Series(), Modifier.size(96.dp, 16.dp), pulse = false)
+            Sparkline(series ?: Series(), Modifier.opensLens { guestLens(row, LiveMetric.Cpu) }.size(96.dp, 16.dp), pulse = false)
             Text(percent(cpuNow), Modifier.width(40.dp), fontFamily = Tech.Mono, fontSize = 11.sp, textAlign = TextAlign.End, color = if (cpuNow != null) ramp(cpuNow) else Tech.Muted)
         }
     }
@@ -778,8 +791,8 @@ private fun guestLockMark(guest: Guest): GuestMark? {
         val capacity = sample?.memMax ?: member.maxMemoryBytes
         val cpuNow = cpuShare(latestCpu(nodeSeries, member.cpuFraction))
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-            ArcGauge(cpuNow, "CPU", member.maxCpu?.let { "${it.toInt()} cores" })
-            ArcGauge(memoryFraction(used, capacity), "Memory", if ((capacity ?: 0L) > 0L) "${gib(used)} / ${gib(capacity)} GiB" else null)
+            ArcGauge(cpuNow, "CPU", member.maxCpu?.let { "${it.toInt()} cores" }, modifier = Modifier.opensLens { nodeLens(member.name, LiveMetric.Cpu) }, series = nodeSeries, metric = { it.cpu })
+            ArcGauge(memoryFraction(used, capacity), "Memory", if ((capacity ?: 0L) > 0L) "${gib(used)} / ${gib(capacity)} GiB" else null, modifier = Modifier.opensLens { nodeLens(member.name, LiveMetric.Memory) }, series = nodeSeries, metric = { memoryFraction(it.mem, it.memMax) })
         }
         HistoryGroup(state, workspace, member.name)
         LaunchedEffect(member.name, state.connectionEpoch) { workspace.loadNodeNetwork(member.name) }
