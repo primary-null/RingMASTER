@@ -91,7 +91,8 @@ case ${1:-} in
     rm -rf "$work"
     ;;
   --rpm)
-    pkg=$2
+    # Absolute: rpmrebuild and the check below run from other directories.
+    pkg=$(CDPATH= cd "$(dirname "$2")" && pwd)/$(basename "$2")
     self=$(CDPATH= cd "$(dirname "$0")" && pwd)/$(basename "$0")
     stamp=$(mktemp)
     touch "$stamp"
