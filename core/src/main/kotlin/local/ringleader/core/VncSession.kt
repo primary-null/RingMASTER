@@ -24,6 +24,16 @@ const val VNC_NOT_VM = "Consoles are for QEMU VMs."
 const val VNC_GUEST_STOPPED = "The guest is stopped."
 const val VNC_NO_PERMISSION = "This token lacks VM.Console on this VM."
 const val VNC_LOST = "The connection was lost."
+const val VNC_TEXT_FRAME = "The console sent text instead of screen data."
+
+/** Client messages waiting for the writer. Far more than a live socket ever holds; a full outbox means a stall. */
+internal const val VNC_OUTBOX_LIMIT = 4096
+/** Websocket chunks the reader may lag behind before the socket stops asking the server for more. */
+internal const val VNC_SOCKET_CHUNKS = 256
+/** Keepalive period. A ping still unanswered at the next period ends the session. */
+internal const val VNC_PING_SECONDS = 30L
+internal const val VNC_CLOSE_FLUSH_MS = 300L
+private val VNC_PING_PAYLOAD = "ringmaster".toByteArray(Charsets.US_ASCII)
 
 /** True when [requireSpiceDisplay] accepts this VM config `vga` value (qxl, including options after a comma). */
 fun spiceDisplayAvailable(vga: String?): Boolean = runCatching { requireSpiceDisplay(vga) }.isSuccess
@@ -114,6 +124,20 @@ fun vncKeysym(key: VncKey, codePoint: Int): Int? = when (key) {
 internal fun vncKeyEvent(down: Boolean, keysym: Int): ByteArray =
     ByteBuffer.allocate(8).put(4).put(if (down) 1 else 0).putShort(0).putInt(keysym).array()
 
+/** Pseudo-encoding a server confirms (with an empty rectangle) when it accepts [vncQemuKeyEvent]. */
+internal const val VNC_QEMU_EXTENDED_KEY = -258
+
+/**
+ * QEMU extended key event (client message 255, submessage 0): down-flag U16, keysym U32, XT keycode U32. The keycode
+ * names the physical key, so the guest's own layout decides the character. An `E0 xx` scancode is sent as `xx | 0x80`.
+ */
+internal fun vncQemuKeyEvent(down: Boolean, keysym: Int, keycode: Int): ByteArray =
+    ByteBuffer.allocate(12).put(255.toByte()).put(0).putShort(if (down) 1 else 0).putInt(keysym).putInt(keycode).array()
+
+/** The RFB keycode for an XT make code: one byte as is, `E0 xx` as `xx | 0x80`. Zero when there is no usable code. */
+fun vncXtKeycode(scancode: Int, extended: Boolean): Int =
+    if (scancode !in 1..0x7f) 0 else if (extended) scancode or 0x80 else scancode
+
 /** RFB PointerEvent. [mask] bits 0..2 are buttons 1..3; bits 3..4 are wheel buttons 4..5. */
 internal fun vncPointerEvent(mask: Int, x: Int, y: Int): ByteArray =
     ByteBuffer.allocate(6).put(5).put((mask and 255).toByte()).putShort(x.toShort()).putShort(y.toShort()).array()
@@ -139,9 +163,61 @@ class LiveVncConsoleGateway(private val client: PveClient = PveClient()) : VncCo
 }
 
 /**
+ * Websocket keepalive. Each [tick] sends one ping; a tick that finds the previous ping still unanswered, or a ping
+ * that cannot be sent, reports [lost]. Nothing is retried and no new console ticket is requested.
+ */
+internal class VncKeepalive(private val ping: () -> CompletionStage<*>, private val lost: () -> Unit) {
+    private val waiting = AtomicBoolean(false)
+    private val ended = AtomicBoolean(false)
+    fun tick() {
+        if (ended.get()) return
+        if (waiting.getAndSet(true)) { end(); return }
+        try { ping().whenComplete { _, error -> if (error != null) failed(error) } }
+        catch (e: Exception) { failed(e) }
+    }
+    /** IllegalStateException only says another ping or pong is still being sent (or the socket is closing): skip one beat. */
+    private fun failed(error: Throwable) {
+        val root = if (error is java.util.concurrent.CompletionException && error.cause != null) error.cause!! else error
+        if (root is IllegalStateException) waiting.set(false) else end()
+    }
+    fun pong() { waiting.set(false) }
+    private fun end() { if (ended.compareAndSet(false, true)) lost() }
+}
+
+/**
+ * Keys and buttons the guest currently sees as held. A key-up repeats what its key-down sent, so a modifier that
+ * changed the character in between still releases the same key. [Physical] keys are identified by the caller.
+ */
+internal class VncHeldInput {
+    class Key(val keysym: Int, val keycode: Int)
+    private val keys = LinkedHashMap<Long, Key>()
+    var mask = 0
+        private set
+    var x = 0
+        private set
+    var y = 0
+        private set
+    @Synchronized fun down(id: Long, key: Key) { keys[id] = key }
+    /** The key-down to repeat for [id], or null when that key was not held. */
+    @Synchronized fun up(id: Long): Key? = keys.remove(id)
+    @Synchronized fun pointer(mask: Int, x: Int, y: Int) { this.mask = mask and 7; this.x = x; this.y = y }
+    /** Every held key, most recent first, and whether a button was held; both are cleared. */
+    @Synchronized fun drain(): Pair<List<Key>, Boolean> {
+        val held = keys.values.reversed()
+        keys.clear()
+        val buttons = mask != 0
+        mask = 0
+        return held to buttons
+    }
+}
+
+/**
  * Continuous RFB 3.8 client. Pixels are 32-bit little-endian true colour with red at shift 16, green at 8 and blue at 0,
  * so each pixel is an ARGB int (alpha forced on, because RFB has no alpha). One zlib [Inflater] lives for the connection.
  * ZRLE is not requested. Close is idempotent and does not by itself set [reason].
+ *
+ * After [start], every client message goes through one bounded outbox drained by a writer thread, so neither the UI
+ * thread nor the reader ever waits on the websocket. Before [start] (the handshake), writes are direct.
  */
 class VncSession internal constructor(rawChannel: RfbChannel) : AutoCloseable {
     private val trace = Trace.begin(TraceSource.Console, "VNC session", session=true)
@@ -151,12 +227,24 @@ class VncSession internal constructor(rawChannel: RfbChannel) : AutoCloseable {
         override fun close() = rawChannel.close()
     }
     private val closed = AtomicBoolean(false)
+    @Volatile private var lost = false
     private val writeLock = Any()
     private val frameLock = Any()
     private val inflater = Inflater()
     private var zbuf = ByteArray(0)
     private var pixels = IntArray(0)
     private var thread: Thread? = null
+    private val outbox = LinkedBlockingQueue<ByteArray>(VNC_OUTBOX_LIMIT)
+    private val stop = ByteArray(0)
+    @Volatile private var writer: Thread? = null
+    private var keepalive: java.util.concurrent.ScheduledExecutorService? = null
+    @Volatile private var heartbeat: VncKeepalive? = null
+    private val held = VncHeldInput()
+    /** True once the server confirmed QEMU extended key events; keys with a keycode then use [vncQemuKeyEvent]. */
+    @Volatile var extendedKeys: Boolean = false
+        private set
+    /** Sends one websocket ping. Set by [openVncSession]; tests leave it null and get no keepalive. */
+    internal var pinger: (() -> CompletionStage<*>)? = null
     @Volatile var width: Int = 0
         private set
     @Volatile var height: Int = 0
@@ -185,11 +273,52 @@ class VncSession internal constructor(rawChannel: RfbChannel) : AutoCloseable {
         VncSnapshot(version, width, height, cursor, copied)
     }
 
-    fun key(down: Boolean, keysym: Int) { send(vncKeyEvent(down, keysym)) }
+    /** One untracked key event, for synthetic chords such as Ctrl+Alt+Del that send their own key-ups. */
+    fun key(down: Boolean, keysym: Int, keycode: Int = 0) { send(keyMessage(down, VncHeldInput.Key(keysym, keycode))) }
+
+    /**
+     * A key event from physical key [id]. [keycode] is the RFB XT keycode ([vncXtKeycode]) or 0 when unknown; it is
+     * used only when the server confirmed [extendedKeys]. A key-up repeats the keysym and keycode of its key-down.
+     */
+    fun keyInput(id: Long, down: Boolean, keysym: Int, keycode: Int = 0) {
+        val key = if (down) VncHeldInput.Key(keysym, keycode).also { held.down(id, it) } else held.up(id) ?: VncHeldInput.Key(keysym, keycode)
+        send(keyMessage(down, key))
+    }
+
     fun pointer(mask: Int, x: Int, y: Int) {
         if (width == 0 || height == 0) return
-        send(vncPointerEvent(mask, x.coerceIn(0, width - 1), y.coerceIn(0, height - 1)))
+        val px = x.coerceIn(0, width - 1)
+        val py = y.coerceIn(0, height - 1)
+        val motion = mask == held.mask
+        held.pointer(mask, px, py)
+        send(vncPointerEvent(mask, px, py), droppable = motion)
     }
+
+    /** True while the guest sees a mouse button held. */
+    val buttonsHeld: Boolean get() = held.mask != 0
+
+    /**
+     * Releases everything the guest sees as held: a key-up for every key that went down here, and button mask 0 at the
+     * last pointer position. Call it when the console loses focus or the pointer leaves with a button down.
+     */
+    fun releaseInput() {
+        val (keys, buttons) = held.drain()
+        keys.forEach { send(keyMessage(false, it)) }
+        if (buttons) send(vncPointerEvent(0, held.x, held.y))
+    }
+
+    /** Releases the mouse buttons only (the pointer left the screen); held keys stay down. */
+    fun releaseButtons() {
+        if (held.mask == 0) return
+        held.pointer(0, held.x, held.y)
+        send(vncPointerEvent(0, held.x, held.y))
+    }
+
+    private fun keyMessage(down: Boolean, key: VncHeldInput.Key): ByteArray =
+        if (extendedKeys && key.keycode != 0) vncQemuKeyEvent(down, key.keysym, key.keycode) else vncKeyEvent(down, key.keysym)
+
+    /** Called when the websocket answers a ping. */
+    internal fun pong() { heartbeat?.pong() }
 
     internal fun handshake(password: String) {
         fun u8() = channel.read(1)[0].toInt() and 255
@@ -222,7 +351,7 @@ class VncSession internal constructor(rawChannel: RfbChannel) : AutoCloseable {
         }
         // 32bpp little-endian true colour: bytes B,G,R,pad become an ARGB int once alpha is set.
         send(byteArrayOf(0, 0, 0, 0, 32, 24, 0, 1, 0, -1, 0, -1, 0, -1, 16, 8, 0, 0, 0, 0))
-        val encodings = intArrayOf(6, 1, 0, -223, -239)
+        val encodings = intArrayOf(6, 1, 0, -223, -239, VNC_QEMU_EXTENDED_KEY)
         send(ByteBuffer.allocate(4 + encodings.size * 4).put(2).put(0).putShort(encodings.size.toShort()).apply {
             encodings.forEach { putInt(it) }
         }.array())
@@ -232,6 +361,22 @@ class VncSession internal constructor(rawChannel: RfbChannel) : AutoCloseable {
 
     internal fun start() {
         if (closed.get()) return
+        writer = Thread({
+            try {
+                while (true) {
+                    val bytes = outbox.take()
+                    if (bytes === stop) break
+                    channel.write(bytes)
+                }
+            } catch (e: InterruptedException) { if (!closed.get()) finish(VNC_LOST) }
+            catch (e: Exception) { if (!closed.get()) finish(VNC_LOST) }
+        }, "vnc-console-writer").apply { isDaemon = true; start() }
+        pinger?.let { ping ->
+            val beat = VncKeepalive(ping) { if (!closed.get()) finish(VNC_LOST) }
+            heartbeat = beat
+            keepalive = java.util.concurrent.Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "vnc-keepalive").apply { isDaemon = true } }
+                .also { it.scheduleAtFixedRate({ beat.tick() }, VNC_PING_SECONDS, VNC_PING_SECONDS, TimeUnit.SECONDS) }
+        }
         thread = Thread({
             try { while (!closed.get() && pump()) Unit }
             catch (e: InterruptedException) { if (!closed.get()) finish(VNC_LOST) }
@@ -272,6 +417,7 @@ class VncSession internal constructor(rawChannel: RfbChannel) : AutoCloseable {
                 6 -> { rawBytes(x, y, w, h, zlibRect(w, h)); dirty = true }
                 -223 -> resize(w, h)
                 -239 -> cursor(x, y, w, h)
+                VNC_QEMU_EXTENDED_KEY -> extendedKeys = true
                 else -> error("The console used an unsupported encoding.")
             }
         }
@@ -389,8 +535,16 @@ class VncSession internal constructor(rawChannel: RfbChannel) : AutoCloseable {
         send(ByteBuffer.allocate(10).put(3).put(if (incremental) 1 else 0).putShort(0).putShort(0).putShort(width.toShort()).putShort(height.toShort()).array())
     }
 
-    private fun send(bytes: ByteArray) {
+    /**
+     * Queues one client message for the writer, or writes it directly before [start]. A full outbox means the socket
+     * has stalled: pointer motion ([droppable]) is dropped, anything else ends the session as [VNC_LOST].
+     */
+    private fun send(bytes: ByteArray, droppable: Boolean = false) {
         if (closed.get()) return
+        if (writer != null) {
+            if (!outbox.offer(bytes) && !droppable && !closed.get()) finish(VNC_LOST)
+            return
+        }
         synchronized(writeLock) {
             if (closed.get()) return
             try { channel.write(bytes) }
@@ -402,6 +556,7 @@ class VncSession internal constructor(rawChannel: RfbChannel) : AutoCloseable {
 
     private fun finish(message: String) {
         trace.end(error=IllegalStateException())
+        lost = true
         if (reason == null) reason = message
         val callback = onClosed
         close()
@@ -418,9 +573,24 @@ class VncSession internal constructor(rawChannel: RfbChannel) : AutoCloseable {
         while (left > 0) { val size = minOf(left, 8192); channel.read(size); left -= size }
     }
 
+    /**
+     * Ends the session. A clean close first releases held keys and buttons, and gives the writer a moment to send
+     * those key-ups, so the guest is never left with a modifier down.
+     */
     override fun close() {
+        if (closed.get()) return
+        if (ready && !lost) runCatching { releaseInput() }
         if (!closed.compareAndSet(false, true)) return
         trace.end()
+        keepalive?.shutdownNow()
+        val out = writer
+        if (out != null) {
+            outbox.offer(stop)
+            if (out != Thread.currentThread()) {
+                runCatching { out.join(VNC_CLOSE_FLUSH_MS) }
+                out.interrupt()
+            }
+        }
         channel.close()
         val worker = thread
         if (worker != null && worker != Thread.currentThread()) runCatching { worker.join(500) }
@@ -469,6 +639,8 @@ internal fun openVncSession(connection: Connection, base: String, proxy: (String
             try {
                 session.handshake(password)
                 pipe.handshake = false
+                pipe.onPong = session::pong
+                session.pinger = { ws.sendPing(ByteBuffer.wrap(VNC_PING_PAYLOAD)) }
                 session.start()
                 session
             } catch (e: Exception) {
@@ -491,31 +663,55 @@ private fun sanitized(e: Exception): Exception {
     return IllegalStateException(VNC_LOST)
 }
 
-/** Byte pipe over one PVE vncwebsocket. Reads block after the handshake; the ticket is never stored. */
-private class VncSocket : RfbChannel, WebSocket.Listener {
-    private val queue = LinkedBlockingQueue<ByteArray>()
+/**
+ * Byte pipe over one PVE vncwebsocket. Reads block after the handshake; the ticket is never stored. The queue is
+ * bounded by flow control: the socket asks the server for one more message only while the queue has room, and the
+ * reader asks again once it has taken a chunk, so a slow reader never piles up websocket data.
+ */
+internal class VncSocket(private val chunks: Int = VNC_SOCKET_CHUNKS) : RfbChannel, WebSocket.Listener {
+    private val queue = LinkedBlockingQueue<ByteArray>(chunks)
     private val writeLock = Any()
     private var pending = ByteArray(0)
     private var offset = 0
     private val openedAt = System.nanoTime()
+    private val paused = AtomicBoolean(false)
+    @Volatile private var ended = false
+    @Volatile private var failure: String? = null
     @Volatile var handshake = true
+    @Volatile var onPong: (() -> Unit)? = null
     @Volatile private var socket: WebSocket? = null
     fun attach(webSocket: WebSocket) { socket = webSocket }
     override fun onOpen(webSocket: WebSocket) { socket = webSocket; webSocket.request(1) }
     override fun onBinary(webSocket: WebSocket, data: ByteBuffer, last: Boolean): CompletionStage<*>? {
         val bytes = ByteArray(data.remaining()); data.get(bytes)
-        if (bytes.isNotEmpty()) queue.offer(bytes)
-        webSocket.request(1); return null
+        if (bytes.isNotEmpty() && !queue.offer(bytes)) { end(VNC_LOST); return null }
+        more(webSocket); return null
     }
-    override fun onText(webSocket: WebSocket, data: CharSequence, last: Boolean): CompletionStage<*>? { webSocket.request(1); return null }
-    override fun onClose(webSocket: WebSocket, statusCode: Int, reason: String): CompletionStage<*>? { queue.offer(ByteArray(0)); return null }
-    override fun onError(webSocket: WebSocket, error: Throwable) { queue.offer(ByteArray(0)) }
+    /** PVE's vncwebsocket is binary. A text frame means something in between speaks another protocol: stop at once. */
+    override fun onText(webSocket: WebSocket, data: CharSequence, last: Boolean): CompletionStage<*>? { end(VNC_TEXT_FRAME); return null }
+    override fun onPong(webSocket: WebSocket, message: ByteBuffer): CompletionStage<*>? {
+        runCatching { onPong?.invoke() }
+        more(webSocket); return null
+    }
+    override fun onClose(webSocket: WebSocket, statusCode: Int, reason: String): CompletionStage<*>? { end(null); return null }
+    override fun onError(webSocket: WebSocket, error: Throwable) { end(null) }
+    private fun end(message: String?) {
+        if (message != null && failure == null) failure = message
+        ended = true
+        queue.offer(ByteArray(0))
+    }
+    /** Requests the next message while the queue has room; otherwise the reader resumes the flow in [next]. */
+    private fun more(webSocket: WebSocket) {
+        if (queue.remainingCapacity() > 0) { webSocket.request(1); return }
+        paused.set(true)
+        if (queue.remainingCapacity() > 0 && paused.compareAndSet(true, false)) webSocket.request(1)
+    }
     override fun read(n: Int): ByteArray {
         val result = ByteArray(n); var written = 0
         while (written < n) {
             if (offset == pending.size) {
                 pending = next(); offset = 0
-                check(pending.isNotEmpty()) { VNC_LOST }
+                check(pending.isNotEmpty()) { failure ?: VNC_LOST }
             }
             val count = minOf(n - written, pending.size - offset)
             pending.copyInto(result, written, offset, offset + count); offset += count; written += count
@@ -523,14 +719,17 @@ private class VncSocket : RfbChannel, WebSocket.Listener {
         return result
     }
     private fun next(): ByteArray {
-        if (!handshake) return queue.take()
-        val left = openedAt + TimeUnit.SECONDS.toNanos(20) - System.nanoTime()
-        if (left <= 0) error("The console timed out.")
-        return queue.poll(left, TimeUnit.NANOSECONDS) ?: error("The console timed out.")
+        val chunk = queue.poll() ?: if (ended) ByteArray(0) else if (!handshake) queue.take() else {
+            val left = openedAt + TimeUnit.SECONDS.toNanos(20) - System.nanoTime()
+            if (left <= 0) error("The console timed out.")
+            queue.poll(left, TimeUnit.NANOSECONDS) ?: error("The console timed out.")
+        }
+        if (chunk.isNotEmpty() && paused.compareAndSet(true, false)) socket?.request(1)
+        return chunk
     }
     override fun write(bytes: ByteArray) {
         val ws = socket ?: error(VNC_LOST)
         synchronized(writeLock) { ws.sendBinary(ByteBuffer.wrap(bytes), true).get(20, TimeUnit.SECONDS) }
     }
-    override fun close() { queue.offer(ByteArray(0)); socket?.abort() }
+    override fun close() { end(null); socket?.abort() }
 }

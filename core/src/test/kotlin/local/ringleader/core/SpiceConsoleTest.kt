@@ -28,6 +28,19 @@ class SpiceConsoleTest {
         assertFalse("one-time" in ticket.toString())
     }
 
+    @Test fun deleteThisFileIsAddedWhenMissingAndSecretsAreRecognised() {
+        val withFlag = parseSpiceTicket(body(), "192.0.2.10").viewerFile()
+        assertEquals(1, Regex("delete-this-file=").findAll(withFlag).count())
+        val noFlag = body().replace(",\"delete-this-file\":\"1\"", "")
+        assertFalse("delete-this-file" in noFlag)
+        assertTrue(parseSpiceTicket(noFlag, "192.0.2.10").viewerFile().endsWith("delete-this-file=1\n"))
+        val ticket = parseSpiceTicket(body(), "192.0.2.10")
+        assertTrue(ticket.mentionsSecret("(remote-viewer) password one-time rejected"))
+        assertTrue(ticket.mentionsSecret("connecting to pvespiceproxy:abc:113:pve1:61002::0f"))
+        assertFalse(ticket.mentionsSecret("cannot open display :0"))
+        assertFalse(ticket.mentionsSecret("VM 113 - fixture"), "the title is not a secret")
+    }
+
     @Test fun unusableTicketsAreRefused() {
         assertFailsWith<IllegalStateException> { parseSpiceTicket(body(proxy = "http://203.0.113.9:3128"), "192.0.2.10") }
         assertFailsWith<IllegalStateException> { parseSpiceTicket(body(type = "vnc"), "192.0.2.10") }

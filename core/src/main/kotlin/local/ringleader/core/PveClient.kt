@@ -1,5 +1,6 @@
 package local.ringleader.core
 
+import java.net.SocketTimeoutException
 import java.net.URI
 import java.security.MessageDigest
 import java.security.cert.CertificateException
@@ -217,10 +218,14 @@ class PveClient(
         }
     }
 
-    /** The node's network configuration (Sys.Audit on the node); see [parseNodeNetwork]. */
-    fun nodeNetwork(connection: Connection, node: String): List<NodeInterface> {
+    /**
+     * The node's network configuration. Any signed-in user may call it. Bridges can be omitted without an error.
+     * See [parseNodeNetworkReport].
+     */
+    fun nodeNetwork(connection: Connection, node: String): NodeNetworkReport {
+        requireDirectRequest(connection)
         val path = nodeNetworkPath(node)
-        return connection.withSecret { parseNodeNetwork(http.direct(connection, path)) }
+        return connection.withSecret { parseNodeNetworkReport(http.direct(connection, path)) }
     }
 
     fun nodeHistoryRead(connection: Connection, node: String, timeframe: String, cf: String): String {
@@ -353,7 +358,7 @@ class PveClient(
     fun readTaskLogStatus(connection: Connection, node: String, upid: String): TaskLogStatus {
         requireDirectRequest(connection)
         val path = taskStatusPath(node, upid)
-        return connection.withSecret { parseTaskLogStatus(http.direct(connection, path)) }
+        return connection.withSecret { parseTaskLogStatus(http.direct(connection, path), node, upid) }
     }
 
     /** One page of a task log. [start] is the last line already shown. The UPID is one encoded path segment. */
@@ -363,12 +368,28 @@ class PveClient(
         return connection.withSecret { parseTaskLogPage(http.direct(connection, path)) }
     }
 
-    /** The signed-in identity's effective privileges per ACL path: `GET /access/permissions`, no parameters. */
+    /**
+     * The signed-in identity's effective privileges per ACL path: `GET /access/permissions`, no parameters.
+     * `GET /version` is open to any authenticated identity and is read first so guest-agent privileges can follow the
+     * server release. A failed version read leaves the release unknown. An expired session still ends the call.
+     */
     fun permissions(connection: Connection): PermissionDump {
         requireDirectRequest(connection)
+        val release = readReleaseOrNull(connection)
         return connection.withSecret {
             parsePermissions(http.direct(connection, PERMISSIONS_PATH, missing = PERMISSIONS_NOT_FOUND, badRequest = PERMISSIONS_REFUSED))
+                .copy(release = release)
         }
+    }
+
+    private fun readReleaseOrNull(connection: Connection): String? = try {
+        connection.withSecret {
+            parsePveRelease(http.direct(connection, PVE_VERSION_PATH, missing = PERMISSIONS_NOT_FOUND, badRequest = PERMISSIONS_REFUSED))
+        }
+    } catch (e: SessionExpiredException) {
+        throw e
+    } catch (_: Exception) {
+        null
     }
 
     /** Service list of one recorded node: `GET /nodes/{node}/services`. */
@@ -389,7 +410,7 @@ class PveClient(
         }
     }
 
-    /** The node's cached package update list: `GET /nodes/{node}/apt/update`. Never the POST that refreshes it. */
+    /** The node's cached package list: `GET /nodes/{node}/apt/update`. The GET can rebuild that cache from local apt data. It does not run apt update. */
     fun nodeUpdates(connection: Connection, node: String): List<PackageUpdate> {
         requireDirectRequest(connection)
         val path = aptUpdatePath(node)
@@ -408,6 +429,8 @@ class PveClient(
         return connection.withSecret {
             try {
                 parseStorageContent(http.direct(connection, path, missing = STORAGE_CONTENT_NOT_FOUND, badRequest = STORAGE_CONTENT_REFUSED))
+            } catch (_: SocketTimeoutException) {
+                error(STORAGE_CONTENT_TIMEOUT)
             } catch (e: IllegalStateException) {
                 if (e is SessionExpiredException || e is GuestPermissionException || e.message?.startsWith("The server returned HTTP 5") != true) throw e
                 error(STORAGE_CONTENT_UNAVAILABLE)
@@ -551,7 +574,11 @@ internal class ProxmoxTransport(
 
 internal const val GUEST_NOT_FOUND = "This guest is no longer at that node. Refresh the inventory."
 
-/** Sending a body to `/nodes/{node}/apt/update` would run `apt-get update` on the node. Lift this with the node-actions item, behind its own confirmation. */
+/**
+ * Sending a body to `/nodes/{node}/apt/update` would run `apt-get update` on the node. A GET never does that.
+ * A GET can rebuild the cached list from the local apt cache and does not use the network. Lift the POST only
+ * behind its own confirmation.
+ */
 internal const val APT_REFRESH_REFUSAL = "Refreshing the package lists is not requested. Only the cached list is read."
 
 /** Optional resource-row text. Blank and non-strings are absent. A control character rejects the value. */
@@ -564,6 +591,8 @@ private fun optionalPlain(row: JsonObject, key: String): String? {
 }
 
 private fun isDirectPath(path: String): Boolean {
+    // PDM uses the same path through its own client. A direct PVE session may read it for the release.
+    if (path == PVE_VERSION_PATH) return true
     if (path in PDM_READ_PATHS) return false
     if (path.startsWith("/api2/json/pve/")) return false
     if (path.startsWith("/api2/json/remotes/")) return false
@@ -595,11 +624,24 @@ internal fun certificateMatches(certificate: X509Certificate, fingerprint: Strin
     MessageDigest.getInstance("SHA-256").digest(certificate.encoded).joinToString("") { "%02x".format(it) } ==
         fingerprint.replace(":", "").trim().lowercase()
 
-/** Exact leaf pin, including private-IP origins; absent pins retain platform TLS validation. */
+/** One context per canonical pin: the trust manager is stateless, so a 5-second poll does not rebuild it. */
+private val pinnedContexts = java.util.concurrent.ConcurrentHashMap<String, SSLContext>()
+private const val PINNED_CONTEXTS_MAX = 64
+
+/**
+ * Exact leaf pin, including private-IP origins; absent pins retain platform TLS validation.
+ * The pin trust manager is the only one in the context and does no hostname check.
+ */
 internal fun pinnedSslContext(fingerprint: String): SSLContext? {
     val pin = fingerprint.replace(":", "").trim().lowercase()
     require(pin.isEmpty() || pin.matches(sha256PinPattern)) { "The SHA-256 certificate fingerprint must contain 64 hexadecimal digits." }
     if (pin.isEmpty()) return null
+    pinnedContexts[pin]?.let { return it }
+    if (pinnedContexts.size >= PINNED_CONTEXTS_MAX) pinnedContexts.clear()
+    return pinnedContexts.computeIfAbsent(pin, ::newPinnedSslContext)
+}
+
+private fun newPinnedSslContext(pin: String): SSLContext {
     val trust = object : javax.net.ssl.X509ExtendedTrustManager() {
         override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
         override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?): Unit = throw CertificateException("Client trust is not supported")

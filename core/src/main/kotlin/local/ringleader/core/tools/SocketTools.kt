@@ -18,6 +18,8 @@ import java.security.MessageDigest
 import java.security.SecureRandom
 import java.security.cert.X509Certificate
 import java.time.ZoneOffset
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.Executors
 import java.time.format.DateTimeFormatter
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLEngine
@@ -28,7 +30,9 @@ import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.future.await
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 class PortCheckPlugin : ToolPlugin {
     override val id = "port-check"
@@ -97,13 +101,18 @@ internal fun connectPort(host: String, port: Int, timeoutMs: Int): PortOutcome {
     } finally { trace.end() }
 }
 
-class DnsPlugin : ToolPlugin {
+/** [resolve] and [reverse] are the system resolver; tests replace them. */
+class DnsPlugin(
+    private val resolve: (String) -> Array<InetAddress> = { InetAddress.getAllByName(it) },
+    private val reverse: (InetAddress) -> String? = { InetAddress.getByAddress(it.address).canonicalHostName },
+) : ToolPlugin {
     override val id = "dns"
     override val name = "DNS lookup"
     override val summary = "A and AAAA records, and an optional reverse lookup."
     override val inputs = listOf(
         ToolInput("name", "Name", ToolInputKind.Host, "localhost", "Hostname or IP address"),
         ToolInput("reverse", "Reverse lookup", ToolInputKind.Toggle, "false", "Also look up the names of the addresses"),
+        ToolInput("timeout", "Timeout (s)", ToolInputKind.Number, "5", "How long to wait for an answer", min = 1, max = 30),
     )
 
     override fun available() = ToolAvailability(true)
@@ -111,10 +120,12 @@ class DnsPlugin : ToolPlugin {
     override suspend fun run(values: Map<String, String>, emit: (ToolEvent) -> Unit): ToolResult = withContext(Dispatchers.IO) {
         val clean = try { validateToolValues(inputs, values) } catch (e: ToolInputException) { return@withContext ToolResult(false, e.message ?: "Check the inputs.") }
         val name = clean.getValue("name")
+        val seconds = clean.getValue("timeout").toLong()
         emit(ToolEvent.Status("Looking up $name"))
         val started = System.nanoTime()
         val addresses = try {
-            Trace.call(TraceSource.Tools, "DNS lookup", mapOf("host" to name)) { InetAddress.getAllByName(name) }
+            Trace.call(TraceSource.Tools, "DNS lookup", mapOf("host" to name)) { withDeadline(seconds * 1000) { resolve(name) } }
+                ?: return@withContext ToolResult(false, "No answer for $name within $seconds s.")
         } catch (_: UnknownHostException) {
             return@withContext ToolResult(false, "No address for $name.")
         } catch (e: CancellationException) { throw e } catch (e: Exception) {
@@ -127,10 +138,17 @@ class DnsPlugin : ToolPlugin {
             emit(ToolEvent.Line("$kind ${address.hostAddress}"))
         }
         if (clean["reverse"] == "true") {
+            // One deadline for all reverse lookups together.
+            val until = System.nanoTime() + seconds * 1_000_000_000
             addresses.forEach { address ->
                 ensureActive()
-                val reverse = runCatching { InetAddress.getByAddress(address.address).canonicalHostName }.getOrNull()
-                val shown = if (reverse.isNullOrBlank() || reverse == address.hostAddress) "no name" else reverse
+                val left = (until - System.nanoTime()) / 1_000_000
+                val answer = if (left <= 0) null else runCatching { withDeadline(left) { reverse(address) ?: "" } }.getOrElse { e -> if (e is CancellationException) throw e; "" }
+                val shown = when {
+                    answer == null -> "no answer in time"
+                    answer.isBlank() || answer == address.hostAddress -> "no name"
+                    else -> answer
+                }
                 emit(ToolEvent.Line("PTR ${address.hostAddress} $shown"))
             }
         }
@@ -138,6 +156,17 @@ class DnsPlugin : ToolPlugin {
         val summary = "${count} ${if (count == 1) "address" else "addresses"} in ${formatNumber(millis)} ms"
         ToolResult(count > 0, summary, mapOf("count" to count.toString(), "ms" to formatNumber(millis)))
     }
+}
+
+private val lookupThreads = Executors.newCachedThreadPool { task -> Thread(task, "ringmaster-dns").apply { isDaemon = true } }
+
+/**
+ * Runs a blocking call such as a system DNS lookup on its own thread and waits at most [timeoutMs]. Null when the time
+ * runs out. Cancelling returns at once. The JDK resolver cannot be interrupted, so a late answer is dropped.
+ */
+internal suspend fun <T : Any> withDeadline(timeoutMs: Long, block: () -> T): T? {
+    val future = CompletableFuture.supplyAsync(block, lookupThreads)
+    return try { withTimeoutOrNull(timeoutMs.coerceAtLeast(1)) { future.await() } } finally { if (!future.isDone) future.cancel(false) }
 }
 
 class HttpTlsPlugin : ToolPlugin {
@@ -177,6 +206,9 @@ internal fun validateHttpUrl(raw: String): URI {
     return uri
 }
 
+/** An IP literal is reached directly, so the report describes that address and not a proxy. A hostname can use the system proxy. */
+internal fun bypassProxy(host: String): Boolean = isIpv4(host) || isIpv6(host.removePrefix("[").removeSuffix("]"))
+
 internal fun sha256Fingerprint(cert: X509Certificate): String =
     MessageDigest.getInstance("SHA-256").digest(cert.encoded).joinToString(":") { "%02X".format(it) }
 
@@ -194,6 +226,7 @@ private fun inspectHttp(uri: URI, method: String, timeoutMs: Long, insecure: Boo
         .sslParameters(parameters)
         .followRedirects(java.net.http.HttpClient.Redirect.NEVER)
         .version(java.net.http.HttpClient.Version.HTTP_1_1)
+        .apply { if (bypassProxy(uri.host)) proxy(java.net.http.HttpClient.Builder.NO_PROXY) }
         .build()
     val request = java.net.http.HttpRequest.newBuilder(uri)
         .timeout(java.time.Duration.ofMillis(timeoutMs))

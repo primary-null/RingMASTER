@@ -159,6 +159,20 @@ class StorageContentTest {
         assertTrue(filterVolumes(rows, "snippets").isEmpty())
     }
 
+    @Test fun aSharedIdCountsOnceAndOtherRowsCountEach() {
+        fun row(node: String, id: String, shared: Boolean?) =
+            RecordedStorage(DEMO_REMOTE_KEY, node, id, shared, 1, 2, "available", "dir", "images")
+        val rows = listOf(
+            row("demo-node-a", "shared-data", true),
+            row("demo-node-b", "shared-data", true),
+            row("demo-node-a", "local", false),
+            row("demo-node-b", "local", false),
+            row("demo-node-a", "mystery", null),
+        )
+        assertEquals(4, recordedStorageCount(rows))
+        assertEquals(0, recordedStorageCount(emptyList()))
+    }
+
     @Test fun chipCountsListOnlyTypesThatHaveRows() {
         assertEquals(listOf(VOLUME_TYPE_ALL to 6, "iso" to 2, "backup" to 1, "images" to 2, VOLUME_TYPE_OTHER to 1), volumeTypeCounts(rows))
         assertEquals(listOf(VOLUME_TYPE_ALL to 0), volumeTypeCounts(emptyList()))

@@ -30,13 +30,28 @@ import local.ringleader.core.*
     LaunchedEffect(tabNonce) { if (tabNonce != 0L) tab = if (initialTab in tabs) initialTab else "Summary" }
     var pinMenu by remember { mutableStateOf(false) }
     var serviceDialog by remember { mutableStateOf(false) }
-    var timeframe by remember { mutableStateOf("hour") }
     var name by remember { mutableStateOf("") }
     var description by remember { mutableStateOf("") }
     var creating by remember { mutableStateOf(false) }
     var ram by remember { mutableStateOf(false) }
-    val report = state.inspection?.takeIf { it.resource == guest.resource && it.node == guest.node }
-    val ready = !state.powerBusy && !state.stale && !state.loading && state.submissions.none { it.phase in listOf(PowerPhase.Accepted,PowerPhase.Unknown) }
+    val created = state.submissions.filter { it.action == PowerAction.SnapshotCreate && it.phase == PowerPhase.Succeeded && it.remote == guest.remote && it.vmid == guest.id && it.kind == guest.kind }
+    var seenCreates by remember(guest.resource) { mutableStateOf(created.map { it.localId }.toSet()) }
+    LaunchedEffect(created.map { it.localId }) {
+        val fresh = created.filter { it.localId !in seenCreates }
+        if (fresh.isNotEmpty()) {
+            name = ""; description = ""; ram = false; creating = false
+            seenCreates = seenCreates + fresh.map { it.localId }
+        }
+    }
+    val report = state.inspection?.takeIf { it.resource == guest.resource }
+    val lockName = guest.lock?.takeIf { it.isNotBlank() }
+    val unresolved = state.submissions.any { it.phase == PowerPhase.Accepted || it.phase == PowerPhase.Unknown }
+    val ready = !state.powerBusy && !state.stale && !state.loading && !unresolved && lockName == null
+    val blockedReason = when {
+        lockName != null -> "Locked: $lockName."
+        unresolved -> "An earlier action is unresolved. Check it in Activity before another action."
+        else -> null
+    }
     val scroll = rememberScrollState(initialScroll)
     Column(Modifier.fillMaxSize().then(if (tab != "Console") Modifier.verticalScroll(scroll) else Modifier).padding(16.dp),verticalArrangement = Arrangement.spacedBy(Tech.Space12)) {
         Row(Modifier.fillMaxWidth(),horizontalArrangement = Arrangement.spacedBy(Tech.Space12),verticalAlignment=androidx.compose.ui.Alignment.CenterVertically) {
@@ -71,7 +86,7 @@ import local.ringleader.core.*
             // The tab strip already marks the open tab in amber; this shortcut lights up when the page opens, then settles.
             ArrivalAction("Console", guest.resource) { tab = "Console" }
             WebUiAction(if (state.demo || state.kind == PDM_KIND || guest.scope.isNotEmpty()) null else PveWebUi.guest(state.address, guest.kind, guest.id))
-            HelpTip("Refresh") { MiniAction("↻", enabled = !state.inspectionLoading, width = 30.dp) { workspace.inspectGuest(timeframe) } }
+            HelpTip("Refresh") { MiniAction("↻", enabled = !state.inspectionLoading, width = 30.dp) { workspace.inspectGuest() } }
         }
         if (serviceDialog && pins != null && connectionKey != null) PinServiceDialog(guest, report?.addresses?.value.orEmpty().mapNotNull(::reportedHost).distinct(), { serviceDialog = false }) { serviceName, url ->
             val error = pins.addService(connectionKey, guest, serviceName, url)
@@ -106,10 +121,7 @@ import local.ringleader.core.*
                 val cpuNow = if (runningGuest) latestCpu(live, state.details?.cpuFraction ?: guest.metrics?.cpuFraction) else null
                 val mem = if (runningGuest) latestMemory(live, state.details?.memoryBytes ?: guest.metrics?.memoryBytes) else null
                 val cap = live.samples.lastOrNull()?.memMax ?: state.details?.memoryLimitBytes ?: guest.metrics?.memoryLimitBytes
-                if (runningGuest && guest.kind == "VM") LaunchedEffect(guest.resource) {
-                    val last = state.consoleStills[guest.resource]?.at
-                    if (last == null || java.time.Duration.between(last, java.time.Instant.now()).toMinutes() >= 10) workspace.captureConsoleStill(guest)
-                }
+                if (runningGuest && guest.kind == "VM") LaunchedEffect(guest.resource) { autoCaptureConsoleStill(state, workspace, guest) }
                 if (runningGuest) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
                     if (guest.kind == "VM" && state.kind != PDM_KIND && !state.demo) ConsoleStillCard(state, workspace, guest, 300.dp, onOpenConsole = { tab = "Console" })
                     ArcGauge(cpuNow, "CPU", state.details?.cpus?.let { "$it vCPU" })
@@ -120,6 +132,7 @@ import local.ringleader.core.*
             }
             "Hardware" -> {
                 report?.hardware?.error?.let { Text(it,color = Tech.Amber) }
+                if (report?.hardware?.value == null && report?.hardware?.error == null) Text("Loading hardware…", color = Tech.Muted, fontFamily = Tech.Mono, fontSize = 12.sp)
                 report?.hardware?.value?.let { hardware ->
                     BoxWithConstraints(Modifier.fillMaxWidth()) {
                         val columns = if (maxWidth >= 900.dp) 2 else 1
@@ -127,9 +140,10 @@ import local.ringleader.core.*
                             hardware.fields.entries.toList().chunked(columns).forEach { fields ->
                                 Row(horizontalArrangement = Arrangement.spacedBy(24.dp)) {
                                     fields.forEach { (key, value) ->
+                                        val change = hardware.pending.firstOrNull { it.key == key }
                                         Row(Modifier.weight(1f).height(30.dp).drawBehind { drawLine(Tech.Edge, Offset(0f, size.height), Offset(size.width, size.height), 1f) }, verticalAlignment = androidx.compose.ui.Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                                            Text(when(key) { "ostype" -> "Operating system"; "onboot" -> "Start at boot"; "balloon" -> "Minimum memory"; else -> key }.uppercase(), Modifier.weight(.4f), color = Tech.Muted, fontFamily = Tech.Mono, fontSize = 9.sp, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
-                                            Text(if(key in listOf("memory","balloon","swap")) iec(value.toDoubleOrNull()?.times(1048576)) else if(key == "onboot") yesNo(value == "1") else if(key == "ostype") osTypeName(value) else if(key == "boot") value.removePrefix("order=").replace(";", " → ") else value, Modifier.weight(.6f), fontFamily = Tech.Mono, fontSize = 11.sp, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                                            Text(hardwareFieldLabel(key), Modifier.weight(.4f), color = Tech.Muted, fontFamily = Tech.Mono, fontSize = 9.sp, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                                            Text(hardwareValueText(key, value) + (change?.let { "  ·  ${pendingCaption(it)}" } ?: ""), Modifier.weight(.6f), fontFamily = Tech.Mono, fontSize = 11.sp, color = if (change != null) Tech.Amber else Tech.Ink, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
                                         }
                                     }
                                     if (fields.size < columns) Spacer(Modifier.weight(1f))
@@ -139,17 +153,19 @@ import local.ringleader.core.*
                     }
                     if (hardware.disks.isNotEmpty()) SectionLabel("Disks", suffix = "${hardware.disks.size}")
                     hardware.disks.forEach { d ->
+                        val change = hardware.pending.firstOrNull { it.key == d.key }
+                        val volume = listOfNotNull(d.volume, mountCaption(d), change?.let { pendingCaption(it) }).joinToString("  ·  ").ifBlank { "—" }
                         Row(Modifier.fillMaxWidth().height(32.dp).drawBehind { drawLine(Tech.Edge, Offset(0f, size.height), Offset(size.width, size.height), 1.dp.toPx()) }, verticalAlignment = androidx.compose.ui.Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                            Text(d.key, Modifier.width(72.dp), fontFamily = Tech.Mono, fontSize = 11.sp, color = Tech.Amber)
-                            Text(d.volume ?: "—", Modifier.weight(1f), fontFamily = Tech.Mono, fontSize = 11.sp, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                            Text(d.key, Modifier.width(88.dp), fontFamily = Tech.Mono, fontSize = 11.sp, color = Tech.Amber)
+                            Text(volume, Modifier.weight(1f), fontFamily = Tech.Mono, fontSize = 11.sp, color = if (change != null) Tech.Amber else Tech.Ink, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
                             Text(d.storage ?: "—", Modifier.width(120.dp), fontFamily = Tech.Mono, fontSize = 11.sp, color = Tech.Muted, maxLines = 1)
                             Text(d.size ?: "—", Modifier.width(64.dp), fontFamily = Tech.Mono, fontSize = 11.sp, textAlign = androidx.compose.ui.text.style.TextAlign.End)
                         }
                     }
                     if (hardware.nics.isNotEmpty()) SectionLabel("Network", suffix = "${hardware.nics.size}")
                     hardware.nics.forEach { n ->
-                        val model = n.properties.keys.firstOrNull { it in listOf("virtio", "e1000", "e1000e", "rtl8139", "vmxnet3") }
-                        val mac = model?.let { n.properties[it] } ?: n.properties["hwaddr"]
+                        val model = nicModel(n.properties)
+                        val mac = nicAddress(n.properties)
                         Row(Modifier.fillMaxWidth().height(32.dp).drawBehind { drawLine(Tech.Edge, Offset(0f, size.height), Offset(size.width, size.height), 1.dp.toPx()) }, verticalAlignment = androidx.compose.ui.Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                             Text(n.key, Modifier.width(72.dp), fontFamily = Tech.Mono, fontSize = 11.sp, color = Tech.Amber)
                             Text(listOfNotNull(model ?: n.properties["name"], mac).joinToString("  ·  ").ifEmpty { "—" }, Modifier.weight(1f).identity(), fontFamily = Tech.Mono, fontSize = 11.sp, maxLines = 1)
@@ -158,69 +174,94 @@ import local.ringleader.core.*
                             Text(nicExtras(n.properties), Modifier.width(150.dp).identity(), fontFamily = Tech.Mono, fontSize = 10.sp, color = Tech.Muted, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
                             if (n.properties["link_down"] == "1") AttentionTag("Unplugged", help = "The virtual cable is unplugged (link_down=1): the guest sees no link on this NIC.")
                             if (n.properties["firewall"] == "1") HealthyTag("FW", help = "The Proxmox firewall is enabled on this NIC.")
+                            hardware.pending.firstOrNull { it.key == n.key }?.let { Text(pendingCaption(it), fontFamily = Tech.Mono, fontSize = 10.sp, color = Tech.Amber, maxLines = 1) }
                         }
                     }
-                    hardware.pending?.let { Text("Pending changes: $it",color = Tech.Amber) }
+                    val shown = hardware.fields.keys + hardware.disks.map { it.key } + hardware.nics.map { it.key } + hardware.usb.map { it.key } + hardware.pci.map { it.key }
+                    hardware.pending.filter { it.key !in shown }.forEach { change ->
+                        Text("${change.key}  ·  ${pendingCaption(change)}", color = Tech.Amber, fontFamily = Tech.Mono, fontSize = 11.sp)
+                    }
                 }
             }
             "Snapshots" -> {
-                report?.snapshots?.error?.let { Text(it,color = Tech.Amber) }
-                TechAction(if(creating) "Close form" else "Create snapshot", active=true) { creating=!creating }
-                if(creating) {
+                blockedReason?.let { Text(it, color = Tech.Amber, fontFamily = Tech.Mono, fontSize = 12.sp) }
+                val snaps = report?.snapshots
+                snaps?.error?.let { Text(it, color = Tech.Amber) }
+                TechAction(if (creating) "Close form" else "Create snapshot", active = true, enabled = ready || creating) { creating = !creating }
+                if (creating) {
                 // Camera brackets snap in around the form when a snapshot starts for this guest.
                 Column(Modifier.shutterBrackets(guest.resource), verticalArrangement = Arrangement.spacedBy(Tech.Space12)) {
                 TechField(name, { name = it }, "Snapshot name", Modifier.widthIn(max = 420.dp), placeholder = "before-upgrade",
-                    error = if (name.isNotEmpty() && !snapshotNameValid(name)) "Start with a letter; letters, digits, - and _ only, 2 to 40 characters, not “current” or “vzdump”." else null)
+                    error = if (name.isNotEmpty() && !snapshotNameValid(name)) "Start with a letter; letters, digits, - and _ only, 2 to 40 characters, not “current”, “vzdump”, or “pending”." else null)
                 TechField(description, { description = it }, "Description (optional)", Modifier.widthIn(max = 420.dp), singleLine = false)
-                if(guest.kind == "VM" && guest.status == "running") TechCheck(ram, { ram = it }, "Include RAM")
-                TechAction("Create snapshot",enabled=ready && snapshotNameValid(name)) { onAction(PowerAction.SnapshotCreate,SnapshotRequest(name,description,ram && guest.kind == "VM" && guest.status == "running")) }
+                if (guest.kind == "VM" && guest.status == "running") TechCheck(ram, { ram = it }, "Include RAM")
+                TechAction("Create snapshot", enabled = ready && snapshotNameValid(name)) { onAction(PowerAction.SnapshotCreate, SnapshotRequest(name, description, ram && guest.kind == "VM" && guest.status == "running")) }
                 }
                 }
-                val rows = report?.snapshots?.value.orEmpty()
-                if(rows.isEmpty()) Text("No snapshots reported")
+                val rows = orderedSnapshots(snaps?.value.orEmpty())
+                when {
+                    snaps == null || (snaps.value == null && snaps.error == null) -> Text("Loading snapshots…", color = Tech.Muted, fontFamily = Tech.Mono, fontSize = 12.sp)
+                    rows.isEmpty() && snaps.error == null -> Text("No snapshots.", color = Tech.Muted, fontFamily = Tech.Mono, fontSize = 12.sp)
+                }
                 rows.forEach { snapshot ->
-                    val depth = snapshotDepth(snapshot,rows)
-                    HelpTip(listOfNotNull(snapshot.description, snapshot.time?.let { dateAndAge(it) }, if (snapshot.current) "The guest is on this snapshot now." else null, if (snapshot.ram) "This snapshot includes the guest's memory." else null).joinToString(" / ")) {
-                        Row(Modifier.fillMaxWidth().height(32.dp).drawBehind { drawLine(Tech.Edge,Offset(0f,size.height),Offset(size.width,size.height),1.dp.toPx()) }.padding(start=(depth*12).dp),verticalAlignment=androidx.compose.ui.Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-                            Text(snapshot.name,Modifier.weight(1f),fontSize=12.sp,maxLines=1)
-                            if(snapshot.current) HealthyTag("Now")
-                            if(snapshot.ram) AttentionTag("RAM")
-                            Text(snapshot.time?.let { dateAndAge(it) } ?: "Current state",Modifier.width(250.dp),fontFamily=Tech.Mono,fontSize=10.sp,color=Tech.Muted,maxLines=1,overflow=androidx.compose.ui.text.style.TextOverflow.Ellipsis)
-                            if(!snapshot.current) {
-                                MiniAction("Rollback",enabled=ready) { onAction(PowerAction.SnapshotRollback,SnapshotRequest(snapshot.name)) }
-                                MiniAction("Delete",enabled=ready) { onAction(PowerAction.SnapshotDelete,SnapshotRequest(snapshot.name)) }
+                    val depth = snapshotDepth(snapshot, rows)
+                    val incomplete = !snapshot.snapstate.isNullOrBlank()
+                    HelpTip(listOfNotNull(snapshot.description, snapshot.time?.let { dateAndAge(it) }, if (snapshot.current) "The guest is on this snapshot now." else null, if (snapshot.ram) "This snapshot includes the guest's memory." else null, snapshot.snapstate?.let { "Incomplete: $it" }).joinToString(" / ")) {
+                        Row(Modifier.fillMaxWidth().height(32.dp).drawBehind { drawLine(Tech.Edge, Offset(0f, size.height), Offset(size.width, size.height), 1.dp.toPx()) }.padding(start = (depth * 12).dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(snapshot.name, Modifier.weight(1f), fontSize = 12.sp, maxLines = 1)
+                            if (snapshot.current) HealthyTag("Now")
+                            if (snapshot.ram) AttentionTag("RAM")
+                            if (incomplete) Text("Incomplete: ${snapshot.snapstate}", Modifier.width(250.dp), fontFamily = Tech.Mono, fontSize = 10.sp, color = Tech.Amber, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                            else Text(snapshot.time?.let { dateAndAge(it) } ?: "Current state", Modifier.width(250.dp), fontFamily = Tech.Mono, fontSize = 10.sp, color = Tech.Muted, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                            if (!snapshot.current) {
+                                MiniAction("Rollback", enabled = ready && snapshotRollbackAllowed(snapshot)) { onAction(PowerAction.SnapshotRollback, SnapshotRequest(snapshot.name)) }
+                                MiniAction("Delete", enabled = ready) { onAction(PowerAction.SnapshotDelete, SnapshotRequest(snapshot.name)) }
                             }
                         }
                     }
-
                 }
             }
             "Backups" -> {
-                report?.backups?.error?.let { Text(it,color = Tech.Amber) }
-                if(report?.backups?.value?.isEmpty() == true) Text("No backups for this guest.", color = Tech.Muted, fontFamily = Tech.Mono, fontSize = 12.sp)
-                report?.backups?.value.orEmpty().forEach { backup -> TechPanel(Modifier.fillMaxWidth(),padding=0.dp) {
-                    Row(Modifier.fillMaxWidth().height(32.dp),verticalAlignment=androidx.compose.ui.Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(Tech.Space12)) {
-                        Text(dateAndAge(backup.time),modifier=Modifier.weight(2f),fontFamily=Tech.Mono,fontSize=10.sp,color=Tech.Muted)
-                        Text(iec(backup.size?.toDouble()),modifier=Modifier.weight(1f),fontSize=Tech.Label)
-                        Text(backup.storage,modifier=Modifier.weight(1f),fontSize=Tech.Label)
-                        Box(Modifier.weight(1f), contentAlignment = androidx.compose.ui.Alignment.CenterStart) {
-                            if (backup.protected) AttentionTag("Protected", help = "This backup is locked. Proxmox will not remove it until the protection is cleared.")
-                            else Text("\u2014", fontSize = 10.sp, color = Tech.Muted)
-                        }
+                val backups = report?.backups
+                when {
+                    backups == null || (backups.value == null && backups.error == null) -> Text("Loading backups…", color = Tech.Muted, fontFamily = Tech.Mono, fontSize = 12.sp)
+                    backups.error == BACKUPS_NOT_SCANNED || backups.error == BACKUPS_NONE_ACTIVE -> Text(backups.error.orEmpty(), color = Tech.Muted, fontFamily = Tech.Mono, fontSize = 12.sp)
+                    else -> {
+                        backups.error?.let { Text(it, color = Tech.Amber, fontFamily = Tech.Mono, fontSize = 12.sp) }
+                        val rows = backups.value.orEmpty()
+                        if (rows.isEmpty() && backups.error == null) Text("No backups for this guest.", color = Tech.Muted, fontFamily = Tech.Mono, fontSize = 12.sp)
+                        rows.forEach { backup ->
+                            val (verify, warn) = backupVerificationText(backup)
+                            TechPanel(Modifier.fillMaxWidth(), padding = 0.dp) {
+                            Row(Modifier.fillMaxWidth().height(32.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Tech.Space12)) {
+                                Text(dateAndAge(backup.time), modifier = Modifier.weight(2f), fontFamily = Tech.Mono, fontSize = 10.sp, color = Tech.Muted)
+                                Text(iec(backup.size?.toDouble()), modifier = Modifier.weight(1f), fontSize = Tech.Label)
+                                Text(backup.storage, modifier = Modifier.weight(1f), fontSize = Tech.Label)
+                                Text(verify, modifier = Modifier.weight(1.4f), fontFamily = Tech.Mono, fontSize = 10.sp, color = if (warn) Tech.Amber else Tech.Muted, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                                Box(Modifier.weight(1f), contentAlignment = androidx.compose.ui.Alignment.CenterStart) {
+                                    if (backup.protected) AttentionTag("Protected", help = "This backup is locked. Proxmox will not remove it until the protection is cleared.")
+                                    else Text("\u2014", fontSize = 10.sp, color = Tech.Muted)
+                                }
+                            }
+                            backup.notes?.let { Text(it, fontSize = Tech.Label, color = Tech.Muted) }
+                        } }
                     }
-                    backup.notes?.let { Text(it,fontSize=Tech.Label,color=Tech.Muted) }
-                } }
-
+                }
             }
             "Bluetooth" -> GuestBluetoothTab(state, workspace, guest, report?.hardware?.value)
             "Console" -> if (guest.kind == "VM") VncConsoleView(state, workspace, guest, Modifier.fillMaxWidth().weight(1f)) else TerminalView(state, workspace, TerminalTarget.guest(guest), Modifier.fillMaxWidth().weight(1f))
             "Actions" -> {
+                blockedReason?.let { Text(it, color = Tech.Amber, fontFamily = Tech.Mono, fontSize = 12.sp) }
                 SectionLabel("POWER")
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     listOf(PowerAction.Start,PowerAction.Shutdown,PowerAction.Reboot,PowerAction.HardStop,PowerAction.Reset,PowerAction.Suspend,PowerAction.Resume).forEach { action ->
                         val enabled = ready && actionMatches(guest,action)
                         val tint = when(action) { PowerAction.HardStop -> Tech.Red; PowerAction.Reset -> Tech.Amber; else -> Tech.Edge }
-                        val hint = when(action) { PowerAction.Start -> "Power on"; PowerAction.Shutdown -> "Guest shutdown"; PowerAction.Reboot -> "Guest restart"; PowerAction.HardStop -> "Immediate power off"; PowerAction.Reset -> "Immediate reset"; PowerAction.Suspend -> "Pause execution"; else -> "Continue execution" }
+                        val hint = when {
+                            lockName != null -> "Locked: $lockName"
+                            unresolved -> "Check Activity first."
+                            else -> when (action) { PowerAction.Start -> "Power on"; PowerAction.Shutdown -> "Guest shutdown"; PowerAction.Reboot -> "Guest restart"; PowerAction.HardStop -> "Immediate power off"; PowerAction.Reset -> "Immediate reset"; PowerAction.Suspend -> "Pause execution"; else -> "Continue execution" }
+                        }
                         ActionTile(powerActionTitle(action), hint, tint, enabled, { ActionGlyph(action, enabled) }) { onAction(action,null) }
                     }
                 }
@@ -275,6 +316,15 @@ import local.ringleader.core.*
         }
     }
 }
+
+internal fun hardwareFieldLabel(key: String) = when (key) {
+    "ostype" -> "Operating system"
+    "onboot" -> "Start at boot"
+    "balloon" -> "Minimum memory"
+    else -> key
+}.uppercase()
+
+internal fun hardwareValueText(key: String, value: String) = if (key == "ostype") osTypeName(value) else formatHardwareValue(key, value)
 
 /** Proxmox VE `ostype` codes as names. Unknown codes stay raw. */
 internal fun osTypeName(code: String): String = when (code) {

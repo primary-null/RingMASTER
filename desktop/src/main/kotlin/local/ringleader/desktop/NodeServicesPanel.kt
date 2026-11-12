@@ -14,6 +14,10 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
@@ -42,12 +46,15 @@ import local.ringleader.core.serviceHealth
 ) {
     val section = state.nodeServices
     val view = section.value?.takeIf { it.node == node }
+    var showMissing by remember(node) { mutableStateOf(false) }
     LaunchedEffect(node, state.connectionEpoch) {
         if (state.nodeServices.value?.node != node) workspace.loadNodeServices(node)
     }
+    val rows = view?.let { visibleServices(it.services, showMissing) }.orEmpty()
+    val hidden = view?.services?.count { serviceHealth(it) == ServiceHealth.NotInstalled } ?: 0
     Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            SectionLabel("Services", suffix = view?.let { "${it.services.size}" })
+            SectionLabel("Services", suffix = view?.let { "${rows.size}" })
             Spacer(Modifier.weight(1f))
             MiniAction("Refresh", enabled = !section.loading) { workspace.loadNodeServices(node) }
         }
@@ -58,24 +65,36 @@ import local.ringleader.core.serviceHealth
         when {
             view == null -> if (!section.loading && section.error == null) Text("—", color = Tech.Muted, fontFamily = Tech.Mono, fontSize = 11.sp)
             view.services.isEmpty() -> Text("The node listed no services.", color = Tech.Muted, fontFamily = Tech.Mono, fontSize = 11.sp)
-            else -> view.services.forEach { ServiceRow(it, onShowLog) }
+            rows.isEmpty() -> Text("Installed services are not listed. Not-installed units are hidden.", color = Tech.Muted, fontFamily = Tech.Mono, fontSize = 11.sp)
+            else -> rows.forEach { ServiceRow(it, onShowLog) }
         }
+        if (hidden > 0) MiniAction(if (showMissing) "Hide not installed" else "Show not installed ($hidden)") { showMissing = !showMissing }
     }
 }
 
-/** "1 failed · 1 enabled but not running", and whether anything failed. Null when every service is fine. */
+/** Not-installed units stay hidden until the reader asks for them. */
+internal fun visibleServices(services: List<NodeService>, showNotInstalled: Boolean): List<NodeService> =
+    if (showNotInstalled) services else services.filter { serviceHealth(it) != ServiceHealth.NotInstalled }
+
+/** "1 failed · 1 restarting · 1 enabled but not running", and whether a failed or restarting service needs attention. */
 internal fun serviceProblems(services: List<NodeService>): Pair<String, Boolean>? {
     val health = services.map { serviceHealth(it) }
     val failed = health.count { it == ServiceHealth.Failed }
+    val restarting = health.count { it == ServiceHealth.Restarting }
     val idle = health.count { it == ServiceHealth.EnabledNotRunning }
-    val text = listOfNotNull(failed.takeIf { it > 0 }?.let { "$it failed" }, idle.takeIf { it > 0 }?.let { "$it enabled but not running" }).joinToString(" · ")
-    return if (text.isEmpty()) null else text to (failed > 0)
+    val text = listOfNotNull(
+        failed.takeIf { it > 0 }?.let { "$it failed" },
+        restarting.takeIf { it > 0 }?.let { "$it restarting" },
+        idle.takeIf { it > 0 }?.let { "$it enabled but not running" },
+    ).joinToString(" · ")
+    return if (text.isEmpty()) null else text to (failed > 0 || restarting > 0)
 }
 
 internal fun serviceHealthLabel(health: ServiceHealth): String = when (health) {
     ServiceHealth.Running -> "Running"
     ServiceHealth.Exited -> "Exited"
     ServiceHealth.Failed -> "Failed"
+    ServiceHealth.Restarting -> "Restarting"
     ServiceHealth.EnabledNotRunning -> "Not running"
     ServiceHealth.Stopped -> "Stopped"
     ServiceHealth.NotInstalled -> "Not installed"
@@ -85,7 +104,7 @@ internal fun serviceHealthLabel(health: ServiceHealth): String = when (health) {
 
 internal fun serviceHealthTone(health: ServiceHealth): Color = when (health) {
     ServiceHealth.Running -> Tech.Green
-    ServiceHealth.Failed -> Tech.Red
+    ServiceHealth.Failed, ServiceHealth.Restarting -> Tech.Red
     ServiceHealth.EnabledNotRunning, ServiceHealth.Transitioning -> Tech.Amber
     ServiceHealth.Exited, ServiceHealth.Stopped, ServiceHealth.NotInstalled, ServiceHealth.Unknown -> Tech.Muted
 }

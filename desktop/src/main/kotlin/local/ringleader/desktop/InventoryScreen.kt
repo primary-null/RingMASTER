@@ -52,6 +52,19 @@ private fun bytes(value: Long?): String {
 }
 private fun uptime(value: Long?): String = if (value == null || value < 0L) "\u2014" else duration(value)
 
+/** A PDM guest has no page of its own; double-click and pins only select it. */
+internal fun guestHasPage(state: WorkspaceState, guest: Guest): Boolean = state.kind != PDM_KIND && guest.scope.isEmpty()
+
+/** Commit button for an action that ends a guest at once or discards data: red, and never the suggested button. */
+@Composable private fun DangerAction(label: String, modifier: Modifier = Modifier, enabled: Boolean = true, onClick: () -> Unit) {
+    OutlinedButton(onClick = onClick, enabled = enabled, modifier = modifier.heightIn(min = 32.dp), shape = Tech.Control,
+        border = BorderStroke(1.dp, if (enabled) Tech.Red else Tech.Edge),
+        colors = ButtonDefaults.outlinedButtonColors(containerColor = androidx.compose.ui.graphics.Color.Transparent, contentColor = Tech.Red),
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp)) {
+        Text(label.uppercase(), fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 12.sp, letterSpacing = 0.6.sp)
+    }
+}
+
 /** The fleet screen. Motion: the task triggers and busy-guest map are provided here, once, for the list, the inspector and the detail page. */
 @Composable fun InventoryScreen(
     state: WorkspaceState, workspace: Workspace, sessionTitle: String?, search: String, onSearch: (String) -> Unit,
@@ -96,6 +109,13 @@ private fun uptime(value: Long?): String = if (value == null || value < 0L) "\u2
         val req = fleetRequest
         if (req != null && req.nonce != appliedNonce) {
             val guest = state.overview?.guests?.firstOrNull { it.resource == req.resource } ?: return@LaunchedEffect
+            // A PDM guest has no page of its own (the same rule as openGuest): a pin only selects it.
+            if (!guestHasPage(state, guest)) {
+                appliedNonce = req.nonce
+                if (state.selected?.resource != guest.resource) workspace.select(guest)
+                onFleetHandled()
+                return@LaunchedEffect
+            }
             // Record the target before select(). select() changes the effect key and can restart this
             // effect before the lines after it run.
             detailTab = req.tab
@@ -115,7 +135,7 @@ private fun uptime(value: Long?): String = if (value == null || value < 0L) "\u2
     // does), anything else on its summary. A PDM guest has no page of its own, so it is only selected.
     val openGuest: (Guest) -> Unit = { guest ->
         if (state.selected?.resource != guest.resource) workspace.select(guest)
-        if (state.kind != PDM_KIND && guest.scope.isEmpty()) {
+        if (guestHasPage(state, guest)) {
             detailTab = guestOpenTab(guest, state.demo)
             tabNonce = System.nanoTime()
             detailResource = guest.resource
@@ -124,18 +144,25 @@ private fun uptime(value: Long?): String = if (value == null || value < 0L) "\u2
         }
     }
     pendingPower?.let { confirmation ->
+        val destructive = powerActionDestructive(confirmation.action)
+        val listed = state.overview?.guests?.firstOrNull { it.resource == confirmation.resource }
+        val commit = powerCommitLabel(confirmation.action).let { if (state.demo) "Simulate ${it.lowercase()}" else it }
+        val send: () -> Unit = {
+            val from = sendButton[0]?.takeIf { it.isAttached }?.boundsInWindow()
+            pendingPower = null
+            // Nothing was sent when the workspace refuses (stale inventory, busy): then no spark leaves.
+            if (workspace.submitPower(confirmation)) {
+                val hot = confirmation.action == PowerAction.HardStop || confirmation.action == PowerAction.Reset
+                sparks.ignite(motion, from, listOf(RowAnchor(confirmation.resource), TagAnchor(confirmation.resource), NamedAnchor("rail", "Activity")), hot) { motionBook?.land(confirmation.resource) }
+            }
+        }
         TechDialog("Confirm ${powerActionTitle(confirmation.action)}", { pendingPower = null }, width = 560.dp,
             subtitle = "Closing this confirmation does not change the guest.", actions = {
-                TechAction(if (state.demo) "Simulate" else "Send", Modifier.pressDip().onGloballyPositioned { sendButton[0] = it }, active = true, enabled = !state.powerBusy) {
-                    val from = sendButton[0]?.takeIf { it.isAttached }?.boundsInWindow()
-                    pendingPower = null
-                    // Nothing was sent when the workspace refuses (stale inventory, busy): then no spark leaves.
-                    if (workspace.submitPower(confirmation)) {
-                        val hot = confirmation.action == PowerAction.HardStop || confirmation.action == PowerAction.Reset
-                        sparks.ignite(motion, from, listOf(RowAnchor(confirmation.resource), TagAnchor(confirmation.resource), NamedAnchor("rail", "Activity")), hot) { motionBook?.land(confirmation.resource) }
-                    }
-                }
-                TechAction("Cancel") { pendingPower = null }
+                // Cancel comes first. A destructive commit is red and never the suggested (amber) button.
+                TechAction("Cancel", active = destructive) { pendingPower = null }
+                val anchor = Modifier.pressDip().onGloballyPositioned { sendButton[0] = it }
+                if (destructive) DangerAction(commit, anchor, enabled = !state.powerBusy, onClick = send)
+                else TechAction(commit, anchor, active = true, enabled = !state.powerBusy, onClick = send)
             }) {
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 InspectorLine("Origin", confirmation.origin)
@@ -145,10 +172,25 @@ private fun uptime(value: Long?): String = if (value == null || value < 0L) "\u2
                 InspectorLine("Type", confirmation.kind)
                 InspectorLine("Name", confirmation.name.ifBlank { "Guest ${confirmation.resource.vmid}" })
                 InspectorLine("Action", powerActionTitle(confirmation.action))
-                confirmation.snapshot?.let { InspectorLine("Snapshot", it.name) }
+                confirmation.snapshot?.let { request ->
+                    InspectorLine("Snapshot", request.name)
+                    if (confirmation.action == PowerAction.SnapshotCreate) {
+                        if (confirmation.kind == "VM") InspectorLine("RAM", if (request.includeRam) "Included" else "Not included")
+                        InspectorLine("Description", request.description.ifBlank { "None" })
+                    }
+                }
+                listed?.haState?.let { InspectorLine("HA state", it) }
             }
-            if (confirmation.action == PowerAction.HardStop || confirmation.action == PowerAction.Reset) Text(HARD_STOP_CONSEQUENCE, color = Tech.Red, fontSize = 13.sp, lineHeight = 20.sp)
-            if (confirmation.action == PowerAction.Shutdown) Text(SHUTDOWN_GUARANTEE, color = Tech.Amber, fontSize = 13.sp, lineHeight = 20.sp)
+            when (confirmation.action) {
+                PowerAction.HardStop -> Text(HARD_STOP_CONSEQUENCE, color = Tech.Red, fontSize = 13.sp, lineHeight = 20.sp)
+                PowerAction.Reset -> Text(RESET_CONSEQUENCE, color = Tech.Red, fontSize = 13.sp, lineHeight = 20.sp)
+                PowerAction.Shutdown -> Text(SHUTDOWN_GUARANTEE, color = Tech.Amber, fontSize = 13.sp, lineHeight = 20.sp)
+                PowerAction.SnapshotRollback -> Text(rollbackConsequence(confirmation.snapshot?.name.orEmpty(), confirmationSnapshot(confirmation, state)?.ram),
+                    color = Tech.Red, fontSize = 13.sp, lineHeight = 20.sp)
+                PowerAction.SnapshotDelete -> Text(SNAPSHOT_DELETE_CONSEQUENCE, color = Tech.Amber, fontSize = 13.sp, lineHeight = 20.sp)
+                else -> {}
+            }
+            if (powerActionUsesHa(listed, confirmation.action)) Text(HA_ROUTING_NOTE, color = Tech.Amber, fontSize = 13.sp, lineHeight = 20.sp)
             if (state.demo) Text(SIMULATED_POWER_DETAIL, color = Tech.Amber, fontSize = 13.sp)
         }
     }
@@ -163,6 +205,7 @@ private fun uptime(value: Long?): String = if (value == null || value < 0L) "\u2
         TelemetryStrip(state, workspace, onDisconnect)
         if (state.loading) TechProgress()
         state.error?.let { Text(it, color = Tech.Red, fontSize = 13.sp) }
+        if (state.connected && state.lostPowerResults.isNotEmpty()) LostPowerResults(state, workspace)
         val overview = state.overview
         if (overview == null) {
             if (!state.loading) TechPanel(Modifier.fillMaxWidth(), rail = Tech.Amber) {
@@ -217,19 +260,15 @@ private fun uptime(value: Long?): String = if (value == null || value < 0L) "\u2
         }
     }
     val total = overview.guests.size
-    val grouped = guests.groupBy { it.node }.entries.sortedBy { it.key }
+    val steadyOrder = remember { SteadyGuestOrder() }
+    val grouped = guests.groupBy { it.node }.entries.sortedBy { it.key }.map { (node, members) -> node to steadyOrder.order("node:$node", sort, descending, members, history) }
     BoxWithConstraints(modifier) { CompositionLocalProvider(LocalCols provides colsFor(maxWidth)) {
     val TableCols = LocalCols.current
     Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(Tech.Space12)) {
 
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.weight(1f)) { CompactSearchField(search, onSearch) }
-            SegmentedFilter(listOf(
-                "All" to overview.guests.size,
-                "Running" to overview.guests.count { guestVisible(it, "Running", "") },
-                "Stopped" to overview.guests.count { guestVisible(it, "Stopped", "") },
-                "Templates" to overview.guests.count { guestVisible(it, "Templates", "") },
-            ), filter, onFilter)
+            SegmentedFilter(fleetSegments(overview.guests, search, filter), filter, onFilter)
         }
         val onSort: (String) -> Unit = { key -> if (sort == key) descending = !descending else { sort = key; descending = key in listOf("CPU", "Memory", "Net", "Uptime") } }
         Row(Modifier.fillMaxWidth().height(26.dp).padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(TableCols.gap)) {
@@ -239,19 +278,26 @@ private fun uptime(value: Long?): String = if (value == null || value < 0L) "\u2
             SortHeader("CPU", "CPU", sort, descending, Modifier.width(TableCols.cpu), onSort = onSort)
             SortHeader("MEMORY", "Memory", sort, descending, Modifier.width(TableCols.mem), onSort = onSort)
             if (TableCols.net > 0.dp) SortHeader("NET", "Net", sort, descending, Modifier.width(TableCols.net), onSort = onSort)
+            if (TableCols.disk > 0.dp) Text("DISK", Modifier.width(TableCols.disk), fontSize = 10.sp, letterSpacing = 1.sp, color = Tech.Muted, fontFamily = Tech.Mono, maxLines = 1)
             SortHeader("UPTIME", "Uptime", sort, descending, Modifier.width(TableCols.up), onSort = onSort)
             Text("STATUS", Modifier.width(TableCols.status), fontSize = 10.sp, letterSpacing = 1.sp, color = Tech.Muted, fontFamily = Tech.Mono)
         }
         val narrowed = search.isNotBlank() || filter != "All"
+        val remoteGroups = overview.remotes.filter { it.product != "pbs" }.associate { remote ->
+            remote.scope to guests.filter { it.scope == remote.scope }.groupBy { it.node }.entries.sortedBy { it.key }
+                .map { (node, members) -> node to steadyOrder.order("remote:${remote.scope}:$node", sort, descending, members, history) }
+        }
         if (guests.isEmpty() && (overview.remotes.isEmpty() || narrowed)) Text(if (total == 0) "No guests are visible to this token." else "No guests match these filters.", color = Tech.Muted)
         LazyColumn(Modifier.weight(1f).fillMaxWidth().border(1.dp, Tech.Edge.copy(alpha = .7f), Tech.Plate)) {
             if (overview.remotes.isEmpty()) {
-                grouped.forEach { (node, members) ->
-                    val ordered = members.sortedWith(if (descending) guestComparator(sort, history).reversed() else guestComparator(sort, history))
+                // The reveal stagger counts rows from the top of the list, across node groups.
+                var offset = 0
+                grouped.forEach { (node, ordered) ->
+                    val base = offset; offset += ordered.size
                     item(key = "node:${ordered.first().remote}:$node") {
                         NodeHeaderRow(node, ordered.size, overview.members.firstOrNull { it.name == node }, history.nodes[node], selectedNode == node) { onSelectMember(node) }
                     }
-                    itemsIndexed(ordered, key = { _, it -> it.resource }) { index, guest -> GuestRow(guest, selected, false, onSelect,history.guests[guest.resource], guests.indexOf(guest), rowPlacement()) }
+                    itemsIndexed(ordered, key = { _, it -> it.resource }) { index, guest -> GuestRow(guest, selected, false, onSelect,history.guests[guest.resource], base + index, rowPlacement()) }
                 }
             } else {
                 overview.remotes.forEach { remote ->
@@ -269,8 +315,7 @@ private fun uptime(value: Long?): String = if (value == null || value < 0L) "\u2
                         }
                     }
                     if (remote.product != "pbs") {
-                        members.groupBy { it.node }.entries.sortedBy { it.key }.forEach { (node, nodeMembers) ->
-                            val ordered = nodeMembers.sortedWith(if (descending) guestComparator(sort, history).reversed() else guestComparator(sort, history))
+                        (remoteGroups[remote.scope] ?: emptyList()).forEach { (node, ordered) ->
                             item(key = "node:${remote.scope}:$node") {
                                 SectionLabel("Node", suffix = "${node.ifBlank { "Unknown" }} · ${ordered.size}")
                             }
@@ -300,6 +345,28 @@ private fun recordedUsage(cpu: Double?, memory: Long?, maxMemory: Long?): String
     return listOfNotNull(cpuText, memoryText).joinToString(" · ").ifBlank { null }
 }
 
+/** The fleet filter segments with their counts. Counts honour the search, like the list. Other appears while a guest is in it (or it is selected). */
+internal fun fleetSegments(guests: List<Guest>, search: String, filter: String): List<Pair<String, Int>> {
+    fun count(name: String) = guests.count { guestVisible(it, name, search) }
+    val segments = listOf("All", "Running", "Stopped", "Templates").map { it to count(it) }
+    return if (filter == "Other" || guests.any(::guestOtherStatus)) segments + ("Other" to count("Other")) else segments
+}
+
+/** Used and total disk bytes when both are known and positive, else null. Proxmox leaves a VM's used disk at 0 without the guest agent. */
+internal fun guestDiskUsage(used: Long?, limit: Long?): Pair<Long, Long>? =
+    if (used != null && limit != null && used > 0L && limit > 0L) used to limit else null
+
+/** A node CPU fact line, through [cpuShare] so it agrees with the gauge above it. */
+internal fun cpuFact(fraction: Double?): String =
+    cpuShare(fraction)?.let { String.format(Locale.ROOT, "%.1f%%", it * 100) } ?: "Unavailable"
+
+/** Keyboard focus on a table row: a thin amber outline, drawn inside the row. The selected row keeps its solid edge. */
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.focusRing() {
+    val w = 1.dp.toPx()
+    drawRect(Tech.Amber.copy(alpha = .85f), topLeft = androidx.compose.ui.geometry.Offset(w / 2, w / 2),
+        size = androidx.compose.ui.geometry.Size(size.width - w, size.height - w), style = androidx.compose.ui.graphics.drawscope.Stroke(w))
+}
+
 internal enum class RowClick { Select, Open }
 
 /** The system's double-click time in milliseconds (Windows: Mouse settings), 500 when the desktop does not say. */
@@ -323,10 +390,10 @@ internal class RowClicks(private val window: Long = doubleClickMillis()) {
 internal fun guestOpenTab(guest: Guest, demo: Boolean = false) = if (guest.status == "running" && !guest.template && !demo) "Console" else "Summary"
 
 /** Shared column widths so header and rows line up. Wider lists get wider CPU and memory cells and a network column. */
-private data class Cols(val tile: Dp = 22.dp, val id: Dp = 40.dp, val cpu: Dp = 138.dp, val mem: Dp = 132.dp, val net: Dp = 0.dp, val up: Dp = 66.dp, val status: Dp = 84.dp, val gap: Dp = 12.dp)
+private data class Cols(val tile: Dp = 22.dp, val id: Dp = 40.dp, val cpu: Dp = 138.dp, val mem: Dp = 132.dp, val net: Dp = 0.dp, val disk: Dp = 0.dp, val up: Dp = 66.dp, val status: Dp = 84.dp, val gap: Dp = 12.dp)
 private val LocalCols = staticCompositionLocalOf { Cols() }
 private fun colsFor(width: Dp) = when {
-    width >= 1250.dp -> Cols(cpu = 210.dp, mem = 170.dp, net = 100.dp)
+    width >= 1250.dp -> Cols(cpu = 210.dp, mem = 170.dp, net = 100.dp, disk = 96.dp)
     width >= 1000.dp -> Cols(net = 100.dp)
     else -> Cols()
 }
@@ -342,11 +409,12 @@ internal fun shortUptime(seconds: Long?): String = when {
     val TableCols = LocalCols.current
     val interaction = remember { MutableInteractionSource() }
     val hovered by interaction.collectIsHoveredAsState()
+    val focused by interaction.collectIsFocusedAsState()
     val bg by animateColorAsState(if (selected) Tech.Raised else if (hovered) Tech.Raised.copy(alpha = .7f) else Tech.Black.copy(alpha = .55f), LocalMotion.current.fade(MotionDur.Quick))
     val online = member?.status == "online"
-    val cpu = latestCpu(series, member?.cpuFraction)
+    val cpu = cpuShare(latestCpu(series, member?.cpuFraction))
     Row(Modifier.fillMaxWidth().height(30.dp).background(bg).hoverable(interaction).clickable(interactionSource = interaction, indication = null, onClick = onClick)
-        .drawBehind { if (selected) drawRect(Tech.Amber, size = androidx.compose.ui.geometry.Size(2.dp.toPx(), size.height)) }.padding(horizontal = 10.dp),
+        .drawBehind { if (selected) drawRect(Tech.Amber, size = androidx.compose.ui.geometry.Size(2.dp.toPx(), size.height)); if (focused) focusRing() }.padding(horizontal = 10.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(TableCols.gap)) {
         Box(Modifier.width(TableCols.tile), contentAlignment = Alignment.Center) { Box(Modifier.size(7.dp).background(if (online) Tech.Green else if (member == null) Tech.Muted else Tech.Red)) }
         Text(node.uppercase().ifBlank { "UNKNOWN" }, fontFamily = Tech.Mono, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp, modifier = Modifier.width(TableCols.id + 80.dp).identity(), maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -368,6 +436,7 @@ internal fun shortUptime(seconds: Long?): String = when {
             else -> "—"
         }, fontSize = 10.sp, fontFamily = Tech.Mono, color = Tech.Muted, modifier = Modifier.width(TableCols.mem), maxLines = 1)
         if (TableCols.net > 0.dp) Spacer(Modifier.width(TableCols.net))
+        if (TableCols.disk > 0.dp) Spacer(Modifier.width(TableCols.disk))
         Spacer(Modifier.width(TableCols.up))
         Text(if (online) "ONLINE" else member?.status?.uppercase() ?: "", fontSize = 10.sp, fontFamily = Tech.Mono, color = if (online) Tech.Green else Tech.Muted, modifier = Modifier.width(TableCols.status))
     }
@@ -381,8 +450,9 @@ internal data class GuestChipPlan(val marks: List<GuestMark>, val userTags: List
 
 /**
  * Status chips that share a row with user tags. Order is the priority: a template, then a failed HA state,
- * then a lock, then any other HA state. A green "HA" is only the started state on a running guest.
- * [guestChipPlan] keeps at most [budget] chips and lets these marks take a slot ahead of a user tag.
+ * then a lock, then any other HA state. HA chips read "HA · <state>". Green is only the started state on a running
+ * guest; red is error or fence; amber is recovery; every other HA state (stopped, disabled, ignored, a migration) is
+ * neutral. [guestChipPlan] keeps at most [budget] chips and lets these marks take a slot ahead of a user tag.
  */
 internal fun guestPriorityMarks(guest: Guest): List<GuestMark> {
     val ha = guestHaMark(guest)
@@ -393,6 +463,7 @@ internal fun guestPriorityMarks(guest: Guest): List<GuestMark> {
         lock,
         ha?.takeIf { it.tone == GuestMarkTone.Attention },
         ha?.takeIf { it.tone == GuestMarkTone.Healthy },
+        ha?.takeIf { it.tone == GuestMarkTone.Neutral },
     )
 }
 
@@ -405,12 +476,15 @@ internal fun guestChipPlan(guest: Guest, budget: Int): GuestChipPlan {
 private fun guestHaMark(guest: Guest): GuestMark? {
     val state = guest.haState?.trim()?.takeIf { it.isNotEmpty() } ?: return null
     val word = state.lowercase()
+    val label = "HA · $word"
     return when {
         word == "started" && guest.status == "running" ->
-            GuestMark("HA", GuestMarkTone.Healthy, "High availability is started on this running guest.")
+            GuestMark(label, GuestMarkTone.Healthy, "High availability is started on this running guest.")
         word == "error" || word == "fence" ->
-            GuestMark(state, GuestMarkTone.Problem, "High availability reports $word.")
-        else -> GuestMark(state, GuestMarkTone.Attention, "High availability state: $state.")
+            GuestMark(label, GuestMarkTone.Problem, "High availability reports $word.")
+        word == "recovery" ->
+            GuestMark(label, GuestMarkTone.Attention, "High availability is recovering this guest after a node failure.")
+        else -> GuestMark(label, GuestMarkTone.Neutral, "High availability state: $word.")
     }
 }
 
@@ -449,6 +523,7 @@ private fun guestLockMark(guest: Guest): GuestMark? {
     val reveal by animateFloatAsState(if (entered) 1f else 0f, motion.fade(MotionDur.Short))
     val interactions = remember { MutableInteractionSource() }
     val hovered by interactions.collectIsHoveredAsState()
+    val focused by interactions.collectIsFocusedAsState()
     val isSelected = selected?.resource == guest.resource
     val background by animateColorAsState(if (isSelected) Tech.Raised else if (hovered) Tech.Raised.copy(alpha = .55f) else Tech.Panel, motion.fade(MotionDur.Quick))
     val failedEdge = LocalGuestActivity.current[guest.resource]?.failed == true
@@ -462,7 +537,7 @@ private fun guestLockMark(guest: Guest): GuestMark? {
     Column(modifier.alpha(reveal).offset { IntOffset(0, ((1f-reveal)*motion.travel(6f).dp.toPx()).toInt()) }) {
         Row(Modifier.phosphorRow(guest.resource, failedEdge = failedEdge)
             .fillMaxWidth().height(36.dp).background(background).hoverable(interactions).clickable(interactionSource = interactions, indication = null) { onSelect(guest) }
-            .drawBehind { if (isSelected) drawRect(Tech.Amber, size = androidx.compose.ui.geometry.Size(2.dp.toPx(), size.height)) }.padding(horizontal = 10.dp),
+            .drawBehind { if (isSelected) drawRect(Tech.Amber, size = androidx.compose.ui.geometry.Size(2.dp.toPx(), size.height)); if (focused) focusRing() }.padding(horizontal = 10.dp),
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(TableCols.gap)) {
             Box(Modifier.width(TableCols.tile)) { IdentityTile(if (guest.kind == "VM") "VM" else "CT", guest.template) }
             Text("${guest.id}", fontFamily = Tech.Mono, fontSize = 11.sp, color = if (isSelected) Tech.Amber else Tech.Muted, modifier = Modifier.width(TableCols.id).identity())
@@ -490,6 +565,13 @@ private fun guestLockMark(guest: Guest): GuestMark? {
                     RateLine("IN", rates?.netInRate, Tech.Green, 9.sp)
                     RateLine("OUT", rates?.netOutRate, Tech.Amber, 9.sp)
                 } else Text("—", fontSize = 10.sp, fontFamily = Tech.Mono, color = Tech.Muted)
+            }
+            if (TableCols.disk > 0.dp) Column(Modifier.width(TableCols.disk), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                val disk = if (metering) guestDiskUsage(metrics?.diskBytes, metrics?.diskLimitBytes) else null
+                if (disk != null) {
+                    Text("${gib(disk.first)}/${gib(disk.second)}G", fontSize = 10.sp, fontFamily = Tech.Mono, color = Tech.Ink.copy(alpha = .85f), maxLines = 1)
+                    UsageBar(memoryFraction(disk.first, disk.second), Modifier.fillMaxWidth())
+                } else Text(metrics?.diskLimitBytes?.takeIf { it > 0L }?.let { "${gib(it)} GiB" } ?: "—", fontSize = 10.sp, fontFamily = Tech.Mono, color = Tech.Muted, maxLines = 1)
             }
             Text(if (running) shortUptime(metrics?.uptimeSeconds) else "—", fontSize = 11.sp, fontFamily = Tech.Mono, color = Tech.Muted, modifier = Modifier.width(TableCols.up), maxLines = 1)
             Box(Modifier.width(TableCols.status)) { ActivityStatusTag(guest.status.ifBlank { "unknown" }, running, guest.resource, anchor = if (isSelected) RowAnchor(guest.resource) else null) }
@@ -558,9 +640,9 @@ private fun guestLockMark(guest: Guest): GuestMark? {
                     Sparkline(live, Modifier.fillMaxWidth().height(48.dp).background(Tech.Black.copy(alpha = .35f)))
                 }
                 MiniHeading("MEMORY", percent(memoryFraction(memNow, memMax)))
-                Sparkline(live, Modifier.fillMaxWidth().height(32.dp).background(Tech.Black.copy(alpha = .35f)), floor = .1, pulse = false) { memoryFraction(it.mem, it.memMax) }
+                Sparkline(live, Modifier.fillMaxWidth().height(32.dp).background(Tech.Black.copy(alpha = .35f)), floor = .1, pulse = false, ease = true) { memoryFraction(it.mem, it.memMax) }
                 MiniHeading("NETWORK", "IN green · OUT amber")
-                NetSparkline(live, Modifier.fillMaxWidth().height(32.dp).background(Tech.Black.copy(alpha = .35f)), pulse = false)
+                NetSparkline(live, Modifier.fillMaxWidth().height(32.dp).background(Tech.Black.copy(alpha = .35f)), pulse = false, ease = true)
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     Column(Modifier.weight(1f)) { Text("NET IN", fontSize = 9.sp, color = Tech.Muted, fontFamily = Tech.Mono); Text(formatRate(sample?.netInRate), fontSize = 12.sp, fontFamily = Tech.Mono) }
                     Column(Modifier.weight(1f)) { Text("NET OUT", fontSize = 9.sp, color = Tech.Muted, fontFamily = Tech.Mono); Text(formatRate(sample?.netOutRate), fontSize = 12.sp, fontFamily = Tech.Mono) }
@@ -578,13 +660,15 @@ private fun guestLockMark(guest: Guest): GuestMark? {
             state.detailsError?.let { Text(it, color = Tech.Red, fontSize = 13.sp) }
             val details = state.details
             val diskLimit = details?.diskLimitBytes ?: guest.metrics?.diskLimitBytes
-            val diskUsed = running && (details?.diskBytes ?: 0L) > 0L
-            val facts = listOf((if (diskUsed) "Disk" else "Disk size") to (if (diskUsed) "${bytes(details?.diskBytes)} / ${bytes(diskLimit)}" else diskLimit?.takeIf { it > 0L }?.let(::bytes) ?: "—"),
-                "Node" to guest.node, "Template" to if (guest.template) "Yes" else "No")
+            // Used space comes from the details read, or from the list row when the details do not carry it. No extra request.
+            val disk = if (running) guestDiskUsage(details?.diskBytes?.takeIf { it > 0L } ?: guest.metrics?.diskBytes, diskLimit) else null
+            val facts = listOf(Triple(if (disk != null) "Disk" else "Disk size", if (disk != null) "${bytes(disk.first)} / ${bytes(disk.second)}" else diskLimit?.takeIf { it > 0L }?.let(::bytes) ?: "—", disk?.let { memoryFraction(it.first, it.second) }),
+                Triple("Node", guest.node, null), Triple("Template", if (guest.template) "Yes" else "No", null))
             Row(Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                facts.forEach { (label, value) -> Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                facts.forEach { (label, value, fraction) -> Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     Text(label.uppercase(), fontSize = 9.sp, lineHeight = 11.sp, letterSpacing = 1.sp, color = Tech.Muted, fontFamily = Tech.Mono)
                     Text(value, fontSize = 11.sp, lineHeight = 14.sp, fontFamily = Tech.Mono, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    if (fraction != null) UsageBar(fraction, Modifier.fillMaxWidth())
                 } }
             }
             if (guest.tags.isNotEmpty()) { MiniHeading("TAGS", "${guest.tags.size}"); FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) { guest.tags.forEach { PveTag(it) } } }
@@ -692,7 +776,7 @@ private fun guestLockMark(guest: Guest): GuestMark? {
         val sample = nodeSeries?.samples?.lastOrNull()
         val used = latestMemory(nodeSeries, member.memoryBytes)
         val capacity = sample?.memMax ?: member.maxMemoryBytes
-        val cpuNow = latestCpu(nodeSeries, member.cpuFraction)
+        val cpuNow = cpuShare(latestCpu(nodeSeries, member.cpuFraction))
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
             ArcGauge(cpuNow, "CPU", member.maxCpu?.let { "${it.toInt()} cores" })
             ArcGauge(memoryFraction(used, capacity), "Memory", if ((capacity ?: 0L) > 0L) "${gib(used)} / ${gib(capacity)} GiB" else null)
@@ -700,14 +784,9 @@ private fun guestLockMark(guest: Guest): GuestMark? {
         HistoryGroup(state, workspace, member.name)
         LaunchedEffect(member.name, state.connectionEpoch) { workspace.loadNodeNetwork(member.name) }
         Spacer(Modifier.height(6.dp))
-        NodeNetworkPanel(state.nodeNetwork.value?.takeIf { state.nodeNetworkNode == member.name }, state.nodeNetworkLoading, state.nodeNetwork.error)
+        NodeNetworkPanel(state, workspace, member.name)
         MiniHeading("NODE")
-        val recordedPercent = member.cpuFraction?.let(::cpuUsagePercent)
-        FactLine("CPU", when {
-            member.cpuFraction == null -> "Unavailable"
-            recordedPercent == null -> "Unavailable"
-            else -> String.format(Locale.ROOT, "%.1f%%", recordedPercent)
-        })
+        FactLine("CPU", cpuFact(member.cpuFraction))
         member.maxCpu?.let { FactLine("CPU cores", if (it % 1.0 == 0.0) it.toLong().toString() else String.format(Locale.ROOT, "%.1f", it)) }
         FactLine("Memory", when {
             member.memoryBytes == null && member.maxMemoryBytes == null -> "Unavailable"
@@ -736,13 +815,13 @@ private fun guestLockMark(guest: Guest): GuestMark? {
                 }
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     UsageBar(fraction, Modifier.weight(1f))
-                    Text("${bytes(row.diskBytes)} / ${bytes(row.maxDiskBytes)}", fontFamily = Tech.Mono, fontSize = 10.sp, color = Tech.Ink.copy(alpha = .85f), maxLines = 1)
+                    Text("${storageSize(row.diskBytes)} / ${storageSize(row.maxDiskBytes)}", fontFamily = Tech.Mono, fontSize = 10.sp, color = Tech.Ink.copy(alpha = .85f), maxLines = 1)
                 }
                 row.content?.let { Text(it, fontFamily = Tech.Mono, fontSize = 9.sp, lineHeight = 11.sp, color = Tech.Muted, maxLines = 1, overflow = TextOverflow.Ellipsis) }
                 if (row.shared == true && row.id in report.disagreements) {
                     Text(SHARED_DISAGREE_NOTE, fontSize = 10.sp, color = Tech.Amber, lineHeight = 13.sp)
                     state.overview?.storage.orEmpty().filter { it.remote == member.remote && it.shared == true && it.id == row.id }.forEach { peer ->
-                        Text("${peer.node}: ${bytes(peer.diskBytes)} / ${bytes(peer.maxDiskBytes)}", fontFamily = Tech.Mono, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, softWrap = false)
+                        Text("${peer.node}: ${storageSize(peer.diskBytes)} / ${storageSize(peer.maxDiskBytes)}", fontFamily = Tech.Mono, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, softWrap = false)
                     }
                 }
             }
@@ -754,7 +833,7 @@ private fun guestLockMark(guest: Guest): GuestMark? {
         state.nodeStatusError?.let { Text(it, color = Tech.Red, fontSize = Tech.Label, maxLines = 4, overflow = TextOverflow.Ellipsis) }
         state.nodeStatus?.takeIf { it.node == member.name }?.let { live ->
             MiniHeading("LIVE STATUS")
-            FactLine("CPU", cpuUsagePercent(live.cpuFraction)?.let { String.format(Locale.ROOT, "%.1f%%", it) } ?: "Unavailable")
+            FactLine("CPU", cpuFact(live.cpuFraction))
             FactLine("Memory", "${bytes(live.memoryUsedBytes)} / ${bytes(live.memoryTotalBytes)}")
             FactLine("Root filesystem", "${bytes(live.rootUsedBytes)} / ${bytes(live.rootTotalBytes)}")
             FactLine("Uptime", uptime(live.uptimeSeconds))
@@ -776,7 +855,7 @@ private fun guestLockMark(guest: Guest): GuestMark? {
     when {
         guest.template -> Text("Templates have no power action.", color = Tech.Muted, fontSize = Tech.Label)
         state.stale -> Text("Inventory is stale. Sync before sending an action.", color = Tech.Amber, fontSize = Tech.Label)
-        state.submissions.any { it.phase == PowerPhase.Accepted || it.phase == PowerPhase.Unknown } -> Text("An earlier action is unresolved. Check Activity before another action.", color = Tech.Amber, fontSize = Tech.Label)
+        unresolvedSubmission(state) != null -> Text(unresolvedActionText(unresolvedSubmission(state)!!), color = Tech.Amber, fontSize = Tech.Label)
         state.loading -> Text("Inventory is still loading. Power actions are unavailable.", color = Tech.Muted, fontSize = Tech.Label)
         !actionsAvailable -> Text("Power actions are unavailable for this session.", color = Tech.Muted, fontSize = Tech.Label)
         !actionMatches(guest, PowerAction.Start) && !actionMatches(guest, PowerAction.Shutdown) ->

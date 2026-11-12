@@ -1,6 +1,9 @@
 package local.ringleader.core.tools
 
 import java.nio.file.Path
+import kotlin.coroutines.AbstractCoroutineContextElement
+import kotlin.coroutines.CoroutineContext
+import kotlinx.coroutines.currentCoroutineContext
 import local.ringleader.core.profileFile
 
 data class ToolCatalog(val plugins: List<ToolPlugin>, val skipped: List<SkippedPlugin>)
@@ -37,4 +40,19 @@ fun browserRefusal(plugin: ToolPlugin, values: Map<String, String>): String? {
         if (values["executable"].orEmpty().isNotBlank()) return reason
     }
     return null
+}
+
+/**
+ * Who started a tool run, carried in the coroutine context. A browser session without `--allow-host-actions` runs tools
+ * with `ToolCaller(hostActions = false)`, and [Iperf3Plugin] and [UserToolPlugin] then refuse host actions inside
+ * `run` as well as in the UI. Without this element the caller is the desktop app.
+ */
+class ToolCaller(val hostActions: Boolean) : AbstractCoroutineContextElement(ToolCaller) {
+    companion object Key : CoroutineContext.Key<ToolCaller>
+}
+
+/** [browserRefusal] for the current caller; null when host actions are allowed. */
+internal suspend fun callerRefusal(plugin: ToolPlugin, values: Map<String, String>): String? {
+    val caller = currentCoroutineContext()[ToolCaller] ?: return null
+    return if (caller.hostActions) null else browserRefusal(plugin, values)
 }

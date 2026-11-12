@@ -65,6 +65,7 @@ class ReadOnlyClientTest {
     }
 
     private fun good(request: Seen): Reply = when {
+        request.target == PVE_VERSION_PATH -> Reply(body = """{"data":{"version":"9.0.0","release":"9.0","repoid":"fixture"}}""")
         request.target == PERMISSIONS_PATH -> Reply(body = """{"data":{"/":{"Sys.Audit":1}}}""")
         request.target.endsWith("/services") -> Reply(body = """{"data":[{"name":"pveproxy","state":"running"}]}""")
         request.target.contains("/syslog") -> Reply(body = """{"data":[{"n":1,"t":"a"}],"total":1}""")
@@ -88,7 +89,9 @@ class ReadOnlyClientTest {
         withServer(::good) { address, pin, seen ->
             val client = PveClient()
             connection(address, pin).use { c ->
-                assertTrue(client.permissions(c).paths.containsKey("/"))
+                val dump = client.permissions(c)
+                assertTrue(dump.paths.containsKey("/"))
+                assertEquals("9.0", dump.release)
                 assertEquals("pveproxy", client.nodeServices(c, "node-a").single().name)
                 assertEquals(1, client.nodeSyslog(c, "node-a", 0, 1).total)
                 assertEquals(1, client.nodeSyslog(c, "node-a", 100, 501, "pveproxy").lines.size)
@@ -97,6 +100,7 @@ class ReadOnlyClientTest {
                 assertEquals("iso", client.storageContent(c, "node-a", "local", "iso").single().content)
             }
             assertEquals(listOf(
+                "/api2/json/version",
                 "/api2/json/access/permissions",
                 "/api2/json/nodes/node-a/services",
                 "/api2/json/nodes/node-a/syslog?start=0&limit=1",
@@ -119,7 +123,8 @@ class ReadOnlyClientTest {
                         val failure = assertFailsWith<IllegalStateException>("$name $status") { call() }
                         assertEquals(expected, failure::class, "$name $status")
                     }
-                    assertEquals(5, seen.size)
+                    // A 401 on GET /version ends the session before the permission body. A 403 there is ignored, then the permission read is refused too.
+                    assertEquals(if (status == 401) 5 else 6, seen.size)
                     // The connection is still usable after a refusal; only a 401 makes the workspace drop it.
                     c.withSecret { assertEquals("test-only", it) }
                 }
@@ -146,6 +151,42 @@ class ReadOnlyClientTest {
         }
     }
 
+    @Test fun aSlowStorageContentReadSaysTheNodeDidNotAnswer() {
+        withServer({ request ->
+            if (request.target.contains("/content")) Thread.sleep(1_500)
+            good(request)
+        }) { address, pin, _ ->
+            connection(address, pin).use { c ->
+                val failure = assertFailsWith<IllegalStateException> {
+                    PveClient(readTimeoutMs = 300).storageContent(c, "node-a", "local")
+                }
+                assertEquals(STORAGE_CONTENT_TIMEOUT, failure.message)
+            }
+        }
+    }
+
+    @Test fun aFailedVersionReadStillReturnsThePermissionList() {
+        withServer({ request ->
+            if (request.target == PVE_VERSION_PATH) Reply(500) else good(request)
+        }) { address, pin, seen ->
+            connection(address, pin).use { c ->
+                val dump = PveClient().permissions(c)
+                assertTrue(dump.paths.containsKey("/"))
+                assertEquals(null, dump.release)
+            }
+            assertEquals(listOf(PVE_VERSION_PATH, PERMISSIONS_PATH), seen.map { it.target })
+        }
+    }
+
+    @Test fun anExpiredTokenOnTheVersionReadEndsBeforeThePermissionList() {
+        withServer({ Reply(401) }) { address, pin, seen ->
+            connection(address, pin).use { c ->
+                assertFailsWith<SessionExpiredException> { PveClient().permissions(c) }
+            }
+            assertEquals(listOf(PVE_VERSION_PATH), seen.map { it.target })
+        }
+    }
+
     @Test fun aStorageThatCannotBeReadGetsAPlainSentenceAndOtherServerErrorsStayGeneric() {
         withServer({ Reply(500) }) { address, pin, _ ->
             connection(address, pin).use { c ->
@@ -165,7 +206,7 @@ class ReadOnlyClientTest {
                     assertTrue(failure.message!!.contains("redirected"), name)
                     assertFalse(failure is SessionExpiredException)
                 }
-                assertEquals(5, seen.size)
+                assertEquals(6, seen.size)
                 assertTrue(seen.none { it.target.endsWith("/stolen") })
             }
         }

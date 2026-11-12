@@ -14,9 +14,10 @@ import kotlinx.serialization.json.*
  *                                    returned, at most `limit` of them (limit 0 means 50). The top-level `total` counts every line of
  *                                    the whole output. An empty log answers one line "no content" with total 1.
  *                                    `since`/`until` are server-local date strings with at most second resolution, so follow uses
- *                                    `start`: it asks for the line it already holds plus what came after (see [checkSyslogFollow]).
- *  GET /nodes/{node}/apt/update      Sys.Modify on /nodes/{node}. The node's cached list of upgradable packages. RingMASTER never
- *                                    sends the POST on this path (it would run `apt-get update`); the transport refuses it.
+ *                                    `start`: it asks for the last few held lines plus what came after (see [checkSyslogFollow]).
+ *  GET /nodes/{node}/apt/update      Sys.Modify on /nodes/{node}. Installed versions against candidates from the node's last
+ *                                    `apt-get update`. The GET can rebuild the cached list from the local apt cache. It does
+ *                                    not run `apt-get update` and the list has no refresh time. RingMASTER never sends the POST.
  */
 
 private const val NODE_API = "/api2/json/nodes/"
@@ -37,7 +38,7 @@ const val NODE_UPDATES_NOT_FOUND = "The package update read returned HTTP 404."
 const val NODE_UPDATES_REFUSED = "The package update path was refused."
 const val NODE_UPDATES_EMPTY_BODY = "The server returned no package list."
 const val NODE_UPDATES_DENIED = "Not permitted. Listing package updates needs Sys.Modify on the node."
-const val NODE_UPDATES_NOTE = "From the node's last package-list refresh. RingMASTER only reads it and never refreshes it."
+const val NODE_UPDATES_NOTE = "Compares installed packages with candidates from the node's last apt update. Reading this can rebuild the node's local package cache. It does not run apt update, and the list has no refresh time."
 
 private val serviceUnitName = Regex("[A-Za-z0-9_.@:-]{1,128}")
 
@@ -73,7 +74,7 @@ data class NodeService(
     val activeState: String?,
 )
 
-enum class ServiceHealth { Running, Exited, Failed, EnabledNotRunning, Stopped, NotInstalled, Transitioning, Unknown }
+enum class ServiceHealth { Running, Exited, Failed, Restarting, EnabledNotRunning, Stopped, NotInstalled, Transitioning, Unknown }
 
 private val failedResults = setOf("failed", "exit-code", "signal", "core-dump", "watchdog", "start-limit-hit", "timeout", "resources", "protocol", "oom-kill")
 
@@ -83,6 +84,7 @@ fun serviceHealth(service: NodeService): ServiceHealth {
     val unit = service.unitState?.lowercase()
     return when {
         unit == "not-found" -> ServiceHealth.NotInstalled
+        state == "auto-restart" || state == "auto-restart-queued" -> ServiceHealth.Restarting
         active == "failed" || state in failedResults || state?.startsWith("failed") == true -> ServiceHealth.Failed
         active in setOf("activating", "deactivating", "reloading", "refreshing", "maintenance") -> ServiceHealth.Transitioning
         state == "exited" || state == "success" -> ServiceHealth.Exited
@@ -112,8 +114,19 @@ data class NodeServicesView(val node: String, val services: List<NodeService>)
 /** Lines per request: the first tail, "load earlier" and every follow read. */
 const val SYSLOG_PAGE = 500
 
-/** While the panel is visible and Follow is on, the tail is read on this interval. */
+/** Shortest wait between follow reads. A slow call waits three times its own duration instead. */
 const val SYSLOG_FOLLOW_MS = 5_000L
+
+/** One syslog call at least this long stops Follow. The node is still formatting the journal. */
+const val SYSLOG_SLOW_CALL_MS = 10_000L
+
+/** Longest wait after repeated follow failures. */
+const val SYSLOG_FOLLOW_BACKOFF_CAP_MS = 60_000L
+
+/** How many held lines a follow read must match before new lines are trusted. */
+const val SYSLOG_FOLLOW_ANCHOR = 3
+
+const val NODE_SYSLOG_FOLLOW_PAUSED = "This node's journal is large. Following is paused. Use Refresh."
 
 /** The most lines kept in memory. Following drops the oldest ones past this. */
 const val SYSLOG_MAX_LINES = 5_000
@@ -173,11 +186,34 @@ fun parseSyslogPage(raw: String): SyslogPage {
 /** Where the last [page] lines of a log with [total] lines begin. */
 fun syslogTailStart(total: Int, page: Int = SYSLOG_PAGE): Int = maxOf(0, total - page)
 
-/** Request that re-reads the newest line already held and everything after it, or null when nothing is held. */
+/**
+ * Request that re-reads the last [SYSLOG_FOLLOW_ANCHOR] held lines and everything after them, or null when nothing is held.
+ * One matching line is not enough: a vacuum can leave the same text at the same number.
+ */
 fun syslogFollowRequest(current: List<SyslogLine>): Pair<Int, Int>? {
-    val last = current.lastOrNull() ?: return null
-    return maxOf(0, last.n - 1) to (SYSLOG_PAGE + 1)
+    if (current.isEmpty()) return null
+    val anchor = current.takeLast(SYSLOG_FOLLOW_ANCHOR)
+    return maxOf(0, anchor.first().n - 1) to (SYSLOG_PAGE + anchor.size)
 }
+
+/**
+ * Wait before the next follow read. [lastDurationMs] is the previous call. [consecutiveFailures] is how many follow
+ * reads have failed in a row: the first retry keeps the paced wait, and each further failure doubles it up to one minute.
+ */
+fun syslogFollowDelayMs(lastDurationMs: Long, consecutiveFailures: Int): Long {
+    val paced = maxOf(SYSLOG_FOLLOW_MS, lastDurationMs.coerceAtLeast(0) * 3)
+    if (consecutiveFailures <= 1) return paced
+    var delay = paced
+    val shifts = (consecutiveFailures - 1).coerceAtMost(6)
+    repeat(shifts) {
+        if (delay > SYSLOG_FOLLOW_BACKOFF_CAP_MS / 2) return SYSLOG_FOLLOW_BACKOFF_CAP_MS
+        delay *= 2
+    }
+    return minOf(delay, SYSLOG_FOLLOW_BACKOFF_CAP_MS)
+}
+
+/** True when one syslog call took about 10 seconds or more. Follow should stop instead of starting another. */
+fun syslogCallTooSlow(durationMs: Long): Boolean = durationMs >= SYSLOG_SLOW_CALL_MS
 
 sealed interface SyslogFollowResult {
     /** [lines] are new and contiguous with the held tail. [more] means the node has further lines to read now. */
@@ -188,19 +224,24 @@ sealed interface SyslogFollowResult {
 }
 
 /**
- * Judge one follow read made with [syslogFollowRequest]. The first returned line must be the held tail line itself, same
- * number and same text; anything else means the node's numbering moved. A total below the held line number, or a gap after
- * it, also means the log changed. Only a verified read appends.
+ * Judge one follow read made with [syslogFollowRequest]. The page must start with the last [SYSLOG_FOLLOW_ANCHOR] held
+ * lines, same numbers and same text. One matching line is not enough. A total below the held tail, or a gap after it,
+ * also means the log changed. Only a verified read appends.
  */
-fun checkSyslogFollow(last: SyslogLine, page: SyslogPage): SyslogFollowResult {
-    if (page.total < last.n) return SyslogFollowResult.Resync
-    val first = page.lines.firstOrNull() ?: return SyslogFollowResult.Resync
-    if (first.n != last.n || first.text != last.text) return SyslogFollowResult.Resync
-    val fresh = page.lines.drop(1)
+fun checkSyslogFollow(heldTail: List<SyslogLine>, page: SyslogPage): SyslogFollowResult {
+    val held = heldTail.takeLast(SYSLOG_FOLLOW_ANCHOR)
+    val last = held.lastOrNull() ?: return SyslogFollowResult.Resync
+    if (page.total < last.n || page.lines.size < held.size) return SyslogFollowResult.Resync
+    val prefix = page.lines.take(held.size)
+    if (prefix.map { it.n to it.text } != held.map { it.n to it.text }) return SyslogFollowResult.Resync
+    val fresh = page.lines.drop(held.size)
     if (fresh.isEmpty()) return SyslogFollowResult.NothingNew(page.total)
     if (fresh.first().n != last.n + 1 || fresh.zipWithNext().any { (a, b) -> b.n != a.n + 1 }) return SyslogFollowResult.Resync
     return SyslogFollowResult.Appended(fresh, page.total, more = fresh.last().n < page.total)
 }
+
+/** One held line. Prefer the list form so a follow read can check the last few lines. */
+fun checkSyslogFollow(last: SyslogLine, page: SyslogPage): SyslogFollowResult = checkSyslogFollow(listOf(last), page)
 
 /** Adds the lines newer than the last one held. A page that was already applied (two reads raced) adds nothing, so numbers never repeat. */
 fun appendSyslog(current: List<SyslogLine>, fresh: List<SyslogLine>): List<SyslogLine> {

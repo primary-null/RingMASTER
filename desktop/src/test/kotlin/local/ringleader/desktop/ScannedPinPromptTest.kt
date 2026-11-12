@@ -81,4 +81,49 @@ class ScannedPinPromptTest {
         prompt.addressChanged("https://edge.example:8006")
         assertFalse(prompt.pending)
     }
+
+    @Test fun addressChangeAfterConfirmClearsTheConfirmedPin() {
+        val prompt = ScannedPinPrompt()
+        prompt.offer(addr, fp)
+        prompt.request()
+        val pin = prompt.confirm()!!
+        assertFalse(prompt.addressChanged(addr, pin))
+        assertTrue(prompt.addressChanged("https://other.example:8006", pin))
+        // Asked once: a later edit has nothing left to clear.
+        assertFalse(prompt.addressChanged("https://third.example:8006", ""))
+    }
+
+    @Test fun confirmedPinMatchesInAnySpelling() {
+        val prompt = ScannedPinPrompt()
+        prompt.offer(addr, fp)
+        prompt.request()
+        prompt.confirm()
+        assertTrue(prompt.addressChanged("https://other.example:8006", fp.replace(":", "").lowercase()))
+    }
+
+    @Test fun typedFingerprintIsKeptWhenTheAddressChanges() {
+        val prompt = ScannedPinPrompt()
+        prompt.offer(addr, fp)
+        prompt.request()
+        prompt.confirm()
+        assertFalse(prompt.addressChanged("https://other.example:8006", "11".repeat(32)))
+    }
+
+    @Test fun addressChangeWithoutConfirmClearsNoField() {
+        val prompt = ScannedPinPrompt()
+        prompt.offer(addr, fp)
+        prompt.request()
+        assertFalse(prompt.addressChanged("https://other.example:8006", fp))
+    }
+
+    @Test fun reofferAfterConfirmCanBeConfirmedAgain() {
+        val prompt = ScannedPinPrompt()
+        prompt.offer(addr, fp)
+        prompt.request()
+        prompt.confirm()
+        assertTrue(prompt.addressChanged("https://other.example:8006", fp))
+        prompt.offer(addr, fp)
+        prompt.request()
+        assertEquals(fp, prompt.confirm())
+    }
 }

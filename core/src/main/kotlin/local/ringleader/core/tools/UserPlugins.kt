@@ -16,7 +16,16 @@ import local.ringleader.core.findExecutable
 
 data class SkippedPlugin(val file: String, val reason: String)
 
-data class PluginApproval(val command: List<String>, val argv: List<String>)
+/** What the user confirmed: the manifest [command], the substituted [argv], and the file [program] resolved to. */
+data class PluginApproval(val command: List<String>, val argv: List<String>, val program: String)
+
+internal const val BATCH_FILE_REFUSED = "Batch files (.bat, .cmd) cannot be the program. Use the program itself."
+/** Patterns run on at most this many characters of a line. */
+internal const val PATTERN_LINE_LIMIT = 1000
+/** Time one pattern may spend on one line. */
+internal const val PATTERN_BUDGET_MS = 50L
+/** After this many slow lines the pattern is switched off for the run. */
+internal const val PATTERN_SLOW_LINES = 3
 
 /**
  * A command the user described in JSON. The first run in a session must have [approval]
@@ -36,7 +45,7 @@ class UserToolPlugin(
     val manifestCommand: List<String> get() = command
 
     override fun available(): ToolAvailability {
-        if (isBatchFile(command.first())) return ToolAvailability(false, "Batch files (.bat, .cmd) cannot be the program. Use the program itself.")
+        if (isBatchFile(command.first())) return ToolAvailability(false, BATCH_FILE_REFUSED)
         val program = resolveProgram(command.first(), which)
         return if (program != null) ToolAvailability(true) else ToolAvailability(false, "${command.first()} was not found. Use a full path or install it on PATH.")
     }
@@ -46,21 +55,44 @@ class UserToolPlugin(
         return substitutePlaceholders(command, clean)
     }
 
+    /**
+     * What a confirmation of [values] would approve, with the program resolved to the file that would run.
+     * Null when the program is not found.
+     */
+    fun approvalFor(values: Map<String, String>): PluginApproval? {
+        val argv = commandFor(values)
+        if (isBatchFile(argv.first())) return null
+        val program = resolveProgram(argv.first(), which) ?: return null
+        return PluginApproval(command, argv, program)
+    }
+
     override suspend fun run(values: Map<String, String>, emit: (ToolEvent) -> Unit): ToolResult {
+        callerRefusal(this, values)?.let { return ToolResult(false, it) }
         val argv = try { commandFor(values) } catch (e: ToolInputException) { return ToolResult(false, e.message ?: "Check the inputs.") }
         val a = approval
         if (a == null || a.command != command || a.argv != argv) return ToolResult(false, "Confirm this command before running it.")
-        if (isBatchFile(argv.first())) return ToolResult(false, "Batch files (.bat, .cmd) cannot be the program. Use the program itself.")
+        if (isBatchFile(argv.first())) return ToolResult(false, BATCH_FILE_REFUSED)
         val program = resolveProgram(argv.first(), which) ?: return ToolResult(false, "${argv.first()} was not found. Use a full path or install it on PATH.")
+        // The confirmation named a file. If PATH now finds a different one, ask again.
+        if (program != a.program) return ToolResult(false, "The program changed since you confirmed it. Confirm this command before running it.")
         val full = listOf(program) + argv.drop(1)
         emit(ToolEvent.Status("Running $name"))
         var seq = 0
         var code = 1
+        var slow = 0
         try {
             code = runToolProcess(full) { line ->
                 emit(ToolEvent.Line(line))
-                val pattern = linePattern ?: return@runToolProcess
-                val match = pattern.find(line) ?: return@runToolProcess
+                val pattern = linePattern?.takeIf { slow < PATTERN_SLOW_LINES } ?: return@runToolProcess
+                val match = when (val found = findWithBudget(pattern, line)) {
+                    is LineMatch.Found -> found.match
+                    LineMatch.None -> return@runToolProcess
+                    LineMatch.TooSlow -> {
+                        slow += 1
+                        if (slow == PATTERN_SLOW_LINES) emit(ToolEvent.Line("The lines pattern is too slow, so the chart is off for this run."))
+                        return@runToolProcess
+                    }
+                }
                 val sample = match.groups["value"]?.value?.replace(',', '.')?.toDoubleOrNull() ?: return@runToolProcess
                 seq += 1
                 val series = match.groups["series"]?.value?.takeIf { it.isNotBlank() } ?: "value"
@@ -135,7 +167,7 @@ fun readUserPlugin(fileName: String, text: String, which: (String) -> String? = 
     }
     if ('{' in command.first()) return ManifestRead.Bad("The program cannot be a placeholder.")
     if (!validExecutableToken(command.first())) return ManifestRead.Bad("The program must be an absolute path or a program name.")
-    if (isBatchFile(command.first())) return ManifestRead.Bad("Batch files (.bat, .cmd) cannot be the program. Use the program itself.")
+    if (isBatchFile(command.first())) return ManifestRead.Bad(BATCH_FILE_REFUSED)
     val inputs = when (val parsed = parseInputs(obj["inputs"] as? JsonArray)) {
         is InputRead.Ok -> parsed.inputs
         is InputRead.Bad -> return ManifestRead.Bad(parsed.reason)
@@ -189,6 +221,36 @@ internal fun resolveProgram(token: String, which: (String) -> String?): String? 
     val resolved = which(token) ?: return null
     if (isBatchFile(resolved)) return null
     return resolved
+}
+
+internal sealed class LineMatch {
+    data class Found(val match: MatchResult) : LineMatch()
+    data object None : LineMatch()
+    /** The pattern ran past its time budget on this line. */
+    data object TooSlow : LineMatch()
+}
+
+/**
+ * [pattern] on at most [PATTERN_LINE_LIMIT] characters of [line], stopped after [budgetMs].
+ * A pattern that backtracks badly cannot stall the output reader or Stop.
+ */
+internal fun findWithBudget(pattern: Regex, line: String, budgetMs: Long = PATTERN_BUDGET_MS): LineMatch {
+    val text = DeadlineChars(line.take(PATTERN_LINE_LIMIT), System.nanoTime() + budgetMs * 1_000_000)
+    return try { pattern.find(text)?.let { LineMatch.Found(it) } ?: LineMatch.None } catch (_: PatternBudgetExceeded) { LineMatch.TooSlow }
+}
+
+private class PatternBudgetExceeded : RuntimeException(null, null, false, false)
+
+/** Character access that fails once the deadline has passed. The regex engine reads every character through [get]. */
+private class DeadlineChars(private val text: CharSequence, private val deadline: Long) : CharSequence {
+    private var reads = 0
+    override val length: Int get() = text.length
+    override fun get(index: Int): Char {
+        if ((++reads and 0x3FF) == 0 && System.nanoTime() > deadline) throw PatternBudgetExceeded()
+        return text[index]
+    }
+    override fun subSequence(startIndex: Int, endIndex: Int): CharSequence = text.subSequence(startIndex, endIndex)
+    override fun toString(): String = text.toString()
 }
 
 internal fun isBatchFile(token: String): Boolean {

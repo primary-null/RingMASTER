@@ -106,7 +106,12 @@ private val hoodTime = DateTimeFormatter.ofPattern("HH:mm:ss.SSS").withZone(Zone
                     SectionLabel("STREAM",suffix="${filtered.size} OPERATIONS")
                     Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
                         MiniAction(if(paused) "Resume" else "Pause") { paused=!paused }
-                        MiniAction("Clear") { Trace.clear(); events=emptyList(); selected=null }
+                        MiniAction("Clear") {
+                            // Operations still running keep their row, so the stream matches the in-flight count.
+                            val removed=Trace.clear(); events=Trace.snapshot(); vitals=Trace.vitals()
+                            selected=selected?.takeIf { chosen -> events.any { it.id==chosen.id } }
+                            exportStatus=clearNotice(removed,events.size)
+                        }
                         if(!LocalAppHost.current.web) MiniAction("Export…") {
                             val copy=events
                             val dialog=java.awt.FileDialog(null as java.awt.Frame?,"Export redacted trace",java.awt.FileDialog.SAVE)
@@ -253,3 +258,7 @@ private fun traceSize(bytes: Long): String = when { bytes>=1048576 -> "${bytes/1
         Row(Modifier.fillMaxWidth()) { TraceMetrics.bucketLabels.forEachIndexed { i,label -> DataText("$label (${buckets[i]})",Modifier.weight(1f)) } }
     }
 }
+/** What Clear did: completed rows are removed, rows of operations still running stay. */
+internal fun clearNotice(removed: Int, kept: Int): String =
+    "Cleared ${removed} ${if (removed == 1) "operation" else "operations"}." +
+        if (kept > 0) " Kept ${kept} still running." else ""

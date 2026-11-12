@@ -338,7 +338,7 @@ class ToolsTest {
         assertFalse(unconfirmed.ok)
         assertTrue(unconfirmed.summary.contains("Confirm"))
         assertEquals(before, RunningTools.lastCommand)
-        plugin.approval = PluginApproval(plugin.manifestCommand, plugin.commandFor(mapOf("host" to "127.0.0.1", "count" to "1")))
+        plugin.approval = plugin.approvalFor(mapOf("host" to "127.0.0.1", "count" to "1"))
         val ran = plugin.run(mapOf("host" to "127.0.0.1", "count" to "1")) {}
         assertTrue(ran.ok, ran.summary)
         assertFalse(RunningTools.lastCommand.any { it.contains(";") || it.contains("|") || it == "cmd.exe" || it == "sh" })
@@ -393,15 +393,17 @@ class ToolsTest {
             override fun snapshot() = if (snaps.size > 1) snaps.removeFirst() else snaps.first()
             override fun routeTo(host: String, snapshot: VpnSnapshot?) = VpnRoute(host, host, null, null, null)
             override fun setTunnel(tunnel: VpnTunnel, up: Boolean) { mutations++ }
-            override fun setExitNode(peer: TailscalePeer?) { mutations++ }
+            override fun setExitNode(peer: TailscalePeer?, allowLanAccess: Boolean) { mutations++ }
             override fun importWireGuard(config: java.nio.file.Path, name: String): String { mutations++; return "" }
             override fun removeWireGuard(tunnel: VpnTunnel) { mutations++ }
         }
+        var clock = 0L
         val plugin = WireGuardToolPlugin(
             backendProvider = { backend },
             pinger = { host, emit -> emit(ToolEvent.Line("ping $host")); ToolResult(true, "3 sent, 3 received, 0% loss") },
-            pause = {},
+            pause = { clock += 2_000_000_000L },
             clock = { now },
+            nanoTime = { clock },
         )
         plugin.refreshSnapshot()
         val events = mutableListOf<ToolEvent>()
@@ -413,6 +415,42 @@ class ToolsTest {
         assertEquals(1.0, rate.y, 0.01)
         assertEquals("Mbit/s", rate.unit)
         assertTrue(events.any { it is ToolEvent.Line && it.text.contains("10.8.0.2") })
+    }
+
+    @Test fun wireGuardRateUsesTheMeasuredInterval() = runBlocking {
+        val now = Instant.parse("2026-01-01T00:00:30Z")
+        val peer = WireGuardPeer("abc", "203.0.113.9:51820", listOf("10.8.0.2/32"), now.epochSecond - 30, 1_000, 2_000, 25)
+        val tunnel = VpnTunnel("wg:wg0", VpnKind.WireGuard, "wg0", VpnState.Up, "wg0")
+        fun snap(rx: Long, tx: Long) = VpnSnapshot(
+            now, listOf(tunnel), false, null, true,
+            listOf(WireGuardInterface("wg0", null, 51820, listOf(peer.copy(rxBytes = rx, txBytes = tx)))),
+            emptyList(),
+        )
+        val snaps = ArrayDeque(listOf(snap(1_000, 2_000), snap(1_000, 2_000), snap(251_000, 127_000)))
+        val backend = object : VpnBackend {
+            override val platform = "Test"
+            override fun snapshot() = if (snaps.size > 1) snaps.removeFirst() else snaps.first()
+            override fun routeTo(host: String, snapshot: VpnSnapshot?) = VpnRoute(host, host, null, null, null)
+            override fun setTunnel(tunnel: VpnTunnel, up: Boolean) {}
+            override fun setExitNode(peer: TailscalePeer?, allowLanAccess: Boolean) {}
+            override fun importWireGuard(config: java.nio.file.Path, name: String) = ""
+            override fun removeWireGuard(tunnel: VpnTunnel) {}
+        }
+        var clock = 0L
+        val plugin = WireGuardToolPlugin(
+            backendProvider = { backend },
+            pinger = { _, _ -> ToolResult(true, "3 sent, 3 received, 0% loss") },
+            pause = { clock += 4_000_000_000L },
+            clock = { now },
+            nanoTime = { clock },
+        )
+        plugin.refreshSnapshot()
+        val events = mutableListOf<ToolEvent>()
+        val result = plugin.run(mapOf("peer" to "wg:wg0|10.8.0.2", "seconds" to "4")) { events += it }
+        assertTrue(result.ok, result.summary)
+        val rate = events.filterIsInstance<ToolEvent.Sample>().first { it.series == "receive" }
+        assertEquals(2.0, rate.x, 0.01)
+        assertEquals(0.5, rate.y, 0.01)
     }
 
     @Test fun liveLocalProbes() = runBlocking {
@@ -442,6 +480,15 @@ class ToolsTest {
 
         val dns = DnsPlugin().run(mapOf("name" to "localhost")) {}
         assertTrue(dns.ok, dns.summary)
+    }
+
+    /** A public name needs internet DNS; offline build runners skip this instead of failing. */
+    @Test fun publicNameLookupWhenOnline() = runBlocking {
+        val online = runCatching {
+            java.util.concurrent.CompletableFuture.supplyAsync { InetAddress.getAllByName("example.com") }
+                .get(3, java.util.concurrent.TimeUnit.SECONDS).isNotEmpty()
+        }.getOrDefault(false)
+        org.junit.jupiter.api.Assumptions.assumeTrue(online, "No internet DNS here")
         val example = DnsPlugin().run(mapOf("name" to "example.com")) {}
         assertTrue(example.ok, example.summary)
         assertTrue(example.metrics.getValue("count").toInt() >= 1)

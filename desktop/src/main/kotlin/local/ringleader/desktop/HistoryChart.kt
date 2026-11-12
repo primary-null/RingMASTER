@@ -20,36 +20,67 @@ import androidx.compose.ui.graphics.*
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.*
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import local.ringleader.core.*
 import kotlin.math.pow
 import java.time.*
 import java.time.format.DateTimeFormatter
 
+/**
+ * The cursor and zoom shared by every chart of one group. [instant] is always the time of a sample of the plotted
+ * points (see [historyAt]), so the crosshair, the markers and the readout name the same moment on every chart.
+ */
 class HistoryInteraction {
     var instant by mutableStateOf<Double?>(null)
     var zoom by mutableStateOf<ClosedFloatingPointRange<Double>?>(null)
 }
 private val LocalHistoryInteraction = staticCompositionLocalOf { HistoryInteraction() }
-private val LocalHistoryTimeframe = staticCompositionLocalOf { "hour" }
 private object HistoryPreference { var timeframe = "hour"; var cf = "AVERAGE" }
+
+/** The history load key and whether this view should read now. A stale inventory cannot read, so the charts reload once it recovers. */
+internal class HistoryLoadGate {
+    private var loaded: Any? = null
+    fun shouldLoad(key: Any, stale: Boolean): Boolean {
+        if (stale && loaded == key) return false
+        loaded = key
+        return true
+    }
+}
 
 @Composable fun HistoryGroup(state: WorkspaceState, workspace: Workspace, node: String? = null) {
     var timeframe by remember { mutableStateOf(HistoryPreference.timeframe) }
     var cf by remember { mutableStateOf(HistoryPreference.cf) }
-    val interaction = remember(node, state.selected?.resource) { HistoryInteraction() }
-    LaunchedEffect(timeframe, cf, node, state.selected?.resource) { interaction.zoom=null; workspace.inspectHistory(timeframe,cf,node) }
+    val resource = state.selected?.resource
+    val interaction = remember(node, resource) { HistoryInteraction() }
+    LaunchedEffect(timeframe, cf, node, resource) { interaction.zoom = null }
+    // state.stale is a key: a view opened (or kept open) while the inventory was stale reads again once a sync succeeds.
+    // Going stale does not read again, so the last good series stays on screen.
+    val gate = remember { HistoryLoadGate() }
+    LaunchedEffect(timeframe, cf, node, resource, state.stale) {
+        if (gate.shouldLoad(listOf(timeframe, cf, node, resource), state.stale)) workspace.inspectHistory(timeframe, cf, node)
+    }
     val all = state.chartHistory.value.orEmpty()
-    val points = all.filter { interaction.zoom?.contains(it.time) != false }
-    val charts = if(node == null) listOf(("CPU / " + (all.lastOrNull { it.values["maxcpu"] != null }?.values?.get("maxcpu")?.toInt()?.toString() ?: "allocated") + " cores") to listOf("cpu"), "Memory" to listOf("mem","maxmem"), "Network" to listOf("netin","netout"), "Disk IO" to listOf("diskread","diskwrite")) else
+    val zoom = interaction.zoom
+    // Remembered so the charts see the same list instance until the data or the zoom changes, and skip the live ticks.
+    val points = remember(all, zoom) { if (zoom == null) all else all.filter { it.time in zoom } }
+    val charts = remember(node, all) {
+        if(node == null) listOf(("CPU / " + (all.lastOrNull { it.values["maxcpu"] != null }?.values?.get("maxcpu")?.toInt()?.toString() ?: "allocated") + " cores") to listOf("cpu"), "Memory" to listOf("mem","maxmem"), "Network" to listOf("netin","netout"), "Disk IO" to listOf("diskread","diskwrite")) else
         listOf("CPU / IO wait" to listOf("cpu","iowait"), "Server load" to listOf("loadavg"), "Memory" to listOf("memused","memtotal"), "Swap" to listOf("swapused","swaptotal"), "Network" to listOf("netin","netout")) +
         listOf("CPU pressure" to listOf("pressurecpusome"), "IO pressure" to listOf("pressureiosome","pressureiofull"), "Memory pressure" to listOf("pressurememorysome","pressurememoryfull")).filter { (_,keys) -> all.any { p -> keys.any { p.values[it] != null } } }
+    }
     val host = LocalAppHost.current
+    val scope = rememberCoroutineScope()
+    var exportNote by remember { mutableStateOf<Pair<String, Boolean>?>(null) }
     Column(verticalArrangement=Arrangement.spacedBy(8.dp)) {
         // Wraps in narrow places (the node inspector) instead of running off the edge.
         FlowRow(Modifier.fillMaxWidth(), horizontalArrangement=Arrangement.spacedBy(8.dp), verticalArrangement=Arrangement.spacedBy(6.dp), itemVerticalAlignment=androidx.compose.ui.Alignment.CenterVertically) {
@@ -57,19 +88,29 @@ private object HistoryPreference { var timeframe = "hour"; var cf = "AVERAGE" }
             HistorySegments(listOf("AVERAGE" to "Average", "MAX" to "Maximum"), cf) { cf = it; HistoryPreference.cf = it }
             if(interaction.zoom != null) MiniAction("Reset zoom") { interaction.zoom=null }
             if(!host.web) MiniAction("CSV") {
+                exportNote = null
                 val dialog=java.awt.FileDialog(null as java.awt.Frame?, "Export visible history",java.awt.FileDialog.SAVE)
-                try { dialog.file="history.csv"; dialog.isVisible=true; dialog.file?.let { java.io.File(dialog.directory,it).writeText(historyCsv(points,charts.flatMap { it.second }.distinct())) } } finally { dialog.dispose() }
+                val target = try { dialog.file="history.csv"; dialog.isVisible=true; dialog.file?.let { java.io.File(dialog.directory,it) } } finally { dialog.dispose() }
+                if (target != null) {
+                    val rows = points; val keys = charts.flatMap { it.second }.distinct()
+                    // The file is written off the UI thread; only the outcome comes back.
+                    scope.launch {
+                        val failure = withContext(Dispatchers.IO) { runCatching { target.writeText(historyCsv(rows, keys)) }.exceptionOrNull() }
+                        exportNote = if (failure == null) "Saved ${target.name}." to false else "Could not save ${target.name}. ${failure.message.orEmpty()}".trim() to true
+                    }
+                }
             }
         }
+        exportNote?.let { (text, failed) -> Text(text, color = if (failed) Tech.Red else Tech.Muted, fontFamily = Tech.Mono, fontSize = 11.sp, maxLines = 2, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis) }
         state.chartHistory.error?.let { Text(it, color=Tech.Muted,fontFamily=Tech.Mono,fontSize=11.sp) }
-        if(state.chartHistory.error == null) CompositionLocalProvider(LocalHistoryInteraction provides interaction, LocalHistoryTimeframe provides timeframe) {
+        if(state.chartHistory.error == null) CompositionLocalProvider(LocalHistoryInteraction provides interaction) {
             // Two charts per row on wide layouts, like the Proxmox graph panels; one per row when narrow.
             BoxWithConstraints(Modifier.fillMaxWidth()) {
                 val perRow = if (maxWidth >= 1000.dp) 2 else 1
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     charts.chunked(perRow).forEach { row ->
                         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            row.forEach { (title, keys) -> Box(Modifier.weight(1f)) { HistoryChart(title, points, keys, if (state.chartHistoryLoading) "Loading history\u2026" else "No samples in this window") } }
+                            row.forEach { (title, keys) -> Box(Modifier.weight(1f)) { HistoryChart(title, points, keys, if (state.chartHistoryLoading) "Loading history…" else "No samples in this window") } }
                             if (row.size < perRow) Spacer(Modifier.weight(1f))
                         }
                     }
@@ -93,24 +134,37 @@ private object HistoryPreference { var timeframe = "hour"; var cf = "AVERAGE" }
     }
 }
 
-/** Server RRD history chart: one or two series, gradient fill, grid, axis labels, stats, hover crosshair with readout. */
+private fun historySeriesName(key: String) = when (key) { "cpu" -> "CPU"; "mem" -> "Memory"; "netin" -> "Inbound"; "netout" -> "Outbound"; "diskread" -> "Disk read"; "diskwrite" -> "Disk write"; "maxmem", "memtotal" -> "Total"; "memused" -> "Used"; "swapused" -> "Used"; "swaptotal" -> "Total"; "iowait" -> "IO wait"; "loadavg" -> "Load average"; "pressurecpusome", "pressureiosome", "pressurememorysome" -> "Some"; "pressureiofull", "pressurememoryfull" -> "Full"; else -> key }
+
+/** What a chart says to a screen reader: its title, the latest value, and the minimum, average and maximum. */
+internal fun historyChartDescription(title: String, latest: String?, min: String?, avg: String?, max: String?): String =
+    if (latest == null || min == null || avg == null || max == null) "$title chart. No samples."
+    else "$title chart. Latest $latest. Minimum $min, average $avg, maximum $max."
+
+/**
+ * Server RRD history chart: one or two series, gradient fill, grid, axis labels, stats, hover crosshair with readout.
+ *
+ * Hover is cheap: the shared cursor is read only while drawing (the crosshair and the markers) and by [HistoryReadout],
+ * never by this composable's body, so moving the pointer does not rebuild the cached stroke and fill paths.
+ */
 @Composable fun HistoryChart(title: String, points: List<HistoryPoint>, keys: List<String>, emptyNote: String = "No samples yet — new guests take a few minutes") {
     val shared = LocalHistoryInteraction.current
-    val timeframe = LocalHistoryTimeframe.current
     var hidden by remember(keys) { mutableStateOf(emptySet<String>()) }
     val activeKeys = keys.filterNot { it in hidden }
-    fun series(key: String) = when (key) { "cpu" -> "CPU"; "mem" -> "Memory"; "netin" -> "Inbound"; "netout" -> "Outbound"; "diskread" -> "Disk read"; "diskwrite" -> "Disk write"; "maxmem", "memtotal" -> "Total"; "memused" -> "Used"; "swapused" -> "Used"; "swaptotal" -> "Total"; "iowait" -> "IO wait"; "loadavg" -> "Load average"; "pressurecpusome", "pressureiosome", "pressurememorysome" -> "Some"; "pressureiofull", "pressurememoryfull" -> "Full"; else -> key }
     val colors = listOf(Tech.Amber, Tech.Green)
     val format: (Double?) -> String = { if (keys.first() in listOf("cpu","iowait")) percentage(it) else if(keys.first().startsWith("pressure")) it?.let { "%.1f%%".format(java.util.Locale.ROOT,it) } ?: "?" else if(keys.first()=="loadavg") it?.let { "%.2f".format(java.util.Locale.ROOT,it) } ?: "?" else compactIec(it, keys.first() in listOf("netin","diskread")) }
     val axisFormat: (Double?) -> String = { v -> format(v) }
     val max = remember(points, keys, hidden) {
         val peak = activeKeys.flatMap { k -> points.mapNotNull { it.values[k]?.takeIf { v -> v.isFinite() && v >= 0.0 } } }.maxOrNull() ?: 0.0
-        niceHistoryMaximum(peak * 1.04, keys.first() == "cpu")
+        // An idle window (every sample zero) still gets a scale, so its line is drawn along the bottom.
+        niceHistoryMaximum(peak * 1.04, keys.first() == "cpu").takeIf { it > 0.0 } ?: idleHistoryTop(keys.first())
     }
     var chartSize by remember { mutableStateOf(IntSize(1, 1)) }
-    var hover by remember { mutableStateOf<Float?>(null) }
-    val clock = remember(timeframe) { DateTimeFormatter.ofPattern(if(timeframe=="hour") "HH:mm:ss" else if(timeframe=="day") "dd MMM HH:mm" else "dd MMM yy").withZone(ZoneId.systemDefault()) }
-    fun time(p: HistoryPoint) = clock.format(Instant.ofEpochSecond(p.time.toLong()))
+    var inside by remember { mutableStateOf(false) }
+    val visibleSpan = ((points.lastOrNull()?.time ?: 0.0) - (points.firstOrNull()?.time ?: 0.0)).coerceAtLeast(0.0)
+    // The axis pattern follows the visible span, so a zoomed week or month still shows the time of day.
+    val clock = remember(historyAxisPattern(visibleSpan)) { DateTimeFormatter.ofPattern(historyAxisPattern(visibleSpan)).withZone(ZoneId.systemDefault()) }
+    val readoutClock = remember(historyReadoutPattern(visibleSpan)) { DateTimeFormatter.ofPattern(historyReadoutPattern(visibleSpan)).withZone(ZoneId.systemDefault()) }
     val axisWidth = 64.dp
     var dragFrom by remember { mutableStateOf<Float?>(null) }
     var dragTo by remember { mutableStateOf<Float?>(null) }
@@ -118,6 +172,7 @@ private object HistoryPreference { var timeframe = "hour"; var cf = "AVERAGE" }
     fun seriesColor(k: String) = if (k in capacity) Tech.Muted else colors[keys.filterNot { it in capacity }.indexOf(k).coerceAtLeast(0) % colors.size]
     val primary = activeKeys.firstOrNull { it !in capacity } ?: activeKeys.firstOrNull()
     val primaryValues = remember(points, primary) { primary?.let { k -> points.mapNotNull { it.values[k]?.takeIf { v -> v.isFinite() } } }.orEmpty() }
+    val latest = primary?.let { k -> points.lastOrNull { it.values[k] != null }?.values?.get(k) }
     TechPanel(Modifier.fillMaxWidth(), padding = 10.dp) {
         // One fixed-height header row: title, legend chips (click to hide a series), latest value of the main series.
         Row(Modifier.fillMaxWidth().heightIn(min = 22.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -130,11 +185,11 @@ private object HistoryPreference { var timeframe = "hour"; var cf = "AVERAGE" }
                         if (k in capacity) drawLine(c, Offset(0f, size.height / 2), Offset(size.width, size.height / 2), 1.5.dp.toPx(), pathEffect = androidx.compose.ui.graphics.PathEffect.dashPathEffect(floatArrayOf(4f, 3f)))
                         else drawRect(c, Offset(0f, size.height * .2f), Size(size.width, size.height * .6f))
                     }
-                    Text(series(k), fontSize = 10.sp, fontFamily = Tech.Mono, color = if (off) Tech.Muted.copy(alpha = .6f) else Tech.Ink, maxLines = 1)
+                    Text(historySeriesName(k), fontSize = 10.sp, fontFamily = Tech.Mono, color = if (off) Tech.Muted.copy(alpha = .6f) else Tech.Ink, maxLines = 1)
                 }
             }
             Spacer(Modifier.weight(1f))
-            Text(format(primary?.let { k -> points.lastOrNull { it.values[k] != null }?.values?.get(k) }), fontSize = 13.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold, fontFamily = Tech.Mono, color = primary?.let { seriesColor(it) } ?: Tech.Ink, maxLines = 1)
+            Text(format(latest), fontSize = 13.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold, fontFamily = Tech.Mono, color = primary?.let { seriesColor(it) } ?: Tech.Ink, maxLines = 1)
         }
         Text(if (primaryValues.isEmpty()) " " else "MIN ${format(primaryValues.min())}   AVG ${format(primaryValues.average())}   MAX ${format(primaryValues.max())}",
             Modifier.heightIn(min = 16.dp), fontSize = 9.sp, letterSpacing = .5.sp, fontFamily = Tech.Mono, color = Tech.Muted, maxLines = 1)
@@ -143,13 +198,22 @@ private object HistoryPreference { var timeframe = "hour"; var cf = "AVERAGE" }
             Box(Modifier.fillMaxWidth().height(150.dp), contentAlignment = androidx.compose.ui.Alignment.Center) { Text(emptyNote, color = Tech.Muted, fontSize = 11.sp, fontFamily = Tech.Mono) }
             return@TechPanel
         }
-        val idle = max == 0.0
+        val description = if (primaryValues.isEmpty()) historyChartDescription(title, null, null, null, null)
+            else historyChartDescription(title, format(latest), format(primaryValues.min()), format(primaryValues.average()), format(primaryValues.max()))
         Row {
             Column(Modifier.width(axisWidth).height(150.dp).padding(end = 8.dp), verticalArrangement = Arrangement.SpaceBetween) {
-                (if (idle) listOf(0.0) else listOf(max, max * .75, max / 2, max * .25, 0.0)).forEach { Text(axisFormat(it), Modifier.fillMaxWidth(), fontSize = 9.sp, color = Tech.Muted, fontFamily = Tech.Mono, textAlign = TextAlign.End, maxLines = 1) }
+                listOf(max, max * .75, max / 2, max * .25, 0.0).forEach { Text(axisFormat(it), Modifier.fillMaxWidth(), fontSize = 9.sp, color = Tech.Muted, fontFamily = Tech.Mono, textAlign = TextAlign.End, maxLines = 1) }
             }
             Box(Modifier.weight(1f).height(150.dp).clipToBounds().onSizeChanged { chartSize = it }
-                .onPointerEvent(PointerEventType.Move) { hover = it.changes.firstOrNull()?.position?.x; shared.instant=points.first().time+(points.last().time-points.first().time)*((hover ?: 0f)/chartSize.width).coerceIn(0f,1f) }.onPointerEvent(PointerEventType.Exit) { hover = null; shared.instant=null }
+                .semantics { contentDescription = description }
+                .onPointerEvent(PointerEventType.Move) { event ->
+                    val x = event.changes.firstOrNull()?.position?.x ?: return@onPointerEvent
+                    // Snap to the nearest sample, the one the markers and the readout show.
+                    val at = historyAt(points, (x / chartSize.width.coerceAtLeast(1)).toDouble())?.time
+                    if (shared.instant != at) shared.instant = at
+                    if (!inside) inside = true
+                }
+                .onPointerEvent(PointerEventType.Exit) { inside = false; shared.instant = null }
                 .pointerInput(points) { detectTapGestures(onDoubleTap={ shared.zoom=null }) }
                 .pointerInput(points) {
                     var start=0f; var end=0f
@@ -163,9 +227,11 @@ private object HistoryPreference { var timeframe = "hour"; var cf = "AVERAGE" }
                     val start = points.firstOrNull()?.time ?: 0.0
                     val span = ((points.lastOrNull()?.time ?: start) - start).coerceAtLeast(1.0)
                     fun x(p: HistoryPoint) = ((p.time - start) / span * size.width).toFloat()
-                    fun y(v: Double) = (size.height * (1 - (v / max.takeIf { it > 0.0 }.let { it ?: 1.0 }).coerceIn(0.0, 1.0))).toFloat()
+                    // A one-pixel inset keeps a stroke at zero (an idle window) or at the top fully visible inside the clip.
+                    val inset = 1.dp.toPx()
+                    fun y(v: Double) = (inset + (size.height - 2 * inset) * (1 - (v / max).coerceIn(0.0, 1.0))).toFloat()
                     val drawn = mutableListOf<Triple<Int, Path, Path>>()
-                    if (!idle) activeKeys.forEachIndexed { index, key ->
+                    activeKeys.forEachIndexed { index, key ->
                         val segment = mutableListOf<HistoryPoint>()
                         fun flush() {
                             if (segment.size >= 2) {
@@ -183,40 +249,32 @@ private object HistoryPreference { var timeframe = "hour"; var cf = "AVERAGE" }
                         flush()
                     }
                     val stroke = Stroke(1.6.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
+                    val capacityStroke = Stroke(1.4.dp.toPx(), pathEffect = androidx.compose.ui.graphics.PathEffect.dashPathEffect(floatArrayOf(6f, 5f)))
+                    val fills = activeKeys.map { k -> seriesColor(k).let { c -> Brush.verticalGradient(listOf(c.copy(alpha = .26f), c.copy(alpha = .02f))) } }
                     val grid = Tech.Edge.copy(alpha = .45f)
+                    val markerRadius = 4.dp.toPx(); val markerStroke = Stroke(1.5.dp.toPx())
                     onDrawBehind {
-                        if (idle) drawLine(grid, Offset(0f, size.height - 1f), Offset(size.width, size.height - 1f), 1f)
-                        else repeat(5) { n -> val h = size.height * n / 4; drawLine(grid, Offset(0f, h), Offset(size.width, h), 1f) }
+                        repeat(5) { n -> val h = size.height * n / 4; drawLine(grid, Offset(0f, h), Offset(size.width, h), 1f) }
                         drawn.forEach { (index, line, area) ->
                             val key = activeKeys[index]
-                            if (key in capacity) drawPath(line, seriesColor(key), style = Stroke(1.4.dp.toPx(), pathEffect = androidx.compose.ui.graphics.PathEffect.dashPathEffect(floatArrayOf(6f, 5f))))
-                            else { val c = seriesColor(key); drawPath(area, Brush.verticalGradient(listOf(c.copy(alpha = .26f), c.copy(alpha = .02f)))); drawPath(line, c, style = stroke) }
+                            if (key in capacity) drawPath(line, seriesColor(key), style = capacityStroke)
+                            else { drawPath(area, fills[index]); drawPath(line, seriesColor(key), style = stroke) }
                         }
                         val a = dragFrom; val b = dragTo
                         if (a != null && b != null) drawRect(Tech.Amber.copy(alpha = .14f), Offset(minOf(a, b), 0f), Size(kotlin.math.abs(b - a), size.height))
-                        shared.instant?.let { ((it-start)/span*size.width).toFloat().coerceIn(0f,size.width) }?.let { drawLine(Tech.Ink.copy(alpha = .6f), Offset(it, 0f), Offset(it, size.height), 1f) }
-                        // A marker on each visible series at the sample the readout names.
-                        if (!idle) shared.instant?.let { nearestHistory(points, it) }?.let { p ->
+                        // Draw-phase read of the shared cursor: the line and a marker on each visible series sit on the one sample the readout names.
+                        shared.instant?.let { nearestHistory(points, it) }?.let { p ->
+                            val px = x(p).coerceIn(0f, size.width)
+                            drawLine(Tech.Ink.copy(alpha = .6f), Offset(px, 0f), Offset(px, size.height), 1f)
                             activeKeys.filter { it !in capacity }.forEach { k ->
                                 val v = p.values[k]?.takeIf { it.isFinite() && it >= 0.0 } ?: return@forEach
-                                val c = Offset(x(p), y(v))
-                                drawCircle(Tech.Panel, 4.dp.toPx(), c); drawCircle(seriesColor(k), 4.dp.toPx(), c, style = Stroke(1.5.dp.toPx()))
+                                val c = Offset(px, y(v))
+                                drawCircle(Tech.Panel, markerRadius, c); drawCircle(seriesColor(k), markerRadius, c, style = markerStroke)
                             }
                         }
                     }
                 }) {
-                shared.instant?.takeIf { points.isNotEmpty() }?.let { instant ->
-                    val x=((instant-points.first().time)/(points.last().time-points.first().time).coerceAtLeast(1.0)*chartSize.width).toFloat()
-                    val target = points.first().time + (points.last().time - points.first().time) * (x / chartSize.width).coerceIn(0f, 1f)
-                    val p = nearestHistory(points,target)!!
-                    Surface(Modifier.offset { IntOffset(if (x > chartSize.width * .6f) (x.toInt() - 12 - 170.dp.roundToPx()).coerceAtLeast(0) else x.toInt() + 12, 6) }, color = Tech.Raised, shape = Tech.Control,
-                        border = androidx.compose.foundation.BorderStroke(1.dp, Tech.Edge), shadowElevation = 4.dp) {
-                        Column(Modifier.padding(horizontal = 8.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                            Text(time(p), color = Tech.Muted, fontSize = 9.sp, fontFamily = Tech.Mono)
-                            activeKeys.forEach { k -> Text("${series(k)}  ${format(p.values[k])}", color = seriesColor(k), fontSize = 10.sp, fontFamily = Tech.Mono) }
-                        }
-                    }
-                }
+                HistoryReadout(shared, points, { inside }, { chartSize.width }, activeKeys, readoutClock, ::historySeriesName, format, ::seriesColor)
             }
         }
         // One time label per ~110 dp of plot, between 2 and 5, so labels never run into each other. Uses the plot's
@@ -227,6 +285,34 @@ private object HistoryPreference { var timeframe = "hour"; var cf = "AVERAGE" }
             (0..steps).forEach { n -> Text(if (first == null || last == null) " " else clock.format(Instant.ofEpochSecond((first + (last - first) * n / steps).toLong())), fontSize = 9.sp, color = Tech.Muted, fontFamily = Tech.Mono, maxLines = 1) }
         }
     }
+}
+
+/**
+ * The one readout: shown only on the chart under the pointer, beside the crosshair, for the sample the crosshair is on.
+ * It is the only composable that reads the shared cursor, so a pointer move recomposes this panel and nothing else.
+ */
+@Composable private fun HistoryReadout(
+    shared: HistoryInteraction, points: List<HistoryPoint>, visible: () -> Boolean, width: () -> Int, keys: List<String>,
+    clock: DateTimeFormatter, name: (String) -> String, format: (Double?) -> String, color: (String) -> Color,
+) {
+    if (!visible() || points.isEmpty()) return
+    val p = shared.instant?.let { nearestHistory(points, it) } ?: return
+    val w = width().coerceAtLeast(1)
+    val x = ((p.time - points.first().time) / (points.last().time - points.first().time).coerceAtLeast(1.0) * w).toFloat()
+    Surface(Modifier.offset { IntOffset(if (x > w * .6f) (x.toInt() - 12 - 170.dp.roundToPx()).coerceAtLeast(0) else x.toInt() + 12, 6) }, color = Tech.Raised, shape = Tech.Control,
+        border = androidx.compose.foundation.BorderStroke(1.dp, Tech.Edge), shadowElevation = 4.dp) {
+        Column(Modifier.padding(horizontal = 8.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(clock.format(Instant.ofEpochSecond(p.time.toLong())), color = Tech.Muted, fontSize = 9.sp, fontFamily = Tech.Mono)
+            keys.forEach { k -> Text("${name(k)}  ${format(p.values[k])}", color = color(k), fontSize = 10.sp, fontFamily = Tech.Mono) }
+        }
+    }
+}
+
+/** Scale for a window whose samples are all zero: 1% for CPU, 1 for load and pressure, 1 KiB for bytes. */
+internal fun idleHistoryTop(key: String): Double = when {
+    key == "cpu" || key == "iowait" -> .01
+    key == "loadavg" || key.startsWith("pressure") -> 1.0
+    else -> 1024.0
 }
 
 /** Round up in percent or the appropriate IEC unit to a readable step (1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10). */

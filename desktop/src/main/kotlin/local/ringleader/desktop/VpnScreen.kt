@@ -30,9 +30,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import java.awt.FileDialog
-import java.awt.Frame
-import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Duration
 import java.time.Instant
@@ -51,9 +48,10 @@ import local.ringleader.core.*
  * State for the VPN page, kept across page switches. Reads run on [Dispatchers.IO]; every change goes through [act],
  * which the UI only calls after the user confirms, and refreshes afterwards so the page shows what actually happened.
  */
-class VpnSession(private val scope: CoroutineScope, val backend: VpnBackend?) {
+class VpnSession(private val scope: CoroutineScope, val backend: VpnBackend?, val hostActions: Boolean = false) {
     var snapshot by mutableStateOf<VpnSnapshot?>(null); private set
-    var loading by mutableStateOf(false); private set
+    /** True only while a manual Refresh is in flight. Background polls do not flip the toolbar. */
+    var reading by mutableStateOf(false); private set
     var route by mutableStateOf<VpnRoute?>(null); private set
     /** Result of the last change, plain language. */
     var message by mutableStateOf<String?>(null); private set
@@ -63,34 +61,48 @@ class VpnSession(private val scope: CoroutineScope, val backend: VpnBackend?) {
     var services by mutableStateOf<List<TailnetService>>(emptyList()); private set
     var finding by mutableStateOf(false); private set
     var searched by mutableStateOf(false); private set
-    /** In the browser without --allow-host-actions this is false; the UI sets it from LocalAppHost. */
-    var hostActions: Boolean = true
+    /** Set from the window. Background polls wait while the window is minimised. */
+    var minimized by mutableStateOf(false)
+    private var generation = 0
     private var findJob: Job? = null
 
-    fun refresh(host: String?) {
+    /**
+     * [manual] is a click on Refresh and is the only refresh that shows "Reading…".
+     * [force] runs after a change even while the window is minimised.
+     * A newer refresh wins: an older snapshot cannot overwrite it.
+     */
+    fun refresh(host: String?, manual: Boolean = false, force: Boolean = false) {
         val b = backend ?: return
-        if (loading) return
-        loading = true
+        if (minimized && !manual && !force) return
+        val ticket = synchronized(this) { ++generation }
+        if (manual) reading = true
         scope.launch {
             try {
                 val s = withContext(Dispatchers.IO) { b.snapshot() }
+                if (!isCurrent(ticket)) return@launch
                 snapshot = s
-                route = host?.let { h -> withContext(Dispatchers.IO) { runCatching { b.routeTo(h, s) }.getOrNull() } }
+                val next = host?.let { h -> withContext(Dispatchers.IO) { runCatching { b.routeTo(h, s) }.getOrNull() } }
+                if (!isCurrent(ticket)) return@launch
+                route = next
             } catch (e: CancellationException) { throw e } catch (_: Exception) {
-            } finally { loading = false }
+            } finally { if (isCurrent(ticket)) reading = false }
         }
     }
 
+    private fun isCurrent(ticket: Int) = synchronized(this) { ticket == generation }
+
+    fun notice(text: String) { message = text; failed = false }
+
     fun act(key: String, host: String?, done: String, block: (VpnBackend) -> Unit) {
         val b = backend ?: return
-        if (!hostActions) return
+        if (!hostActions) { failed = true; message = VPN_HOST_ACTIONS_REASON; return }
         if (busy != null) return
         busy = key; message = null; failed = false
         scope.launch {
             try { withContext(Dispatchers.IO) { block(b) }; message = done }
             catch (e: CancellationException) { throw e }
             catch (e: Exception) { failed = true; message = e.message?.takeIf { it.isNotBlank() } ?: "The change did not complete." }
-            finally { busy = null; loading = false; refresh(host) }
+            finally { busy = null; refresh(host, force = true) }
         }
     }
 
@@ -116,23 +128,27 @@ private fun hostOf(address: String?): String? = address?.takeIf { it.isNotBlank(
  */
 @Composable fun VpnScreen(session: VpnSession, currentAddress: String?, origins: List<String>, onUse: (ScanHit) -> Unit) {
     val appHost = LocalAppHost.current
-    session.hostActions = appHost.hostActions
-    val canAct = appHost.hostActions
+    val canAct = session.hostActions
     val host = hostOf(currentAddress)
-    LaunchedEffect(host) { while (true) { session.refresh(host); delay(10_000) } }
+    LaunchedEffect(host, session.minimized) {
+        if (session.minimized) return@LaunchedEffect
+        while (true) { session.refresh(host); delay(10_000) }
+    }
     var confirm by remember { mutableStateOf<VpnConfirm?>(null) }
+    var allowLan by remember { mutableStateOf(true) }
     var importing by remember { mutableStateOf<Path?>(null) }
     val snap = session.snapshot
     val backend = session.backend
     Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(Tech.Space8)) {
         Row(Modifier.fillMaxWidth().height(32.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            MiniAction(if (session.loading) "Reading…" else "Refresh", enabled = backend != null && !session.loading) { session.refresh(host) }
-            MiniAction("Import WireGuard…", enabled = appHost.filePicker && backend != null && session.busy == null) { appHost.pickFile("Choose a WireGuard configuration", setOf("conf"))?.let { importing = it } }
+            MiniAction(if (session.reading) "Reading…" else "Refresh", enabled = backend != null && !session.reading) { session.refresh(host, manual = true) }
+            HostAction("Import WireGuard…", enabled = appHost.filePicker && backend != null && session.busy == null && canAct, reason = importReason(appHost.filePicker, backend != null, canAct)) { appHost.pickFile("Choose a WireGuard configuration", setOf("conf"))?.let { importing = it } }
             Spacer(Modifier.width(8.dp))
             // One status line in the fixed-height toolbar: a running change, the last change's result, or the read time.
             Text(when {
                 session.busy != null -> "Working…"
                 session.message != null -> session.message!!
+                !canAct && backend != null -> VPN_HOST_ACTIONS_REASON
                 backend == null -> "VPN controls are not available on this platform."
                 snap == null -> "Reading tunnels…"
                 else -> "UPDATED ${vpnClock.format(snap.at)} · ${backend.platform.uppercase()}"
@@ -152,10 +168,10 @@ private fun hostOf(address: String?): String? = address?.takeIf { it.isNotBlank(
                 snap.tunnels.forEach { t ->
                     TunnelCard(t, session.busy == t.id, session.route?.tunnelId == t.id, canAct,
                         onToggle = { confirm = VpnConfirm.Toggle(t, up = t.state != VpnState.Up) },
-                        onRemove = { confirm = VpnConfirm.Remove(t) })
+                        onRemove = { confirm = VpnConfirm.Remove(t, backend?.platform ?: "") })
                 }
             }
-            snap.tailscale?.let { ts -> Tailnet(ts, session, origins, canAct, onUse, onExit = { confirm = VpnConfirm.Exit(it) }) }
+            snap.tailscale?.let { ts -> Tailnet(ts, session, origins, canAct, onUse, onExit = { peer -> allowLan = exitNodeLanDefault(host, session.route); confirm = VpnConfirm.Exit(peer) }) }
             if (snap.notes.isNotEmpty()) Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 snap.notes.forEach { Text(it, fontFamily = Tech.Mono, fontSize = 10.sp, color = Tech.Muted) }
             }
@@ -164,19 +180,47 @@ private fun hostOf(address: String?): String? = address?.takeIf { it.isNotBlank(
     }
     confirm?.let { c ->
         val throughIt = c is VpnConfirm.Toggle && session.route?.tunnelId == c.tunnel.id && !c.up
+        val lanRisk = c is VpnConfirm.Exit && c.peer != null && !allowLan && privateLanAddress(session.route?.address ?: host)
         TechDialog(c.title, { confirm = null }, actions = {
             TechAction(c.action, active = true) {
-                confirm = null
                 when (c) {
-                    is VpnConfirm.Toggle -> session.act(c.tunnel.id, host, "${c.tunnel.name} is ${if (c.up) "coming up" else "going down"}.") { it.setTunnel(c.tunnel, c.up) }
-                    is VpnConfirm.Remove -> session.act(c.tunnel.id, host, "${c.tunnel.name} was removed.") { it.removeWireGuard(c.tunnel) }
-                    is VpnConfirm.Exit -> session.act("exit", host, c.peer?.let { "Using ${it.hostName} as the exit node." } ?: "Stopped using an exit node.") { it.setExitNode(c.peer) }
+                    is VpnConfirm.Toggle -> {
+                        val live = session.snapshot?.tunnels?.firstOrNull { it.id == c.tunnel.id }
+                        if (!toggleStillApplies(c.up, live)) { confirm = null; session.notice("That tunnel changed. Nothing was changed."); session.refresh(host, force = true); return@TechAction }
+                        confirm = null
+                        session.act(c.tunnel.id, host, "${c.tunnel.name} is ${if (c.up) "coming up" else "going down"}.") { backend ->
+                            val fresh = backend.snapshot().tunnels.firstOrNull { it.id == c.tunnel.id }
+                            if (!toggleStillApplies(c.up, fresh)) error("That tunnel changed. Nothing was changed.")
+                            backend.setTunnel(c.tunnel, c.up)
+                        }
+                    }
+                    is VpnConfirm.Remove -> {
+                        val live = session.snapshot?.tunnels?.firstOrNull { it.id == c.tunnel.id }
+                        if (!removeStillApplies(live)) { confirm = null; session.notice("That tunnel changed. Nothing was removed."); session.refresh(host, force = true); return@TechAction }
+                        confirm = null
+                        session.act(c.tunnel.id, host, "${c.tunnel.name} was removed.") { backend ->
+                            val fresh = backend.snapshot().tunnels.firstOrNull { it.id == c.tunnel.id }
+                            if (!removeStillApplies(fresh)) error("That tunnel changed. Nothing was removed.")
+                            backend.removeWireGuard(c.tunnel)
+                        }
+                    }
+                    is VpnConfirm.Exit -> {
+                        if (!exitNodeStillApplies(c.peer, session.snapshot?.tailscale)) { confirm = null; session.notice("The exit node changed. Nothing was changed."); session.refresh(host, force = true); return@TechAction }
+                        confirm = null
+                        val lan = allowLan
+                        session.act("exit", host, c.peer?.let { "Using ${it.hostName} as the exit node." } ?: "Stopped using an exit node.") { backend ->
+                            if (!exitNodeStillApplies(c.peer, backend.snapshot().tailscale)) error("The exit node changed. Nothing was changed.")
+                            backend.setExitNode(c.peer, lan)
+                        }
+                    }
                 }
             }
             TechAction("Cancel") { confirm = null }
         }) {
             Text(c.body, fontSize = 13.sp, lineHeight = 19.sp)
+            if (c is VpnConfirm.Exit && c.peer != null) TechCheck(allowLan, { allowLan = it }, "Keep this computer's local network reachable")
             if (throughIt) Text("RingMASTER reaches $host through this tunnel, so the connection will drop.", fontSize = 13.sp, lineHeight = 19.sp, color = Tech.Amber)
+            if (lanRisk) Text("The current server is on the local network. With this off, that connection can drop.", fontSize = 13.sp, lineHeight = 19.sp, color = Tech.Amber)
             if (c.admin) Text("The system will ask for administrator approval.", fontSize = 12.sp, color = Tech.Muted)
         }
     }
@@ -191,10 +235,10 @@ private sealed class VpnConfirm(val title: String, val body: String, val action:
         "${if (up) "Bring up" else "Bring down"} ${tunnel.name}?",
         if (up) "Traffic for the networks this tunnel carries will go through it." else "Traffic that uses this tunnel will stop until it is brought up again.",
         if (up) "Bring up" else "Bring down", tunnel.toggleNeedsAdmin)
-    class Remove(val tunnel: VpnTunnel) : VpnConfirm("Remove ${tunnel.name}?", "The tunnel and its keys are deleted from this computer. Keep a copy of the configuration file if you need it again.", "Remove", tunnel.toggleNeedsAdmin)
+    class Remove(val tunnel: VpnTunnel, platform: String) : VpnConfirm("Remove ${tunnel.name}?", vpnRemoveBody(platform, tunnel), "Remove", tunnel.toggleNeedsAdmin)
     class Exit(val peer: TailscalePeer?) : VpnConfirm(
         if (peer == null) "Stop using an exit node?" else "Use ${peer.hostName} as the exit node?",
-        if (peer == null) "Internet traffic goes out through this computer's own connection again." else "All internet traffic from this computer will go out through ${peer.hostName}.",
+        if (peer == null) "Internet traffic goes out through this computer's own connection again." else "All internet traffic from this computer will go out through ${peer.hostName}. Local network access depends on the choice below.",
         if (peer == null) "Stop" else "Use exit node", false)
 }
 
@@ -236,8 +280,8 @@ private sealed class VpnConfirm(val title: String, val body: String, val action:
         if (t.canToggle || t.canRemove) {
             Spacer(Modifier.height(8.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (t.canToggle && t.state != VpnState.Connecting) MiniAction(if (busy) "Working…" else if (t.state == VpnState.Up) "Bring down" else "Bring up", primary = t.state != VpnState.Up, enabled = !busy && canAct, onClick = onToggle)
-                if (t.canRemove && t.state != VpnState.Up) MiniAction("Remove", enabled = !busy && canAct, onClick = onRemove)
+                if (t.canToggle && t.state != VpnState.Connecting) HostAction(if (busy) "Working…" else if (t.state == VpnState.Up) "Bring down" else "Bring up", primary = t.state != VpnState.Up, enabled = !busy && canAct, reason = if (canAct) null else VPN_HOST_ACTIONS_REASON, onClick = onToggle)
+                if (t.canRemove && t.state != VpnState.Up) HostAction("Remove", enabled = !busy && canAct, reason = if (canAct) null else VPN_HOST_ACTIONS_REASON, onClick = onRemove)
             }
         }
     }
@@ -257,7 +301,7 @@ private val VpnKind.label get() = when (this) { VpnKind.Tailscale -> "Tailscale"
             ts.tailnet?.let { Text(it, Modifier.identity(), fontFamily = Tech.Mono, fontSize = 11.sp, color = Tech.Muted, maxLines = 1) }
             Spacer(Modifier.weight(1f))
             if (ts.running) Box {
-                MiniAction("Exit node · ${ts.exitNode?.hostName ?: "none"}", enabled = session.busy == null && canAct) { exitMenu = true }
+                HostAction("Exit node · ${ts.exitNode?.hostName ?: "none"}", enabled = session.busy == null && canAct, reason = if (canAct) null else VPN_HOST_ACTIONS_REASON) { exitMenu = true }
                 DropdownMenu(exitMenu, { exitMenu = false }, containerColor = Tech.Raised) {
                     DropdownMenuItem(text = { Text("None", fontSize = 13.sp) }, onClick = { exitMenu = false; if (ts.exitNode != null) onExit(null) })
                     ts.peers.filter { it.exitNodeOption && it.online }.forEach { p ->
@@ -284,7 +328,7 @@ private val VpnKind.label get() = when (this) { VpnKind.Tailscale -> "Tailscale"
 @Composable private fun FoundServers(session: VpnSession, onUse: (ScanHit) -> Unit) {
     val found = session.services
     TechPanel(Modifier.fillMaxWidth(), rail = if (found.isNotEmpty()) Tech.Green else Tech.Edge, padding = 10.dp) {
-        Text(if (session.finding) "SEARCHING ONLINE PEERS ON 8006 · 8007 · 8443" else "PROXMOX ON THE TAILNET · ${found.size}", fontFamily = Tech.Mono, fontSize = 10.sp, letterSpacing = 1.sp, color = Tech.Muted)
+        Text(tailnetSearchHeader(session.finding, found.size), fontFamily = Tech.Mono, fontSize = 10.sp, letterSpacing = 1.sp, color = Tech.Muted)
         if (found.isEmpty() && !session.finding) Text("No Proxmox servers answered on the tailnet.", fontFamily = Tech.Mono, fontSize = 11.sp, color = Tech.Muted)
         found.forEach { s ->
             Row(Modifier.fillMaxWidth().height(32.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -346,13 +390,16 @@ private val VpnKind.label get() = when (this) { VpnKind.Tailscale -> "Tailscale"
     }
 }
 
-private fun pickWireGuard(): Path? {
-    val dialog = FileDialog(null as Frame?, "Choose a WireGuard configuration", FileDialog.LOAD)
-    dialog.setFilenameFilter { _, n -> n.lowercase().endsWith(".conf") }
-    if (System.getProperty("os.name").startsWith("Windows")) dialog.file = "*.conf"
-    dialog.isVisible = true
-    val file = dialog.file ?: return null
-    return Path.of(dialog.directory, file).takeIf { Files.isRegularFile(it) }
+private fun importReason(filePicker: Boolean, hasBackend: Boolean, canAct: Boolean): String? = when {
+    !hasBackend -> null
+    !canAct -> VPN_HOST_ACTIONS_REASON
+    !filePicker -> "Import needs the desktop app. The browser cannot choose a file."
+    else -> null
+}
+
+@Composable private fun HostAction(label: String, primary: Boolean = false, enabled: Boolean, reason: String? = null, onClick: () -> Unit) {
+    if (!enabled && reason != null) HelpTip(reason) { MiniAction(label, primary = primary, enabled = false, onClick = onClick) }
+    else MiniAction(label, primary = primary, enabled = enabled, onClick = onClick)
 }
 
 /** Generic line glyphs (not product logos): a mesh of three nodes, a tunnel arch, a shield. */

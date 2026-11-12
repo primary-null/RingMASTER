@@ -26,10 +26,14 @@ class TraceroutePlugin(
         val host = clean.getValue("host")
         val command = traceCommand(os, which, host, clean.getValue("timeout").toInt(), clean.getValue("hops").toInt())
             ?: return ToolResult(false, "traceroute was not found. On Linux install traceroute or tracepath.")
-        emit(ToolEvent.Status("Tracing $host"))
+        if (traceIgnoresTimeout(command)) {
+            emit(ToolEvent.Status("Tracing $host. $TRACEPATH_NO_TIMEOUT"))
+            emit(ToolEvent.Line(TRACEPATH_NO_TIMEOUT))
+        } else emit(ToolEvent.Status("Tracing $host"))
         val hops = mutableListOf<TraceHop>()
         val code = try {
-            runToolProcess(command) { line ->
+            // Windows tracert writes the console code page, not UTF-8.
+            runToolProcess(command, consoleOutputCharset(os)) { line ->
                 emit(ToolEvent.Line(line))
                 parseTraceHop(line)?.let { hop ->
                     hops += hop
@@ -59,6 +63,12 @@ internal fun traceCommand(os: String, which: (String) -> String?, host: String, 
     which("tracepath")?.let { return listOf(it, "-n", "-m", maxHops.toString(), host) }
     return null
 }
+
+internal const val TRACEPATH_NO_TIMEOUT = "tracepath has no per-hop timeout, so the Timeout field is not used."
+
+/** tracepath (used when traceroute is not installed) takes no timeout argument. */
+internal fun traceIgnoresTimeout(command: List<String>): Boolean =
+    command.first().substringAfterLast('/').substringAfterLast('\\').equals("tracepath", ignoreCase = true)
 
 internal data class TraceHop(val hop: Int, val address: String?, val rttMs: Double?, val timeout: Boolean)
 

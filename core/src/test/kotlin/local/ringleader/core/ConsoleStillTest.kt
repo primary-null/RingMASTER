@@ -56,7 +56,10 @@ class ConsoleStillTest {
     }
     @Test fun blankDetection() {
         assertTrue(frameStill(RfbFrame(10, 10, IntArray(100))).blank)
-        assertTrue(frameStill(RfbFrame(10, 10, IntArray(100) { 0x808080 })).blank)
+        assertTrue(frameStill(RfbFrame(10, 10, IntArray(100) { 0x0a0a0a })).blank)
+        // A flat screen that is not dark (a plain login screen, a grey desktop) is a real picture, not a blank one.
+        assertFalse(frameStill(RfbFrame(10, 10, IntArray(100) { 0x808080 })).blank)
+        assertFalse(frameStill(RfbFrame(10, 10, IntArray(100) { 0x204080 })).blank)
         assertFalse(frameStill(RfbFrame(10, 10, IntArray(100) { if (it % 2 == 0) 0xffffff else 0 })).blank)
     }
     @Test fun pngIsScaledAndDiagnosticTextOmitsBytes() {

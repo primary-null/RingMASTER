@@ -22,6 +22,7 @@ import kotlinx.serialization.json.*
 const val STORAGE_CONTENT_NOT_FOUND = "The storage content read returned HTTP 404."
 const val STORAGE_CONTENT_REFUSED = "The storage content path was refused."
 const val STORAGE_CONTENT_UNAVAILABLE = "The node could not read this storage. It may be offline, disabled or not mounted."
+const val STORAGE_CONTENT_TIMEOUT = "The node did not answer within 20 s. Reading a storage can take longer when it must be mounted."
 const val STORAGE_CONTENT_EMPTY_BODY = "The server returned no storage content."
 const val STORAGE_CONTENT_DENIED = "Not permitted. Listing a storage needs Datastore.Audit or Datastore.AllocateSpace on it."
 const val STORAGE_CONTENT_DIRECT_ONLY = "Storage contents are read from the node directly. Open a direct Proxmox VE connection."
@@ -74,9 +75,13 @@ fun storageContentPath(node: String, storage: String, content: String? = null): 
     return "/api2/json/nodes/${encodePathSegment(nodeName)}/storage/${encodePathSegment(storageId)}/content" + (type?.let { "?content=$it" } ?: "")
 }
 
+private val collapsedSpace = Regex("\\s+")
+private val contentTypeName = Regex("[a-z][a-z0-9-]{0,31}")
+private val digits = Regex("\\d+")
+
 private fun cleanLine(value: String?, max: Int): String? {
     val firstLine = value?.lineSequence()?.firstOrNull().orEmpty()
-    val text = firstLine.filter { it == '\t' || !it.isISOControl() }.replace(Regex("\\s+"), " ").trim()
+    val text = firstLine.filter { it == '\t' || !it.isISOControl() }.replace(collapsedSpace, " ").trim()
     return text.take(max).ifEmpty { null }
 }
 
@@ -123,7 +128,7 @@ fun parseStorageContent(raw: String): List<StorageVolume> {
         val row = element as? JsonObject ?: return@mapNotNull null
         val volid = row.str("volid")?.trim()?.takeIf { it.isNotEmpty() && it.length <= 512 && it.none { c -> c.isISOControl() } } ?: return@mapNotNull null
         if (!seen.add(volid)) return@mapNotNull null
-        val declared = row.str("content")?.trim()?.lowercase()?.takeIf { it.matches(Regex("[a-z][a-z0-9-]{0,31}")) }
+        val declared = row.str("content")?.trim()?.lowercase()?.takeIf { it.matches(contentTypeName) }
         val verification = (row["verification"] as? JsonObject)?.str("state")?.let { cleanLine(it, 40) }
         StorageVolume(
             volid = volid,
@@ -143,23 +148,41 @@ fun parseStorageContent(raw: String): List<StorageVolume> {
 
 // ---- sorting and filtering -----------------------------------------------------------------------------------------
 
-private fun naturalName(value: String): String = Regex("\\d+").replace(value.lowercase()) { it.value.padStart(12, '0') }
+private fun naturalName(value: String): String = digits.replace(value.lowercase()) { it.value.padStart(12, '0') }
 
-private fun <T : Comparable<T>> ordered(rows: List<StorageVolume>, descending: Boolean, selector: (StorageVolume) -> T?): List<StorageVolume> {
+private fun <T : Comparable<T>> ordered(
+    rows: List<StorageVolume>,
+    descending: Boolean,
+    nameOf: (StorageVolume) -> String,
+    selector: (StorageVolume) -> T?,
+): List<StorageVolume> {
     val present = rows.filter { selector(it) != null }
-    val absent = rows.filter { selector(it) == null }.sortedBy { naturalName(it.volid) }
-    val sorted = present.sortedWith(compareBy<StorageVolume> { selector(it) }.thenBy { naturalName(it.volid) })
+    val absent = rows.filter { selector(it) == null }.sortedBy(nameOf)
+    val sorted = present.sortedWith(compareBy<StorageVolume> { selector(it) }.thenBy(nameOf))
     return (if (descending) sorted.reversed() else sorted) + absent
 }
 
 /** Sort keys match the column headers: Name, Type, Format, Size, Date, VM. A missing value sorts last in both directions. */
-fun sortVolumes(rows: List<StorageVolume>, key: String, descending: Boolean): List<StorageVolume> = when (key) {
-    "Type" -> ordered(rows, descending) { it.content }
-    "Format" -> ordered(rows, descending) { it.format }
-    "Size" -> ordered(rows, descending) { it.shownSize }
-    "Date" -> ordered(rows, descending) { it.createdAt }
-    "VM" -> ordered(rows, descending) { it.vmid }
-    else -> ordered(rows, descending) { naturalName(it.volid) }
+fun sortVolumes(rows: List<StorageVolume>, key: String, descending: Boolean): List<StorageVolume> {
+    val names = HashMap<StorageVolume, String>(rows.size)
+    val nameOf: (StorageVolume) -> String = { row -> names.getOrPut(row) { naturalName(row.volid) } }
+    return when (key) {
+        "Type" -> ordered(rows, descending, nameOf) { it.content }
+        "Format" -> ordered(rows, descending, nameOf) { it.format }
+        "Size" -> ordered(rows, descending, nameOf) { it.shownSize }
+        "Date" -> ordered(rows, descending, nameOf) { it.createdAt }
+        "VM" -> ordered(rows, descending, nameOf) { it.vmid }
+        else -> ordered(rows, descending, nameOf) { nameOf(it) }
+    }
+}
+
+/**
+ * How many storages a header should name. A shared id counts once across nodes. A row that is not shared, including one
+ * whose shared flag was not recorded, counts on its own. Shared byte totals are never added; see [sharedStorageReport].
+ */
+fun recordedStorageCount(rows: List<RecordedStorage>): Int {
+    val sharedIds = rows.filter { it.shared == true }.map { it.id }.toSet()
+    return sharedIds.size + rows.count { it.shared != true }
 }
 
 const val VOLUME_TYPE_ALL = "all"

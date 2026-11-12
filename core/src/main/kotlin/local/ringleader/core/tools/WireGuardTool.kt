@@ -23,6 +23,7 @@ class WireGuardToolPlugin(
     },
     private val pause: suspend (Long) -> Unit = { kotlinx.coroutines.delay(it) },
     private val clock: () -> Instant = Instant::now,
+    private val nanoTime: () -> Long = System::nanoTime,
 ) : ToolPlugin {
     override val id = "wireguard"
     override val name = "WireGuard"
@@ -80,27 +81,31 @@ class WireGuardToolPlugin(
         var endpoint = ""
         var elapsed = 0
         var ping: ToolResult? = null
+        var previousAt = nanoTime()
         try {
             while (elapsed <= seconds) {
                 coroutineContext.ensureActive()
                 val snap = withContext(Dispatchers.IO) { backend.snapshot() }
+                val sampleAt = nanoTime()
                 snapshot = snap
                 val counters = peerCounters(snap, tunnelId, address)
                 handshake = handshakeAge(counters.handshake, clock())
                 endpoint = counters.endpoint.orEmpty()
                 emit(ToolEvent.Line("handshake $handshake${if (endpoint.isBlank()) "" else " · $endpoint"}"))
                 if (previous != null) {
-                    rateMbps(previous.first, counters.rx, 2.0)?.let { rate ->
+                    val interval = (sampleAt - previousAt) / 1_000_000_000.0
+                    rateMbps(previous.first, counters.rx, interval)?.let { rate ->
                         lastRx = rate
                         emit(ToolEvent.Sample("receive", elapsed.toDouble(), rate, "Mbit/s"))
                     }
-                    rateMbps(previous.second, counters.tx, 2.0)?.let { rate ->
+                    rateMbps(previous.second, counters.tx, interval)?.let { rate ->
                         lastTx = rate
                         emit(ToolEvent.Sample("send", elapsed.toDouble(), rate, "Mbit/s"))
                     }
                     emit(ToolEvent.Line("receive ${formatNumber(lastRx)} Mbit/s · send ${formatNumber(lastTx)} Mbit/s"))
                 }
                 previous = counters.rx to counters.tx
+                previousAt = sampleAt
                 if (ping == null) {
                     emit(ToolEvent.Status("Checking $address"))
                     ping = pinger(address, emit)
@@ -151,7 +156,7 @@ internal fun peerCounters(snap: VpnSnapshot, tunnelId: String, address: String):
         val peer = snap.tailscale?.peers?.firstOrNull { address in it.addresses }
         val self = snap.tailscale?.self?.takeIf { address in it.addresses }
         val chosen = peer ?: self
-        return PeerCounters(chosen?.rxBytes, chosen?.txBytes, null, chosen?.direct ?: chosen?.relay)
+        return PeerCounters(chosen?.rxBytes, chosen?.txBytes, chosen?.lastHandshake?.epochSecond, chosen?.direct ?: chosen?.relay)
     }
     val name = tunnelId.removePrefix("wg:")
     val iface = snap.wireguard.firstOrNull { it.name == name }

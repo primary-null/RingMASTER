@@ -242,7 +242,8 @@ class NodeStorageTest {
     @Test fun stoppedGuestInspectionSkipsTheAddressLookup() {
         for (status in listOf("stopped", "running")) {
             val paths = mutableListOf<String>()
-            fixture(responseBody = """{"data":{}}""", onPath = { paths += it }) { address, pin, _, _, _ ->
+            val queries = mutableListOf<String?>()
+            fixture(responseBody = """{"data":{}}""", onPath = { paths += it }, queries = queries) { address, pin, _, _, _ ->
                 Connection(address, "fixture@pve!read", "test-only", pin).use { connection ->
                     val guest = Guest(connection.remoteKey, 112, "desktop", "node-a", "VM", status)
                     val inspection = kotlinx.coroutines.runBlocking { LiveGuestInspectionGateway().read(connection, guest, emptyList(), "hour") }
@@ -250,7 +251,9 @@ class NodeStorageTest {
                 }
             }
             assertEquals(status == "running", paths.any { "/agent/" in it }, "agent lookup for a $status guest")
-            assertTrue(paths.any { it.endsWith("/rrddata") || "/rrddata" in it }, "history still read for a $status guest")
+            assertFalse(paths.any { "rrddata" in it }, "guest inspection does not read history")
+            assertTrue(paths.any { it.endsWith("/pending") }, "pending config is read")
+            assertTrue(queries.any { it == "current=1" }, "a non-list pending body falls back to the live config")
         }
     }
 

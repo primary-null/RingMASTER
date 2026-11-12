@@ -54,6 +54,7 @@ data class TechPalette(
     val amberWash: Color,  // faint amber fill for an active control
     val materialPanel: Color = panel,  // always opaque: menus and dialogs stay readable over a background image
     val materialRaised: Color = raised,
+    val ground: Color = canvas,        // always opaque: the window's own background, behind a background image too
 ) {
     /** Over a background image the window clears and surfaces turn glassy; edges and text keep full strength. */
     fun withBackdrop() = copy(canvas = Color.Transparent, panel = panel.copy(alpha = if (light) .80f else .74f), raised = raised.copy(alpha = if (light) .86f else .82f),
@@ -65,12 +66,33 @@ val DarkPalette = TechPalette(false,
     ink = Color(0xFFF0F1EE), muted = Color(0xFF939B97), amber = Color(0xFFFF9800), green = Color(0xFF69F0AE), red = Color(0xFFFF7772),
     onAccent = Color(0xFF050505), amberWash = Color(0xFF2B2216))
 
+// Toned down one step (owner, 2026-11-11): panels were near white and glared on large screens. Accents and muted text
+// were deepened with the grounds so every text/ground pair keeps at least its earlier WCAG contrast.
 val LightPalette = TechPalette(true,
-    canvas = Color(0xFFDDE0E3), black = Color(0xFFD3D6DA), panel = Color(0xFFEDEEF0), raised = Color(0xFFE0E3E6), edge = Color(0xFFADB2B8),
-    ink = Color(0xFF1A1D20), muted = Color(0xFF575E66), amber = Color(0xFFC25400), green = Color(0xFF1B7A3A), red = Color(0xFFC62828),
-    onAccent = Color(0xFFFFFFFF), amberWash = Color(0xFFF5E2CC))
+    canvas = Color(0xFFCDD1D5), black = Color(0xFFC6CACF), panel = Color(0xFFDFE2E5), raised = Color(0xFFD3D7DB), edge = Color(0xFF9EA4AB),
+    ink = Color(0xFF1A1D20), muted = Color(0xFF4E555C), amber = Color(0xFFB34D00), green = Color(0xFF17703A), red = Color(0xFFB71C1C),
+    onAccent = Color(0xFFFFFFFF), amberWash = Color(0xFFEBD6BF))
 
-enum class ThemeMode(val label: String) { System("System"), Dark("Dark"), Light("Light") }
+/**
+ * Pitch Black (owner, 2026-11-11): true black window, panels and wells for OLED screens, so unlit pixels stay off.
+ * Panels are told apart by their edges, a touch brighter than Dark's; one barely lifted shade marks surfaces that sit on
+ * top (selected rows, menus, dialogs). Text and accents keep the Dark values, which read even stronger on black.
+ */
+val PitchBlackPalette = TechPalette(false,
+    canvas = Color(0xFF000000), black = Color(0xFF000000), panel = Color(0xFF000000), raised = Color(0xFF0F1010), edge = Color(0xFF3A3F3E),
+    ink = Color(0xFFF0F1EE), muted = Color(0xFF939B97), amber = Color(0xFFFF9800), green = Color(0xFF69F0AE), red = Color(0xFFFF7772),
+    onAccent = Color(0xFF000000), amberWash = Color(0xFF241A0C),
+    materialPanel = Color(0xFF0A0B0B), materialRaised = Color(0xFF151717))
+
+enum class ThemeMode(val label: String) { System("System"), Dark("Dark"), Light("Light"), PitchBlack("Pitch Black") }
+
+/** The palette a theme draws with, before any background image. System follows the operating system's light or dark. */
+fun basePalette(theme: ThemeMode, systemLight: Boolean): TechPalette = when (theme) {
+    ThemeMode.Light -> LightPalette
+    ThemeMode.PitchBlack -> PitchBlackPalette
+    ThemeMode.Dark -> DarkPalette
+    ThemeMode.System -> if (systemLight) LightPalette else DarkPalette
+}
 /** Blur radius as a fraction of the text size, so large titles hide as well as small labels. */
 enum class ShowcaseStrength(val label: String, val factor: Float) { Light("Light", .22f), Medium("Medium", .32f), Strong("Strong", .45f) }
 
@@ -93,7 +115,12 @@ object Appearance {
     var blur by mutableStateOf(22f); private set                   // px at 720px working size, 0..48
     var dim by mutableStateOf(.42f); private set                   // 0..0.8
     var vignette by mutableStateOf(.55f); private set              // 0..0.8
+    /** What is drawn now. On a theme change it follows [targetPalette] once every [ThemeCrossfade] on screen has its picture of the old look. */
     var palette by mutableStateOf(DarkPalette); private set
+    /** The palette the chosen theme and background ask for. */
+    var targetPalette by mutableStateOf(DarkPalette); private set
+    /** The one crossfade that switches [palette]; browser sessions compose their own copies, and only one may switch it. */
+    private var transitionOwner: Any? = null
     /**
      * Whole-interface zoom on top of the OS scaling (Windows 125 % makes everything 1.25x), chosen per display: a 4K
      * screen, a 3K screen and a portrait 1080p screen each keep their own. A display nobody chose for uses Auto
@@ -114,9 +141,10 @@ object Appearance {
     fun load() {
         if (loaded) return
         loaded = true
-        systemLight = detectSystemLight()
         val p = ConfigSchemas.properties(file)
         theme = runCatching { ThemeMode.valueOf(p.getProperty("theme", "Dark")) }.getOrDefault(ThemeMode.Dark)
+        // Start-up waits a moment for the OS theme only when it is used; a slow tool never holds the window for long.
+        detectSystemLight(if (theme == ThemeMode.System) 400 else 0)
         textScale = normalizeTextScale(p.getProperty("textScale")?.toFloatOrNull() ?: 1f)
         showcase = p.getProperty("showcase") == "true"
         strength = runCatching { ShowcaseStrength.valueOf(p.getProperty("strength", "Strong")) }.getOrDefault(ShowcaseStrength.Strong)
@@ -136,15 +164,39 @@ object Appearance {
     val isLight get() = theme == ThemeMode.Light || (theme == ThemeMode.System && systemLight)
 
     /** Screenshot tests: switch theme and showcase in memory only; nothing is read from or written to disk. */
-    internal fun preview(light: Boolean, showcase: Boolean = false, textScale: Float = 1f) {
+    internal fun preview(light: Boolean, showcase: Boolean = false, textScale: Float = 1f) =
+        preview(if (light) ThemeMode.Light else ThemeMode.Dark, showcase, textScale)
+
+    /** As [preview], for any theme. [ease] lets an attached [ThemeCrossfade] fade to it instead of switching at once. */
+    internal fun preview(theme: ThemeMode, showcase: Boolean = false, textScale: Float = 1f, ease: Boolean = false) {
         this.textScale = normalizeTextScale(textScale)
-        loaded = true; theme = if (light) ThemeMode.Light else ThemeMode.Dark; this.showcase = showcase; background = null; refresh()
+        loaded = true; this.theme = theme; this.showcase = showcase; background = null; refresh()
+        if (!ease) palette = targetPalette
     }
+
+    internal fun attachTransition(owner: Any): Boolean = synchronized(this) {
+        if (transitionOwner == null) transitionOwner = owner
+        transitionOwner === owner
+    }
+    /** The switching crossfade left: the palette lands on the target at once. */
+    internal fun detachTransition(owner: Any) = synchronized(this) {
+        if (transitionOwner === owner) { transitionOwner = null; palette = targetPalette }
+    }
+    internal fun drivesTransition(owner: Any): Boolean = transitionOwner === owner
+    internal fun showPalette(owner: Any, value: TechPalette) { if (transitionOwner === owner) palette = value }
 
     internal fun normalizeTextScale(value: Float): Float = if (!value.isFinite()) 1f else Math.round(value.coerceIn(.85f, 1.5f) * 20) / 20f
     fun chooseTextScale(value: Float) { textScale = normalizeTextScale(value); save() }
 
-    fun chooseTheme(value: ThemeMode) { theme = value; refresh(); save() }
+    private var systemCheckedAt = 0L
+    /** System theme: ask the operating system again (the window came back to the front), at most every 20 s. A changed answer fades in. */
+    fun recheckSystemTheme(now: Long = System.currentTimeMillis()) {
+        if (theme != ThemeMode.System || now - systemCheckedAt < 20_000) return
+        systemCheckedAt = now
+        detectSystemLight(0)
+    }
+
+    fun chooseTheme(value: ThemeMode) { theme = value; refresh(); save(); if (value == ThemeMode.System) detectSystemLight(0) }
     fun chooseShowcase(on: Boolean) { showcase = on; save() }
     fun toggleShowcase() = chooseShowcase(!showcase)
     fun chooseStrength(value: ShowcaseStrength) { strength = value; save() }
@@ -170,8 +222,10 @@ object Appearance {
     const val MAX_SCALE = 2f
 
     private fun refresh() {
-        val base = if (isLight) LightPalette else DarkPalette
-        palette = if (background != null) base.withBackdrop() else base
+        val base = basePalette(theme, systemLight)
+        targetPalette = if (background != null) base.withBackdrop() else base
+        // Without a driver (start-up, tests, a window that is not composed) the palette switches at once.
+        if (transitionOwner == null) palette = targetPalette
     }
 
     private fun save() = runCatching {
@@ -190,19 +244,69 @@ object Appearance {
         finally { Files.deleteIfExists(temp) }
     }.onFailure { SaveStatus.report("Appearance", it) }
 
-    /** Windows: AppsUseLightTheme; Linux: the GNOME color-scheme. Anything else, or any failure, means dark. */
-    private fun detectSystemLight(): Boolean = runCatching {
-        val os = System.getProperty("os.name").lowercase()
-        val command = when {
-            os.startsWith("windows") -> listOf("reg", "query", "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize", "/v", "AppsUseLightTheme")
-            os.contains("linux") -> listOf("gsettings", "get", "org.gnome.desktop.interface", "color-scheme")
-            else -> return false
+    /**
+     * Reads the operating system theme on a background thread. [wait] is how long the caller may block for the answer
+     * (start-up waits briefly only when the theme is System, so the first frame is already right); a slower answer
+     * applies when it arrives. The tools themselves are killed after a few seconds, so nothing is left hanging.
+     */
+    private fun detectSystemLight(wait: Long) {
+        val pending = java.util.concurrent.CompletableFuture.supplyAsync { SystemTheme.detect() }
+        if (wait > 0) runCatching { systemLight = pending.get(wait, java.util.concurrent.TimeUnit.MILLISECONDS) }
+        pending.thenAccept { light -> javax.swing.SwingUtilities.invokeLater { if (light != systemLight) { systemLight = light; refresh() } } }
+    }
+}
+
+/**
+ * Whether the operating system asks for a light theme. Windows: `AppsUseLightTheme`. Linux: the freedesktop appearance
+ * portal's `color-scheme` (GNOME, KDE and others answer it), then Xfce's theme name, then the GNOME `color-scheme`
+ * setting. Anything else, an absent tool or any failure means dark.
+ */
+internal object SystemTheme {
+    /** `reg query ... /v AppsUseLightTheme`: 0x1 is light. */
+    fun parseWindows(output: String): Boolean? =
+        Regex("""AppsUseLightTheme\s+REG_DWORD\s+0x([0-9A-Fa-f]+)""").find(output)?.groupValues?.get(1)?.toIntOrNull(16)?.let { it != 0 }
+
+    /** Portal `Settings.Read` or `ReadOne`: `uint32 1` is dark, `2` light, `0` no preference (null). */
+    fun parsePortal(output: String): Boolean? = when (Regex("""uint32\s+(\d+)""").find(output)?.groupValues?.get(1)?.toIntOrNull()) {
+        1 -> false
+        2 -> true
+        else -> null
+    }
+
+    /** `gsettings get org.gnome.desktop.interface color-scheme`: GNOME's 'default' is its light look. */
+    fun parseGnome(output: String): Boolean? = when {
+        output.contains("prefer-dark") -> false
+        output.contains("prefer-light") || output.contains("'default'") -> true
+        else -> null
+    }
+
+    /** `xfconf-query -c xsettings -p /Net/ThemeName`: a theme with "dark" in its name is dark, any other is light. */
+    fun parseXfceTheme(output: String): Boolean? = output.trim().takeIf { it.isNotEmpty() }?.let { !it.contains("dark", ignoreCase = true) }
+
+    /** [run] returns a tool's output, or null when it is missing, failed or timed out. [desktop] is `XDG_CURRENT_DESKTOP`. */
+    fun detect(osName: String, desktop: String?, run: (List<String>) -> String?): Boolean {
+        val os = osName.lowercase()
+        if (os.startsWith("windows")) {
+            val reg = System.getenv("SystemRoot")?.let { java.io.File(it, "System32/reg.exe") }?.takeIf { it.isFile }?.path ?: "reg"
+            return run(listOf(reg, "query", "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize", "/v", "AppsUseLightTheme"))?.let(::parseWindows) ?: false
         }
+        if (!os.contains("linux")) return false
+        run(listOf("gdbus", "call", "--session", "--timeout", "2", "--dest", "org.freedesktop.portal.Desktop", "--object-path", "/org/freedesktop/portal/desktop",
+            "--method", "org.freedesktop.portal.Settings.Read", "org.freedesktop.appearance", "color-scheme"))?.let(::parsePortal)?.let { return it }
+        if (desktop.orEmpty().contains("xfce", ignoreCase = true))
+            run(listOf("xfconf-query", "-c", "xsettings", "-p", "/Net/ThemeName"))?.let(::parseXfceTheme)?.let { return it }
+        return run(listOf("gsettings", "get", "org.gnome.desktop.interface", "color-scheme"))?.let(::parseGnome) ?: false
+    }
+
+    fun detect(): Boolean = runCatching { detect(System.getProperty("os.name").orEmpty(), System.getenv("XDG_CURRENT_DESKTOP"), ::runTool) }.getOrDefault(false)
+
+    private fun runTool(command: List<String>): String? = try {
         val process = ProcessBuilder(command).redirectErrorStream(true).start()
-        val out = process.inputStream.bufferedReader().readText()
-        process.waitFor(3, java.util.concurrent.TimeUnit.SECONDS)
-        if (os.startsWith("windows")) Regex("AppsUseLightTheme\\s+REG_DWORD\\s+0x1").containsMatchIn(out) else out.contains("prefer-light") || out.contains("'default'")
-    }.getOrDefault(false)
+        process.outputStream.close()
+        if (!process.waitFor(3, java.util.concurrent.TimeUnit.SECONDS)) { process.destroyForcibly(); null }
+        else if (process.exitValue() != 0) null
+        else process.inputStream.bufferedReader().use { it.readText() }
+    } catch (_: java.io.IOException) { null } catch (_: SecurityException) { null }
 }
 
 /**
@@ -295,8 +399,8 @@ object Backgrounds {
 }
 
 /**
- * Full-window background: the picked image (cover), a scrim at the dim level (black in dark, the light canvas grey in
- * light), and a vignette toward the edges. Content draws on top; Tech surfaces are glassy while a background is set.
+ * Full-window background: the picked image (cover), a scrim at the dim level (black in the dark themes, the light canvas
+ * grey in light), and a vignette toward the edges. The ground under it is the theme's own and fades with a theme change. Content draws on top; Tech surfaces are glassy while a background is set.
  */
 @Composable fun BackdropHost(content: @Composable BoxScope.() -> Unit) {
     val name = Appearance.background
@@ -305,10 +409,10 @@ object Backgrounds {
         value = if (name == null) null else kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { Backgrounds.render(name, blur) }
     }
     val palette = Appearance.palette
-    Box(Modifier.fillMaxSize().background(if (palette.light) LightPalette.canvas else DarkPalette.canvas)) {
+    Box(Modifier.fillMaxSize().background(palette.ground)) {
         image?.let { bitmap ->
             Image(bitmap, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
-            val scrim = if (palette.light) LightPalette.canvas else Color.Black
+            val scrim = if (palette.light) palette.ground else Color.Black
             val dim = Appearance.dim; val vignette = Appearance.vignette
             Box(Modifier.fillMaxSize().drawBehind {
                 drawRect(scrim.copy(alpha = dim))

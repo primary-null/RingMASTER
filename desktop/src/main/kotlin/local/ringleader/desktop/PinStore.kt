@@ -4,11 +4,15 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import java.net.URI
+import java.nio.ByteBuffer
+import java.nio.channels.FileChannel
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
+import java.nio.file.StandardOpenOption
 import java.util.UUID
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonArray
@@ -58,17 +62,26 @@ data class Pin(
     val serviceUrl: String? = null,
 )
 
-internal enum class PinLiveness { Missing, Running, Stopped, Busy }
+internal enum class PinLiveness { Missing, Running, Stopped, Busy, Stale }
 
-/** Live dot for a pin. Amber wins while a task or submission for that guest is still in progress. */
-internal fun pinLiveness(guest: Guest?, tasks: List<ClusterTask>?, submissions: List<PowerSubmission>): PinLiveness {
+/** Console sessions this app opens. They do not mean the guest itself is busy. */
+private val consoleTaskTypes = setOf("vncproxy", "vncshell", "spiceproxy", "termproxy", "spiceshell")
+
+/**
+ * Live dot for a pin. A real guest task or a submission still in progress wins, including when inventory is old.
+ * [stale] is the inventory flag. Console task types are not guest work.
+ */
+internal fun pinLiveness(guest: Guest?, tasks: List<ClusterTask>?, submissions: List<PowerSubmission>, stale: Boolean = false): PinLiveness {
     if (guest == null) return PinLiveness.Missing
-    val busyTask = tasks.orEmpty().any { it.outcome == TaskOutcome.Running && it.remote == guest.remote && it.subjectId == guest.id.toString() }
+    val busyTask = tasks.orEmpty().any {
+        it.outcome == TaskOutcome.Running && it.remote == guest.remote && it.subjectId == guest.id.toString() && it.type !in consoleTaskTypes
+    }
     val busySubmit = submissions.any {
         it.remote == guest.remote && it.vmid == guest.id && it.kind == guest.kind &&
             (it.checking || it.phase == PowerPhase.Accepted || it.phase == PowerPhase.Unknown)
     }
     if (busyTask || busySubmit) return PinLiveness.Busy
+    if (stale) return PinLiveness.Stale
     return if (guest.status == "running") PinLiveness.Running else PinLiveness.Stopped
 }
 
@@ -86,6 +99,7 @@ internal fun Pin.railLabel(guest: Guest?): String {
 internal fun pinLivenessLabel(liveness: PinLiveness, guest: Guest?): String = when (liveness) {
     PinLiveness.Missing -> "Not in this connection"
     PinLiveness.Busy -> "In progress"
+    PinLiveness.Stale -> "Data is old"
     PinLiveness.Running -> "Running"
     PinLiveness.Stopped -> guest?.status?.replaceFirstChar { it.uppercase() }?.ifBlank { null } ?: "Stopped"
 }
@@ -137,6 +151,7 @@ internal fun serviceAddressError(url: String): String? {
     if (scheme != "http" && scheme != "https") return "Use an http or https address with a host."
     if (!trimmed.startsWith("$scheme://")) return "Use an http or https address with a host."
     if (uri.rawUserInfo != null || uri.userInfo != null) return "An address cannot include a username or password."
+    if ('?' in trimmed || '#' in trimmed || uri.rawQuery != null || uri.rawFragment != null) return "An address cannot include a query or a fragment."
     if (uri.host.isNullOrBlank()) return "Use an http or https address with a host."
     return null
 }
@@ -156,13 +171,17 @@ internal fun serviceUrlForHost(host: String): String {
 internal fun pinsFile(): Path = profileFile().resolveSibling("pins.json")
 
 /**
- * Pins beside the profile file (`pins.json`). A missing or corrupt file leaves an empty list so the
- * app still opens. Writes are atomic (temp file, then ATOMIC_MOVE). A failed write is reported and
- * the in-memory list is kept until RingMASTER closes.
+ * Pins beside the profile file (`pins.json`). A missing file starts empty. A corrupt file, a missing
+ * version, or a newer version is left untouched and saving is blocked. Writes force the temp file to
+ * disk, then move it into place. A failed write is reported and the in-memory list is kept until
+ * RingMASTER closes.
  *
  * Reorder is Move up / Move down on the row menu. Dragging inside the narrow rail was skipped.
  */
 class PinStore(private val file: Path = pinsFile()) {
+    private var blockedMessage: String? = null
+    private var slots: LinkedHashMap<String, Slot> = linkedMapOf()
+    private var extras: JsonObject = buildJsonObject { }
     var byConnection by mutableStateOf(load())
         private set
 
@@ -190,8 +209,9 @@ class PinStore(private val file: Path = pinsFile()) {
         replace(connectionKey, next)
     }
 
-    /** Null when the service was stored. A message when the name or address was refused. */
+    /** Null when the service was stored. A message when the name or address was refused, or saving is blocked. */
     fun addService(connectionKey: String, guest: Guest, name: String, url: String): String? {
+        refuse()?.let { return it }
         if (!keyOk(connectionKey) || !guestOk(guest)) return "This guest cannot be pinned."
         serviceNameError(name)?.let { return it }
         serviceAddressError(url)?.let { return it }
@@ -225,34 +245,54 @@ class PinStore(private val file: Path = pinsFile()) {
      * origin. The origin bucket is removed and the file is written once. Nothing is written when there is nothing to move.
      */
     fun adoptOriginPins(origin: String, profileId: String) {
+        if (refuse() != null) return
         val from = origin.trim()
         if (from.isBlank() || from == profileId || from == PIN_CONNECTION_DEMO || profileId == PIN_CONNECTION_DEMO) return
         if (!keyOk(from) || !keyOk(profileId)) return
-        val moving = list(from)
+        val source = slots[from] as? Slot.Rows ?: return
+        val moving = source.rows.filterIsInstance<PinRow.Known>()
         if (moving.isEmpty()) return
-        val merged = (list(profileId) + moving).distinctBy { listOf(it.guestKind, it.vmid, it.scope, it.target, it.tab, it.serviceUrl) }
-        val next = byConnection.toMutableMap()
-        next.remove(from)
-        next[profileId] = merged
-        byConnection = next
+        val destination = (slots[profileId] as? Slot.Rows)?.rows.orEmpty()
+        val destKnown = destination.filterIsInstance<PinRow.Known>()
+        val merged = (destKnown.map { it.pin } + moving.map { it.pin }).distinctBy { listOf(it.guestKind, it.vmid, it.scope, it.target, it.tab, it.serviceUrl) }
+        val extrasById = (destKnown + moving).associate { it.pin.id to it.extra }
+        val opaque = destination.filterIsInstance<PinRow.Opaque>() + source.rows.filterIsInstance<PinRow.Opaque>()
+        val rows = merged.map { pin -> PinRow.Known(pin, extrasById[pin.id] ?: buildJsonObject { }) } + opaque
+        slots.remove(from)
+        slots[profileId] = Slot.Rows(rows)
+        byConnection = knownMap()
         persist()
     }
 
     private fun replace(connectionKey: String, pins: List<Pin>) {
-        val next = byConnection.toMutableMap()
-        if (pins.isEmpty()) next.remove(connectionKey) else next[connectionKey] = pins
-        byConnection = next
+        if (refuse() != null) return
+        val existing = (slots[connectionKey] as? Slot.Rows)?.rows.orEmpty()
+        val extrasById = existing.filterIsInstance<PinRow.Known>().associate { it.pin.id to it.extra }
+        val opaque = existing.filterIsInstance<PinRow.Opaque>()
+        if (pins.isEmpty() && opaque.isEmpty()) slots.remove(connectionKey)
+        else slots[connectionKey] = Slot.Rows(pins.map { pin -> PinRow.Known(pin, extrasById[pin.id] ?: buildJsonObject { }) } + opaque)
+        byConnection = knownMap()
         persist()
     }
 
+    /** The blocked message, after showing it again. Null when saving is allowed. */
+    private fun refuse(): String? {
+        val message = blockedMessage ?: return null
+        SaveStatus.notice(message)
+        return message
+    }
+
     private fun persist() {
-        if (!ConfigSchemas.writable(file)) return
+        if (blockedMessage != null) return
         runCatching {
             val parent = file.parent ?: error("The pins file has no folder.")
             Files.createDirectories(parent)
             val temp = Files.createTempFile(parent, "pins-", ".tmp")
             try {
-                Files.writeString(temp, encode(byConnection))
+                FileChannel.open(temp, StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING).use { channel ->
+                    channel.write(ByteBuffer.wrap(encodePins(slots, extras).toByteArray(Charsets.UTF_8)))
+                    channel.force(true)
+                }
                 Files.move(temp, file, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
             } finally {
                 Files.deleteIfExists(temp)
@@ -260,13 +300,56 @@ class PinStore(private val file: Path = pinsFile()) {
         }.onFailure { SaveStatus.report("Pins", it) }
     }
 
-    private fun load(): Map<String, List<Pin>> = runCatching {
+    private fun load(): Map<String, List<Pin>> {
+        blockedMessage = null
+        slots = linkedMapOf()
+        extras = buildJsonObject { }
         if (!Files.isRegularFile(file)) return emptyMap()
-        val text = Files.readString(file)
-        val schema = pinJson.parseToJsonElement(text).jsonObject["version"]?.jsonPrimitive?.intOrNull ?: 1
-        if (ConfigSchemas.newer(file, schema, PIN_VERSION)) return emptyMap()
-        decode(text)
-    }.getOrDefault(emptyMap())
+        val text = try {
+            Files.readString(file)
+        } catch (_: Exception) {
+            return block(PIN_UNREADABLE)
+        }
+        val root = try {
+            pinJson.parseToJsonElement(text) as? JsonObject
+        } catch (_: Exception) {
+            null
+        } ?: return block(PIN_UNREADABLE)
+        val version = try {
+            root["version"]?.jsonPrimitive?.intOrNull
+        } catch (_: Exception) {
+            null
+        }
+        if (!root.containsKey("version") || version == null || version < 1) return block(PIN_UNSUPPORTED)
+        if (ConfigSchemas.newer(file, version, PIN_VERSION)) {
+            blockedMessage = PIN_NEWER
+            return emptyMap()
+        }
+        val connections = root["connections"]
+        if (connections != null && connections !is JsonObject) return block(PIN_UNREADABLE)
+        extras = JsonObject(root.filterKeys { it != "version" && it != "connections" })
+        (connections as? JsonObject)?.forEach { (key, value) ->
+            val array = value as? JsonArray
+            slots[key] = if (!keyOk(key) || array == null) Slot.Raw(value) else Slot.Rows(array.map(::parseRow))
+        }
+        return knownMap()
+    }
+
+    private fun block(message: String): Map<String, List<Pin>> {
+        blockedMessage = message
+        slots = linkedMapOf()
+        extras = buildJsonObject { }
+        SaveStatus.notice(message)
+        return emptyMap()
+    }
+
+    private fun knownMap(): Map<String, List<Pin>> = buildMap {
+        slots.forEach { (key, slot) ->
+            val rows = (slot as? Slot.Rows)?.rows ?: return@forEach
+            val pins = rows.filterIsInstance<PinRow.Known>().map { it.pin }
+            if (pins.isNotEmpty()) put(key, pins)
+        }
+    }
 
     private fun pin(guest: Guest, target: String, tab: String? = null, serviceName: String? = null, serviceUrl: String? = null) = Pin(
         id = UUID.randomUUID().toString(),
@@ -292,45 +375,65 @@ private fun guestLabel(guest: Guest): String {
     return raw.ifBlank { "Guest ${guest.id}" }
 }
 
-private fun encode(connections: Map<String, List<Pin>>): String {
-    val root = buildJsonObject {
-        put("version", PIN_VERSION)
-        put("connections", buildJsonObject {
-            connections.forEach { (key, pins) ->
-                put(key, buildJsonArray {
-                    pins.forEach { pin ->
-                        add(buildJsonObject {
-                            put("id", pin.id)
-                            put("guestKind", pin.guestKind)
-                            put("vmid", pin.vmid)
-                            put("scope", pin.scope)
-                            put("guestName", pin.guestName)
-                            put("target", pin.target)
-                            pin.tab?.let { put("tab", it) }
-                            pin.serviceName?.let { put("serviceName", it) }
-                            pin.serviceUrl?.let { put("serviceUrl", it) }
-                        })
+private const val PIN_UNREADABLE = "pins.json could not be read. The file was left unchanged."
+private const val PIN_UNSUPPORTED = "pins.json uses an unsupported version. The file was left unchanged."
+private const val PIN_NEWER = "pins.json was written by a newer RingMASTER and is left untouched."
+private val knownPinKeys = setOf("id", "guestKind", "vmid", "scope", "guestName", "target", "tab", "serviceName", "serviceUrl")
+
+private sealed class PinRow {
+    data class Known(val pin: Pin, val extra: JsonObject) : PinRow()
+    data class Opaque(val raw: JsonElement) : PinRow()
+}
+
+private sealed class Slot {
+    data class Rows(val rows: List<PinRow>) : Slot()
+    data class Raw(val element: JsonElement) : Slot()
+}
+
+private fun encodePins(slots: Map<String, Slot>, extras: JsonObject): String {
+    val connections = buildJsonObject {
+        slots.forEach { (key, slot) ->
+            when (slot) {
+                is Slot.Raw -> put(key, slot.element)
+                is Slot.Rows -> put(key, buildJsonArray {
+                    slot.rows.forEach { row ->
+                        when (row) {
+                            is PinRow.Opaque -> add(row.raw)
+                            is PinRow.Known -> add(encodePin(row))
+                        }
                     }
                 })
             }
-        })
+        }
+    }
+    val root = buildJsonObject {
+        extras.forEach { (key, value) -> put(key, value) }
+        put("version", PIN_VERSION)
+        put("connections", connections)
     }
     return pinJson.encodeToString(JsonElement.serializer(), root)
 }
 
-private fun decode(text: String): Map<String, List<Pin>> {
-    val root = pinJson.parseToJsonElement(text).jsonObject
-    if (root["version"]?.jsonPrimitive?.intOrNull != PIN_VERSION) return emptyMap()
-    val connections = root["connections"] as? JsonObject ?: return emptyMap()
-    val parsed = linkedMapOf<String, List<Pin>>()
-    connections.forEach { (key, value) ->
-        if (!keyOk(key)) return@forEach
-        val pins = runCatching { value.jsonArray }.getOrNull()?.mapNotNull { element ->
-            (element as? JsonObject)?.let(::parsePin)
-        }.orEmpty()
-        if (pins.isNotEmpty()) parsed[key] = pins
+private fun encodePin(row: PinRow.Known): JsonObject {
+    val written = buildJsonObject {
+        put("id", row.pin.id)
+        put("guestKind", row.pin.guestKind)
+        put("vmid", row.pin.vmid)
+        put("scope", row.pin.scope)
+        put("guestName", row.pin.guestName)
+        put("target", row.pin.target)
+        row.pin.tab?.let { put("tab", it) }
+        row.pin.serviceName?.let { put("serviceName", it) }
+        row.pin.serviceUrl?.let { put("serviceUrl", it) }
     }
-    return parsed
+    if (row.extra.isEmpty()) return written
+    return JsonObject(row.extra.toMutableMap().apply { putAll(written) })
+}
+
+private fun parseRow(element: JsonElement): PinRow {
+    val obj = element as? JsonObject ?: return PinRow.Opaque(element)
+    val pin = parsePin(obj) ?: return PinRow.Opaque(element)
+    return PinRow.Known(pin, JsonObject(obj.filterKeys { it !in knownPinKeys }))
 }
 
 private fun parsePin(row: JsonObject): Pin? {

@@ -17,7 +17,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asComposeImageBitmap
 import androidx.compose.ui.input.key.*
+import androidx.compose.ui.awt.awtEventOrNull
+import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.isPrimaryPressed
 import androidx.compose.ui.input.pointer.isSecondaryPressed
@@ -135,22 +139,98 @@ private fun Key.fallbackChar(): Int? = when (this) {
     else -> null
 }
 
-/** View-local point to a framebuffer pixel. Null when the point is in the letterbox. */
-internal fun vncPointerPoint(localX: Float, localY: Float, viewW: Float, viewH: Float, fbW: Int, fbH: Int, fit: Boolean): Pair<Int, Int>? {
-    if (fbW <= 0 || fbH <= 0 || viewW <= 0f || viewH <= 0f) return null
-    if (!fit) {
-        if (localX < 0f || localY < 0f || localX >= fbW || localY >= fbH) return null
-        return localX.toInt().coerceIn(0, fbW - 1) to localY.toInt().coerceIn(0, fbH - 1)
-    }
-    val scale = min(viewW / fbW, viewH / fbH)
-    if (scale <= 0f) return null
-    val width = fbW * scale
-    val height = fbH * scale
-    val left = (viewW - width) / 2f
-    val top = (viewH - height) / 2f
-    if (localX < left || localY < top || localX >= left + width || localY >= top + height) return null
-    return ((localX - left) / scale).toInt().coerceIn(0, fbW - 1) to ((localY - top) / scale).toInt().coerceIn(0, fbH - 1)
+/**
+ * Where the framebuffer is drawn in the view, in view pixels. [sharp] is true at a whole-number scale, where the
+ * frame is drawn with nearest-neighbour sampling so text stays crisp. Fit mode snaps down to a whole scale when the
+ * view is at most 10 % larger than that, trading a slightly wider border for sharp pixels.
+ */
+internal class VncFrameLayout(val left: Int, val top: Int, val width: Int, val height: Int, val scale: Float, val sharp: Boolean)
+
+internal fun vncFrameLayout(viewW: Float, viewH: Float, fbW: Int, fbH: Int, fit: Boolean): VncFrameLayout? {
+    if (fbW <= 0 || fbH <= 0) return null
+    if (!fit) return VncFrameLayout(0, 0, fbW, fbH, 1f, true)
+    if (viewW <= 0f || viewH <= 0f) return null
+    val exact = min(viewW / fbW, viewH / fbH)
+    if (exact <= 0f) return null
+    val whole = kotlin.math.floor(exact)
+    val scale = if (whole >= 1f && exact - whole <= exact * 0.1f) whole else exact
+    val width = (fbW * scale).toInt().coerceAtLeast(1)
+    val height = (fbH * scale).toInt().coerceAtLeast(1)
+    val sharp = scale == whole && width == fbW * whole.toInt() && height == fbH * whole.toInt()
+    return VncFrameLayout(((viewW - width) / 2f).toInt(), ((viewH - height) / 2f).toInt(), width, height, scale, sharp)
 }
+
+/** View-local point to a framebuffer pixel. Null when the point is in the letterbox. Uses the same layout as the draw. */
+internal fun vncPointerPoint(localX: Float, localY: Float, viewW: Float, viewH: Float, fbW: Int, fbH: Int, fit: Boolean): Pair<Int, Int>? {
+    if (viewW <= 0f || viewH <= 0f) return null
+    val layout = vncFrameLayout(viewW, viewH, fbW, fbH, fit) ?: return null
+    val x = localX - layout.left
+    val y = localY - layout.top
+    if (x < 0f || y < 0f || x >= layout.width || y >= layout.height) return null
+    return (x / layout.scale).toInt().coerceIn(0, fbW - 1) to (y / layout.scale).toInt().coerceIn(0, fbH - 1)
+}
+
+/**
+ * RFB XT keycode for a Windows key event. AWT reports the layout's scan code for the key (no E0 flag), so the flag
+ * is restored from the key: the navigation cluster outside the keypad, right Ctrl and Alt, keypad Enter and Divide,
+ * the Windows and menu keys. Print Screen and Pause have fixed codes. Zero when unknown.
+ */
+internal fun windowsXtKeycode(scancode: Int, awtKeyCode: Int, location: Int): Int {
+    if (awtKeyCode == java.awt.event.KeyEvent.VK_PRINTSCREEN) return 0xb7
+    if (awtKeyCode == java.awt.event.KeyEvent.VK_PAUSE) return 0xc6
+    if (scancode !in 1..0x7f) return 0
+    val numpad = location == java.awt.event.KeyEvent.KEY_LOCATION_NUMPAD
+    val right = location == java.awt.event.KeyEvent.KEY_LOCATION_RIGHT
+    val extended = when (awtKeyCode) {
+        java.awt.event.KeyEvent.VK_LEFT, java.awt.event.KeyEvent.VK_RIGHT, java.awt.event.KeyEvent.VK_UP, java.awt.event.KeyEvent.VK_DOWN,
+        java.awt.event.KeyEvent.VK_HOME, java.awt.event.KeyEvent.VK_END, java.awt.event.KeyEvent.VK_PAGE_UP, java.awt.event.KeyEvent.VK_PAGE_DOWN,
+        java.awt.event.KeyEvent.VK_INSERT, java.awt.event.KeyEvent.VK_DELETE -> !numpad
+        java.awt.event.KeyEvent.VK_CONTROL, java.awt.event.KeyEvent.VK_ALT -> right
+        java.awt.event.KeyEvent.VK_ENTER, java.awt.event.KeyEvent.VK_DIVIDE -> numpad
+        java.awt.event.KeyEvent.VK_ALT_GRAPH, java.awt.event.KeyEvent.VK_WINDOWS, java.awt.event.KeyEvent.VK_CONTEXT_MENU, java.awt.event.KeyEvent.VK_META -> true
+        else -> false
+    }
+    return vncXtKeycode(scancode, extended)
+}
+
+/** Linux evdev codes past the main block, as RFB XT keycodes. Codes 1..83 and 86..88 are the XT make code itself. */
+private val evdevExtended = mapOf(
+    96 to 0x9c, 97 to 0x9d, 98 to 0xb5, 99 to 0xb7, 100 to 0xb8, 102 to 0xc7, 103 to 0xc8, 104 to 0xc9, 105 to 0xcb,
+    106 to 0xcd, 107 to 0xcf, 108 to 0xd0, 109 to 0xd1, 110 to 0xd2, 111 to 0xd3, 117 to 0x59, 119 to 0xc6,
+    125 to 0xdb, 126 to 0xdc, 127 to 0xdd,
+)
+
+/** RFB XT keycode for an X11 keycode (evdev code + 8, as Xorg and XWayland use). Zero when unknown. */
+internal fun x11XtKeycode(x11Keycode: Int): Int {
+    val evdev = x11Keycode - 8
+    return when {
+        evdev in 1..83 || evdev in 86..88 -> evdev
+        else -> evdevExtended[evdev] ?: 0
+    }
+}
+
+/** `rawCode` and `scancode` from [java.awt.event.KeyEvent.paramString], the only public view of them. */
+internal fun awtKeyCodes(paramString: String): Pair<Int, Int> {
+    fun field(name: String) = Regex("(?:^|,)$name=(\\d+)").find(paramString)?.groupValues?.get(1)?.toLongOrNull()?.takeIf { it in 0..0xffff }?.toInt() ?: 0
+    return field("rawCode") to field("scancode")
+}
+
+private val windowsHost = System.getProperty("os.name").orEmpty().lowercase().startsWith("windows")
+private val linuxHost = System.getProperty("os.name").orEmpty().lowercase().startsWith("linux")
+
+/** The physical key as an RFB XT keycode, for QEMU extended key events. Zero (keysym only) when it cannot be known. */
+internal fun vncKeycode(event: KeyEvent): Int {
+    val awt = event.awtEventOrNull ?: return 0
+    val (raw, scan) = awtKeyCodes(awt.paramString())
+    return when {
+        windowsHost -> windowsXtKeycode(scan, awt.keyCode, awt.keyLocation)
+        linuxHost -> x11XtKeycode(raw)
+        else -> 0
+    }
+}
+
+/** Identifies one physical key for key-up matching: the key code and its location. */
+private fun keyId(event: KeyEvent): Long = event.key.keyCode
 
 private fun safeConsoleReason(error: Exception): String {
     val raw = when (error) {
@@ -161,10 +241,11 @@ private fun safeConsoleReason(error: Exception): String {
     return if ("vncticket" in raw || "wss://" in raw) VNC_LOST else raw
 }
 
+/** Left Ctrl, left Alt, Delete: keysyms plus XT keycodes (1D, 38, E0 53), so it works with or without extended keys. */
 private fun sendCtrlAltDel(session: VncSession) {
-    val keys = listOf(VncKey.ControlLeft, VncKey.AltLeft, VncKey.Delete)
-    keys.forEach { session.key(true, vncKeysym(it, 0)!!) }
-    keys.asReversed().forEach { session.key(false, vncKeysym(it, 0)!!) }
+    val keys = listOf(VncKey.ControlLeft to 0x1d, VncKey.AltLeft to 0x38, VncKey.Delete to 0xd3)
+    keys.forEach { (key, code) -> session.key(true, vncKeysym(key, 0)!!, code) }
+    keys.asReversed().forEach { (key, code) -> session.key(false, vncKeysym(key, 0)!!, code) }
 }
 
 /**
@@ -192,8 +273,7 @@ private fun sendCtrlAltDel(session: VncSession) {
     var fbW by remember { mutableStateOf(0) }
     var fbH by remember { mutableStateOf(0) }
     var cursor by remember { mutableStateOf<VncCursor?>(null) }
-    var cursorImage by remember { mutableStateOf<ImageBitmap?>(null) }
-    var screen by remember { mutableStateOf<ImageBitmap?>(null) }
+    var screen by remember { mutableStateOf(false) }
     val frames = remember { FramePixels() }
     val pixels = remember { mutableStateOf(IntArray(0)) }
     val focus = remember { FocusRequester() }
@@ -211,10 +291,15 @@ private fun sendCtrlAltDel(session: VncSession) {
         fbH = probe.height
         if (probe.cursor != cursor) {
             cursor = probe.cursor
-            cursorImage = probe.cursor?.let { frames.cursor(it) }
+            frames.cursor(probe.cursor)
         }
-        if (probe.width > 0 && probe.height > 0) screen = frames.write(probe.width, probe.height, dest)
+        if (probe.width > 0 && probe.height > 0) { frames.write(probe.width, probe.height, dest); screen = true }
         frame++
+    }
+    // While this view is composed the guest has a live console, so the Summary page does not auto-capture a still.
+    DisposableEffect(guest.resource) {
+        LiveConsoles.open(guest.resource)
+        onDispose { LiveConsoles.close(guest.resource) }
     }
     DisposableEffect(guest.resource, state.connectionEpoch, reconnect) {
         val uiTrace = Trace.begin(TraceSource.Console, "VNC UI attached")
@@ -239,6 +324,7 @@ private fun sendCtrlAltDel(session: VncSession) {
             uiTrace.end()
             alive.set(false)
             job.cancel()
+            // close() sends a key-up for every held key and button mask 0 before the socket goes.
             box.get()?.let { it.onUpdate = null; it.onClosed = null; it.close() }
             session.value = null
             focused = false
@@ -265,12 +351,15 @@ private fun sendCtrlAltDel(session: VncSession) {
         Box(Modifier.weight(1f).fillMaxWidth().background(Color.Black)) {
             val still = if (!haveFrame) rememberStillBitmap(state.consoleStills[guest.resource]) else null
             if (still != null) Image(still, "Last known screen", Modifier.fillMaxSize().alpha(0.45f), contentScale = ContentScale.Fit)
-            val image = screen
-            if (image != null && haveFrame) {
+            if (screen && haveFrame) {
                 Box(Modifier.fillMaxSize().crtPowerOn(powerOn)) {
                     VncSurface(
-                        image, frame, cursorImage, cursor, fbW, fbH, fit, focused, liveAlpha, session.value, focus,
-                        onFocus = { focused = it; VncKeyboard.captured = it },
+                        frames, frame, cursor, fbW, fbH, fit, focused, liveAlpha, session.value, focus,
+                        onFocus = {
+                            focused = it; VncKeyboard.captured = it
+                            // Keys still held when the keyboard leaves would stay down in the guest.
+                            if (!it) session.value?.releaseInput()
+                        },
                         onOutside = { focusManager.clearFocus() },
                     )
                 }
@@ -312,12 +401,13 @@ private fun sendCtrlAltDel(session: VncSession) {
 }
 
 @Composable private fun VncSurface(
-    image: ImageBitmap, stamp: Int, cursorImage: ImageBitmap?, cursor: VncCursor?, fbW: Int, fbH: Int, fit: Boolean,
+    frames: FramePixels, stamp: Int, cursor: VncCursor?, fbW: Int, fbH: Int, fit: Boolean,
     focused: Boolean, alpha: Float, session: VncSession?, focus: FocusRequester,
     onFocus: (Boolean) -> Unit, onOutside: () -> Unit,
 ) {
     val density = LocalDensity.current
     var pointer by remember { mutableStateOf<IntOffset?>(null) }
+    var inside by remember { mutableStateOf(false) }
     // The amber edge announces that the console took the keyboard, holds briefly, then fades away; it used to stay lit
     // for as long as the console had focus. The hint at the bottom stays, in grey, as the lasting sign.
     val edge = rememberArrivalGlow(focused, lit = focused)
@@ -325,6 +415,8 @@ private fun sendCtrlAltDel(session: VncSession) {
     val fitRef = rememberUpdatedState(fit)
     val sizeRef = rememberUpdatedState(fbW to fbH)
     fun point(x: Float, y: Float, viewW: Float, viewH: Float) = vncPointerPoint(x, y, viewW, viewH, sizeRef.value.first, sizeRef.value.second, fitRef.value)
+    // The guest draws its own cursor image; the OS pointer is hidden over the screen so there are not two.
+    val hideOsCursor = inside && cursor != null && frames.hasCursor()
     val input = Modifier
         .focusRequester(focus)
         .onFocusChanged { onFocus(it.isFocused) }
@@ -332,10 +424,14 @@ private fun sendCtrlAltDel(session: VncSession) {
         .onPreviewKeyEvent { event ->
             if (!VncKeyboard.captured) return@onPreviewKeyEvent false
             if (event.type != KeyEventType.KeyDown && event.type != KeyEventType.KeyUp) return@onPreviewKeyEvent false
-            val keysym = vncKeysym(event) ?: return@onPreviewKeyEvent false
-            sessionRef.value?.key(event.type == KeyEventType.KeyDown, keysym)
+            val live = sessionRef.value
+            val keycode = vncKeycode(event)
+            // With extended keys a key without a keysym (a dead key such as ^ on a German layout) still has a keycode.
+            val keysym = vncKeysym(event) ?: if (keycode != 0 && live?.extendedKeys == true) 0 else return@onPreviewKeyEvent false
+            live?.keyInput(keyId(event), event.type == KeyEventType.KeyDown, keysym, keycode)
             true
         }
+        .pointerHoverIcon(if (hideOsCursor) blankPointer() else PointerIcon.Default)
         .pointerInput(fbW, fbH, session) {
             var wheelY = 0f
             awaitPointerEventScope {
@@ -345,11 +441,16 @@ private fun sendCtrlAltDel(session: VncSession) {
                     val live = sessionRef.value
                     val (fw, fh) = sizeRef.value
                     val local = change.position
-                    val mapped = point(local.x, local.y, if (fitRef.value) size.width.toFloat() else fw.toFloat(), if (fitRef.value) size.height.toFloat() else fh.toFloat())
+                    val mapped = if (event.type == PointerEventType.Exit) null
+                        else point(local.x, local.y, if (fitRef.value) size.width.toFloat() else fw.toFloat(), if (fitRef.value) size.height.toFloat() else fh.toFloat())
                     if (mapped == null) {
+                        inside = false
+                        // Leaving the screen with a button down would leave it held in the guest.
+                        if (live?.buttonsHeld == true) live.releaseButtons()
                         if (event.type == PointerEventType.Press) onOutside()
                         continue
                     }
+                    inside = true
                     if (event.type == PointerEventType.Press) focus.requestFocus()
                     val (x, y) = mapped
                     pointer = IntOffset(x, y)
@@ -375,8 +476,8 @@ private fun sendCtrlAltDel(session: VncSession) {
     Box(Modifier.fillMaxSize()) {
         if (fit) {
             Box(Modifier.fillMaxSize().then(input)) {
-                FrameCanvas(image, stamp, fbW, fbH, fit = true, alpha)
-                CursorOverlay(cursorImage, cursor, pointer, fbW, fbH, true)
+                FrameCanvas(frames, stamp, fbW, fbH, fit = true, alpha)
+                CursorOverlay(frames, cursor, pointer, fbW, fbH, true)
                 if (focused) FocusHint { edge.value }
             }
         } else {
@@ -384,14 +485,21 @@ private fun sendCtrlAltDel(session: VncSession) {
             val height = with(density) { fbH.toDp() }
             Box(Modifier.fillMaxSize().horizontalScroll(rememberScrollState()).verticalScroll(rememberScrollState())) {
                 Box(Modifier.size(width, height).then(input)) {
-                    FrameCanvas(image, stamp, fbW, fbH, fit = false, alpha)
-                    CursorOverlay(cursorImage, cursor, pointer, fbW, fbH, false)
+                    FrameCanvas(frames, stamp, fbW, fbH, fit = false, alpha)
+                    CursorOverlay(frames, cursor, pointer, fbW, fbH, false)
                     if (focused) FocusHint { edge.value }
                 }
             }
         }
     }
 }
+
+/** A fully transparent pointer, made once. Falls back to the normal pointer where AWT cannot make custom cursors. */
+private var blankCursor: PointerIcon? = null
+private fun blankPointer(): PointerIcon = blankCursor ?: runCatching {
+    val image = java.awt.image.BufferedImage(16, 16, java.awt.image.BufferedImage.TYPE_INT_ARGB)
+    PointerIcon(java.awt.Toolkit.getDefaultToolkit().createCustomCursor(image, java.awt.Point(0, 0), "vnc-hidden"))
+}.getOrDefault(PointerIcon.Default).also { blankCursor = it }
 
 /** Amber while the edge is lit ([glow] 1), grey once it has faded (0): the keyboard is still captured, quietly. */
 @Composable private fun BoxScope.FocusHint(glow: () -> Float) {
@@ -400,71 +508,79 @@ private fun sendCtrlAltDel(session: VncSession) {
         color = androidx.compose.ui.graphics.lerp(Tech.Muted, Tech.Amber, glow().coerceIn(0f, 1f)), fontFamily = Tech.Mono, fontSize = 10.sp, maxLines = 1)
 }
 
-/** Draws the live bitmap. [stamp] is read while drawing so a new framebuffer version repaints the same bitmap. */
-@Composable private fun FrameCanvas(image: ImageBitmap, stamp: Int, fbW: Int, fbH: Int, fit: Boolean, alpha: Float) {
+/**
+ * Draws the live bitmap. [stamp] is read while drawing so a new framebuffer version repaints the same bitmap. The draw
+ * takes the bitmap from [frames] under its lock, so it never sees a half-written or retired bitmap. At a whole-number
+ * scale (100 % always) the frame is drawn with nearest-neighbour sampling.
+ */
+@Composable private fun FrameCanvas(frames: FramePixels, stamp: Int, fbW: Int, fbH: Int, fit: Boolean, alpha: Float) {
     Canvas(Modifier.fillMaxSize()) {
         if (stamp < 0 || fbW <= 0 || fbH <= 0) return@Canvas
-        if (!fit) {
-            drawImage(image, dstSize = IntSize(size.width.toInt().coerceAtLeast(1), size.height.toInt().coerceAtLeast(1)), alpha = alpha)
-        } else {
-            val scale = min(size.width / fbW, size.height / fbH)
-            val dw = (fbW * scale).toInt().coerceAtLeast(1)
-            val dh = (fbH * scale).toInt().coerceAtLeast(1)
-            val left = ((size.width - dw) / 2f).toInt()
-            val top = ((size.height - dh) / 2f).toInt()
-            drawImage(image, dstOffset = IntOffset(left, top), dstSize = IntSize(dw, dh), alpha = alpha)
+        val layout = vncFrameLayout(size.width, size.height, fbW, fbH, fit) ?: return@Canvas
+        frames.drawFrame { image ->
+            drawImage(image, dstOffset = IntOffset(layout.left, layout.top), dstSize = IntSize(layout.width, layout.height), alpha = alpha,
+                filterQuality = if (layout.sharp) FilterQuality.None else FilterQuality.Low)
         }
     }
 }
 
-@Composable private fun CursorOverlay(image: ImageBitmap?, cursor: VncCursor?, pointer: IntOffset?, fbW: Int, fbH: Int, fit: Boolean) {
-    if (image == null || cursor == null || pointer == null || fbW <= 0 || fbH <= 0) return
+@Composable private fun CursorOverlay(frames: FramePixels, cursor: VncCursor?, pointer: IntOffset?, fbW: Int, fbH: Int, fit: Boolean) {
+    if (cursor == null || pointer == null || fbW <= 0 || fbH <= 0) return
     androidx.compose.foundation.Canvas(Modifier.fillMaxSize()) {
-        val scale = if (!fit) 1f else min(size.width / fbW, size.height / fbH)
-        val left = if (!fit) 0f else (size.width - fbW * scale) / 2f
-        val top = if (!fit) 0f else (size.height - fbH * scale) / 2f
-        val x = left + (pointer.x - cursor.hotspotX) * scale
-        val y = top + (pointer.y - cursor.hotspotY) * scale
-        drawImage(image, dstOffset = IntOffset(x.toInt(), y.toInt()), dstSize = IntSize((cursor.width * scale).toInt().coerceAtLeast(1), (cursor.height * scale).toInt().coerceAtLeast(1)))
+        val layout = vncFrameLayout(size.width, size.height, fbW, fbH, fit) ?: return@Canvas
+        val x = layout.left + (pointer.x - cursor.hotspotX) * layout.scale
+        val y = layout.top + (pointer.y - cursor.hotspotY) * layout.scale
+        frames.drawCursor { image ->
+            drawImage(image, dstOffset = IntOffset(x.toInt(), y.toInt()), dstSize = IntSize((cursor.width * layout.scale).toInt().coerceAtLeast(1), (cursor.height * layout.scale).toInt().coerceAtLeast(1)),
+                filterQuality = if (layout.sharp) FilterQuality.None else FilterQuality.Low)
+        }
     }
 }
 
-/** One Skia bitmap for the framebuffer, replaced only when the size changes, plus the latest cursor bitmap. */
-private class FramePixels {
+/**
+ * One Skia bitmap for the framebuffer, replaced only when the size changes, plus the latest cursor bitmap. Writes
+ * (on the event queue) and draws (on whatever thread renders) share one lock, and a draw always takes the current
+ * bitmap, so a replaced bitmap can be closed at once: nothing can still be drawing it. Compose copies a mutable
+ * bitmap when it records the draw, so the lock covers the whole use.
+ */
+internal class FramePixels {
+    private val lock = Any()
     private var bitmap: Bitmap? = null
     private var image: ImageBitmap? = null
     private var cursorBitmap: Bitmap? = null
-    private var retiredCursor: Bitmap? = null
-    private var retiredFrame: Bitmap? = null
-    fun write(width: Int, height: Int, pixels: IntArray): ImageBitmap {
-        retiredFrame?.close()
-        retiredFrame = null
+    private var cursorImage: ImageBitmap? = null
+    private var closed = false
+    fun write(width: Int, height: Int, pixels: IntArray): Unit = synchronized(lock) {
+        if (closed) return
         var current = bitmap
-        var fresh = false
         if (current == null || current.width != width || current.height != height) {
-            retiredFrame = current
+            image = null
+            current?.close()
             current = Bitmap().apply { allocN32Pixels(width, height, true) }
             bitmap = current
-            fresh = true
         }
         putPixels(current, pixels, width * height)
-        if (fresh || image == null) image = current.asComposeImageBitmap()
-        return image!!
+        if (image == null) image = current.asComposeImageBitmap()
     }
-    fun cursor(cursor: VncCursor): ImageBitmap {
-        retiredCursor?.close()
-        retiredCursor = cursorBitmap
-        val current = Bitmap().apply { allocN32Pixels(cursor.width, cursor.height, false) }
-        cursorBitmap = current
-        putPixels(current, cursor.argb, cursor.argb.size)
-        return current.asComposeImageBitmap()
-    }
-    fun close() {
-        bitmap?.close(); bitmap = null
-        retiredFrame?.close(); retiredFrame = null
+    fun cursor(cursor: VncCursor?): Unit = synchronized(lock) {
+        if (closed) return
+        cursorImage = null
         cursorBitmap?.close(); cursorBitmap = null
-        retiredCursor?.close(); retiredCursor = null
-        image = null
+        if (cursor == null) return
+        val current = Bitmap().apply { allocN32Pixels(cursor.width, cursor.height, false) }
+        putPixels(current, cursor.argb, cursor.argb.size)
+        cursorBitmap = current
+        cursorImage = current.asComposeImageBitmap()
+    }
+    fun hasCursor(): Boolean = synchronized(lock) { cursorImage != null }
+    /** Runs [draw] with the current frame while holding the lock. Does nothing before the first frame or after [close]. */
+    fun drawFrame(draw: (ImageBitmap) -> Unit): Unit = synchronized(lock) { image?.let(draw) }
+    fun drawCursor(draw: (ImageBitmap) -> Unit): Unit = synchronized(lock) { cursorImage?.let(draw) }
+    fun close(): Unit = synchronized(lock) {
+        closed = true
+        image = null; cursorImage = null
+        bitmap?.close(); bitmap = null
+        cursorBitmap?.close(); cursorBitmap = null
     }
 }
 

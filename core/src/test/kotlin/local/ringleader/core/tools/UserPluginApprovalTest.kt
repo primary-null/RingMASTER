@@ -29,7 +29,7 @@ class UserPluginApprovalTest {
         )
         val plugin = UserToolPlugin("approved", "Approved", "Test", inputs, command, null, "approved.json")
         val values = mapOf("host" to "127.0.0.1", "count" to "1")
-        plugin.approval = PluginApproval(plugin.manifestCommand, plugin.commandFor(values))
+        plugin.approval = plugin.approvalFor(values)
         val result = plugin.run(values) {}
         assertTrue(result.ok, result.summary)
     }
@@ -39,7 +39,7 @@ class UserPluginApprovalTest {
             listOf(ToolInput("host", "Host", ToolInputKind.Host)),
             listOf("fake-program", "{host}"), null, "reask.json") { null }
         val values1 = mapOf("host" to "127.0.0.1")
-        plugin.approval = PluginApproval(plugin.manifestCommand, plugin.commandFor(values1))
+        plugin.approval = PluginApproval(plugin.manifestCommand, plugin.commandFor(values1), "fake-program")
         val values2 = mapOf("host" to "pve.example")
         val result = plugin.run(values2) {}
         assertFalse(result.ok)
@@ -54,7 +54,7 @@ class UserPluginApprovalTest {
             listOf(ToolInput("host", "Host", ToolInputKind.Host)),
             listOf("program-b", "{host}"), null, "b.json") { null }
         val values = mapOf("host" to "127.0.0.1")
-        pluginA.approval = PluginApproval(pluginA.manifestCommand, pluginA.commandFor(values))
+        pluginA.approval = PluginApproval(pluginA.manifestCommand, pluginA.commandFor(values), "program-a")
         pluginB.approval = pluginA.approval
         val result = pluginB.run(values) {}
         assertFalse(result.ok)
@@ -101,7 +101,8 @@ class UserPluginApprovalTest {
             listOf(ToolInput("host", "Host", ToolInputKind.Host)),
             listOf("script.bat", "{host}"), null, "bat-run.json") { "C:\\script.bat" }
         val values = mapOf("host" to "127.0.0.1")
-        plugin.approval = PluginApproval(plugin.manifestCommand, plugin.commandFor(values))
+        plugin.approval = PluginApproval(plugin.manifestCommand, plugin.commandFor(values), "C:\\script.bat")
+        assertNull(plugin.approvalFor(values))
         val result = plugin.run(values) {}
         assertFalse(result.ok)
         assertTrue(result.summary.contains("Batch"), result.summary)

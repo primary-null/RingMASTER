@@ -1,36 +1,30 @@
 package local.ringleader.core
 
-import java.io.File
 import java.io.IOException
 import java.time.Instant
+import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.serialization.json.*
 
-/** Keeps discovery owned by bluetoothctl for a bounded window without changing adapter power. */
-fun bluezScanScript(seconds: Int): String = """
-    if ! command -v bluetoothctl >/dev/null 2>&1 || ! command -v busctl >/dev/null 2>&1; then
-        printf '%s\n' 'RINGMASTER-BLUEZ:MISSING'
-        exit 0
-    fi
-    if [ -z "${'$'}(ls -A /sys/class/bluetooth 2>/dev/null)" ]; then
-        printf '%s
-' 'RINGMASTER-BLUEZ:NOADAPTER'
-        exit 0
-    fi
-    for adapter in ${'$'}(bluetoothctl list 2>/dev/null | awk '/^Controller / {print ${'$'}2}'); do
-        if bluetoothctl show "${'$'}adapter" 2>/dev/null | grep -q 'Powered: yes'; then
-            bluetoothctl --timeout ${seconds.coerceIn(3, 30)} scan on >/dev/null 2>&1
-            break
+/**
+ * Guest one-shot. The whole script is under `timeout` when the guest has it, so a hung bluetoothctl
+ * cannot outlive the scan. `list` and `show` each get 3 seconds. Discovery runs on the adapter that
+ * reported `Powered: yes`, in one bluetoothctl session (`select`, then `scan on`).
+ */
+fun bluezScanScript(seconds: Int): String {
+    val timeout = seconds.coerceIn(3, 30)
+    val budget = timeout + 8
+    val quoted = shellSingleQuote(bluezInner(timeout, live = false))
+    return """
+        if command -v timeout >/dev/null 2>&1; then
+            timeout -k 2 $budget sh -c $quoted
+        else
+            sh -c $quoted
         fi
-    done
-    if objects=${'$'}(busctl --json=short call org.bluez / org.freedesktop.DBus.ObjectManager GetManagedObjects 2>/dev/null); then
-        printf '%s\n' 'RINGMASTER-BLUEZ:OBJECTS' "${'$'}objects"
-    else
-        printf '%s\n' 'RINGMASTER-BLUEZ:NODAEMON'
-    fi
-""".trimIndent()
+    """.trimIndent()
+}
 
 /** Shares exactly the same shell program between local and guest-agent execution. */
 fun bluezScanCommand(seconds: Int): List<String> = listOf("sh", "-c", bluezScanScript(seconds))
@@ -39,9 +33,38 @@ fun bluezScanCommand(seconds: Int): List<String> = listOf("sh", "-c", bluezScanS
  * Local live scan. Same early markers as [bluezScanScript], then bluetoothctl's own lines (stdout kept, line-buffered
  * when stdbuf exists), then the same busctl snapshot. Guest scans keep [bluezScanScript].
  */
-fun bluezLiveScript(seconds: Int): String {
-    val timeout = seconds.coerceIn(3, 30)
+fun bluezLiveScript(seconds: Int): String = bluezInner(seconds.coerceIn(3, 30), live = true)
+
+/**
+ * Shared shell. [live] keeps bluetoothctl's lines; the guest script throws them away.
+ * A TERM (from `timeout`) prints [BT_SCAN_ENDED_EARLY]'s marker and exits.
+ */
+private fun bluezInner(timeout: Int, live: Boolean): String {
+    val discovery = if (live) """
+                printf '%s\n' 'RINGMASTER-BLUEZ:LIVE'
+                {
+                    printf 'select %s\nscan on\n' "${'$'}powered"
+                    sleep $timeout
+                    printf 'quit\n'
+                } | scan_with
+    """ else """
+                {
+                    printf 'select %s\nscan on\n' "${'$'}powered"
+                    sleep $timeout
+                    printf 'quit\n'
+                } | bluetoothctl --timeout $timeout >/dev/null 2>&1
+    """
+    val scanWith = if (!live) "" else """
+        scan_with() {
+            if command -v stdbuf >/dev/null 2>&1; then
+                stdbuf -oL bluetoothctl --timeout $timeout
+            else
+                bluetoothctl --timeout $timeout | cat
+            fi
+        }
+    """
     return """
+        trap 'printf "%s\n" "RINGMASTER-BLUEZ:EARLY"; exit 0' TERM INT
         if ! command -v bluetoothctl >/dev/null 2>&1 || ! command -v busctl >/dev/null 2>&1; then
             printf '%s\n' 'RINGMASTER-BLUEZ:MISSING'
             exit 0
@@ -50,17 +73,24 @@ fun bluezLiveScript(seconds: Int): String {
             printf '%s\n' 'RINGMASTER-BLUEZ:NOADAPTER'
             exit 0
         fi
-        for adapter in ${'$'}(bluetoothctl list 2>/dev/null | awk '/^Controller / {print ${'$'}2}'); do
-            if bluetoothctl show "${'$'}adapter" 2>/dev/null | grep -q 'Powered: yes'; then
-                printf '%s\n' 'RINGMASTER-BLUEZ:LIVE'
-                if command -v stdbuf >/dev/null 2>&1; then
-                    stdbuf -oL bluetoothctl --timeout $timeout scan on 2>/dev/null
-                else
-                    bluetoothctl --timeout $timeout scan on 2>/dev/null | cat
-                fi
+        bt_limited() {
+            if command -v timeout >/dev/null 2>&1; then
+                timeout 3 "${'$'}@"
+            else
+                "${'$'}@"
+            fi
+        }
+        $scanWith
+        powered=
+        for adapter in ${'$'}(bt_limited bluetoothctl list 2>/dev/null | awk '/^Controller / {print ${'$'}2}'); do
+            if bt_limited bluetoothctl show "${'$'}adapter" 2>/dev/null | grep -q 'Powered: yes'; then
+                powered=${'$'}adapter
                 break
             fi
         done
+        if [ -n "${'$'}powered" ]; then
+            $discovery
+        fi
         if objects=${'$'}(busctl --json=short call org.bluez / org.freedesktop.DBus.ObjectManager GetManagedObjects 2>/dev/null); then
             printf '%s\n' 'RINGMASTER-BLUEZ:OBJECTS' "${'$'}objects"
         else
@@ -68,6 +98,8 @@ fun bluezLiveScript(seconds: Int): String {
         fi
     """.trimIndent()
 }
+
+private fun shellSingleQuote(value: String) = "'" + value.replace("'", "'\\''") + "'"
 
 /** Converts the script protocol to a scan, keeping expected unavailable states as notes. */
 fun parseBluezScanOutput(stdout: String, source: BtSource, at: Instant): BtScan {
@@ -78,6 +110,7 @@ fun parseBluezScanOutput(stdout: String, source: BtSource, at: Instant): BtScan 
         "RINGMASTER-BLUEZ:NODAEMON" -> BLUEZ_NODAEMON_NOTE
         // No /sys/class/bluetooth entries: the kernel sees no controller, so bluetoothd does not start either.
         "RINGMASTER-BLUEZ:NOADAPTER" -> BT_NO_ADAPTER
+        "RINGMASTER-BLUEZ:EARLY" -> BT_SCAN_ENDED_EARLY
         "RINGMASTER-BLUEZ:OBJECTS" -> null
         else -> throw IllegalStateException("Invalid BlueZ scan output.")
     }
@@ -127,42 +160,62 @@ private fun JsonObject.primitive(key: String): JsonPrimitive? =
 private fun JsonObject.string(key: String): String? = primitive(key)?.takeIf { it.isString }?.contentOrNull
 private fun JsonObject.boolean(key: String): Boolean? = primitive(key)?.booleanOrNull
 
-/** Executes the common BlueZ protocol locally. [run] stays last so `BluezScanner { command, timeout -> }` still injects the one-shot runner. */
+/**
+ * Executes the common BlueZ protocol locally. [run] stays last so `BluezScanner { command, timeout -> }` still injects
+ * the one-shot runner. [control] is first so the default stream can kill that scan's process tree.
+ */
 class BluezScanner(
-    private val stream: (List<String>, Long, (String) -> Unit) -> Unit = defaultStreamProcess,
+    private val control: BtScanControl = BtScanControl(),
+    private val stream: (List<String>, Long, (String) -> Unit) -> Unit = { command, timeout, onLine -> streamProcess(command, timeout, onLine, control) },
     private val clock: () -> Long = System::nanoTime,
     private val now: () -> Instant = Instant::now,
     private val run: (List<String>, Long) -> String = defaultRunProcess,
 ) : BluetoothScanner {
     override val platform = "Linux · BlueZ"
+    override fun cancel() = control.cancel()
 
     override fun scan(seconds: Int): BtScan = scan(seconds) {}
 
-    override fun scan(seconds: Int, onUpdate: (BtScan) -> Unit): BtScan {
+    override fun scan(seconds: Int, onUpdate: (BtScan) -> Unit): BtScan = control.exclusive {
         val trace = Trace.begin(TraceSource.Bluetooth, "BlueZ scan · sh helper", emptyMap())
         try {
-        // Existing tests inject only the one-shot runner. A custom stream is the live scan.
-        if (run !== defaultRunProcess && stream === defaultStreamProcess) {
+        // Existing tests inject only the one-shot runner.
+        if (run !== defaultRunProcess) {
             val result = parseBluezScanOutput(run(bluezScanCommand(seconds), bluezBudget(seconds)), BtSource.Local, now())
             onUpdate(result)
-            return result
+            return@exclusive result
         }
         val bounded = seconds.coerceIn(3, 30)
         val started = clock()
         val parser = BluezLiveParser(BtSource.Local, bounded * 1000L, now())
-        var lastEmitMs = -LIVE_EMIT_MS
+        val gate = LiveEmitGate()
+        control.onIdle {
+            val elapsed = millisSince(started)
+            if (gate.onIdle(elapsed)) onUpdate(parser.partial(elapsed))
+        }
         stream(listOf("sh", "-c", bluezLiveScript(seconds)), bluezBudget(seconds)) { line ->
             val elapsed = millisSince(started)
-            if (parser.accept(line, elapsed) && elapsed - lastEmitMs >= LIVE_EMIT_MS) {
-                onUpdate(parser.partial(elapsed))
-                lastEmitMs = elapsed
-            }
+            if (parser.accept(line, elapsed) && gate.onChange(elapsed)) onUpdate(parser.partial(elapsed))
         }
-        val finished = parser.finish(millisSince(started))
-        onUpdate(finished)
-        return finished
+        val elapsed = millisSince(started)
+        if (gate.flush(elapsed)) onUpdate(parser.partial(elapsed))
+        val finished = try {
+            parser.finish(elapsed)
+        } catch (e: IllegalStateException) {
+            if (control.wasCancelled()) stoppedScan(elapsed, bounded * 1000L).also(onUpdate)
+            else if (control.didTimeOut()) throw IllegalStateException("Bluetooth scan timed out.")
+            else throw e
+        }
+        val result = if ((control.wasCancelled() || control.didTimeOut()) && finished.note == null) {
+            finished.copy(note = BT_SCAN_ENDED_EARLY)
+        } else finished
+        onUpdate(result)
+        result
         } catch (t: Throwable) { trace.end(error=t); throw t } finally { trace.end() }
     }
+
+    private fun stoppedScan(elapsedMs: Long, windowMs: Long) =
+        BtScan(BtSource.Local, emptyList(), emptyList(), now(), BT_SCAN_ENDED_EARLY, windowMs, elapsedMs, finished = true)
 
     private fun millisSince(started: Long): Long = (clock() - started).coerceAtLeast(0L) / 1_000_000L
 }
@@ -190,6 +243,7 @@ class BluezLiveParser(source: BtSource, windowMs: Long, at: Instant = Instant.no
             "RINGMASTER-BLUEZ:MISSING" -> { sawMarker = true; accumulated.note = BLUEZ_MISSING_NOTE }
             "RINGMASTER-BLUEZ:NODAEMON" -> { sawMarker = true; accumulated.note = BLUEZ_NODAEMON_NOTE }
             "RINGMASTER-BLUEZ:NOADAPTER" -> { sawMarker = true; accumulated.note = BT_NO_ADAPTER }
+            "RINGMASTER-BLUEZ:EARLY" -> { sawMarker = true; accumulated.note = BT_SCAN_ENDED_EARLY }
             "RINGMASTER-BLUEZ:LIVE" -> { sawMarker = true; phase = Phase.Live }
             "RINGMASTER-BLUEZ:OBJECTS" -> { sawMarker = true; phase = Phase.Objects }
             else -> if (phase == Phase.Live) readLiveLine(clean, ms)
@@ -202,7 +256,8 @@ class BluezLiveParser(source: BtSource, windowMs: Long, at: Instant = Instant.no
     fun finish(elapsedMs: Long): BtScan {
         if (!sawMarker) throw IllegalStateException("Invalid BlueZ scan output.")
         val partial = accumulated.snapshot(elapsedMs, finished = true)
-        if (phase != Phase.Objects) return partial
+        // LIVE without the busctl dump means bluetoothctl ended before the script finished.
+        if (phase != Phase.Objects) return if (partial.note != null) partial else partial.copy(note = BT_SCAN_ENDED_EARLY)
         val (adapters, busDevices) = parseBluezObjects(objects.toString())
         val note = when {
             adapters.isEmpty() -> BT_NO_ADAPTER
@@ -258,48 +313,72 @@ internal fun runProcess(command: List<String>, timeoutSeconds: Long): String {
     }
 }
 
-/** Reads stdout as it arrives. A timeout kills the process tree. Stderr is discarded; stdin is /dev/null. */
-internal fun streamProcess(command: List<String>, timeoutSeconds: Long, onLine: (String) -> Unit) {
-    val builder = ProcessBuilder(command).redirectError(ProcessBuilder.Redirect.DISCARD)
-    val devNull = File("/dev/null")
-    if (devNull.exists()) builder.redirectInput(ProcessBuilder.Redirect.from(devNull))
-    val process = builder.start()
-    if (!devNull.exists()) process.outputStream.close()
+/**
+ * Reads stdout as it arrives. A timeout or [control] cancel kills the process tree.
+ * While the pipe is quiet, [BtScanControl.idle] runs so the caller can flush a trailing update.
+ * Stderr is discarded. Stdin stays a pipe and is closed when the scan stops.
+ */
+internal fun streamProcess(command: List<String>, timeoutSeconds: Long, onLine: (String) -> Unit, control: BtScanControl = BtScanControl()) {
+    val process = ProcessBuilder(command).redirectError(ProcessBuilder.Redirect.DISCARD).start()
     val timedOut = AtomicBoolean(false)
-    val waiter = Thread {
-        if (!process.waitFor(timeoutSeconds, TimeUnit.SECONDS)) {
-            timedOut.set(true)
-            process.descendants().forEach { it.destroyForcibly() }
-            process.destroyForcibly()
+    val lines = ArrayBlockingQueue<String>(4096)
+    val doneReading = AtomicBoolean(false)
+    val reader = Thread({
+        try {
+            process.inputStream.bufferedReader(Charsets.UTF_8).forEachLine { lines.put(it) }
+        } catch (_: IOException) {
+        } catch (_: InterruptedException) {
+        } finally {
+            doneReading.set(true)
         }
+    }, "bt-scan-stdout")
+    reader.isDaemon = true
+    reader.start()
+    val kill = {
+        process.descendants().forEach { runCatching { it.destroyForcibly() } }
+        runCatching { process.outputStream.close() }
+        if (process.isAlive) process.destroyForcibly()
     }
+    control.bind(kill)
+    if (control.wasCancelled()) kill()
+    val waiter = Thread({
+        try {
+            if (!process.waitFor(timeoutSeconds, TimeUnit.SECONDS)) {
+                timedOut.set(true)
+                control.markTimedOut()
+                kill()
+            }
+        } catch (_: InterruptedException) {
+        }
+    }, "bt-scan-timeout")
     waiter.isDaemon = true
     waiter.start()
+    var any = false
     try {
-        process.inputStream.bufferedReader(Charsets.UTF_8).use { reader ->
-            while (true) {
-                val line = reader.readLine() ?: break
-                onLine(line)
+        while (true) {
+            if (control.wasCancelled()) break
+            val line = lines.poll(20, TimeUnit.MILLISECONDS)
+            if (line != null) { any = true; onLine(line) }
+            else if (doneReading.get() && lines.isEmpty()) break
+            else {
+                control.idle()
+                if (timedOut.get() && lines.isEmpty()) break
             }
         }
-    } catch (e: IOException) {
-        if (!timedOut.get()) throw IllegalStateException("Bluetooth scan failed.", e)
+    } catch (_: InterruptedException) {
+        control.cancel()
     } finally {
-        if (process.isAlive) {
-            process.descendants().forEach { it.destroyForcibly() }
-            process.destroyForcibly()
-        }
-        waiter.join(5_000)
+        kill()
+        waiter.join(2_000)
+        reader.join(2_000)
     }
-    if (timedOut.get()) throw IllegalStateException("Bluetooth scan timed out.")
+    if (timedOut.get() && !any && !control.wasCancelled()) throw IllegalStateException("Bluetooth scan timed out.")
 }
 
-private const val LIVE_EMIT_MS = 150L
 private const val BLUEZ_MISSING_NOTE = "BlueZ tools are not installed (install the bluez package)."
 private const val BLUEZ_NODAEMON_NOTE = "The Bluetooth service (bluetoothd) is not running."
 
 private val defaultRunProcess: (List<String>, Long) -> String = ::runProcess
-private val defaultStreamProcess: (List<String>, Long, (String) -> Unit) -> Unit = ::streamProcess
 
 private fun bluezBudget(seconds: Int): Long = seconds.coerceIn(3, 30).toLong() + 20
 
@@ -358,5 +437,5 @@ private fun mergeAuthoritative(live: BtDevice, bus: BtDevice): BtDevice = live.c
 private fun heardOnlyAtEnd(bus: BtDevice, elapsedMs: Long): BtDevice {
     val rssi = bus.rssi?.takeIf { it < 0 }
         ?: return bus.copy(samples = emptyList(), firstSeenMs = null, lastSeenMs = null)
-    return bus.copy(rssi = rssi, firstSeenMs = elapsedMs, lastSeenMs = elapsedMs, samples = listOf(BtSample(elapsedMs, rssi)))
+    return bus.copy(rssi = rssi, smoothedRssi = rssi.toFloat(), firstSeenMs = elapsedMs, lastSeenMs = elapsedMs, samples = listOf(BtSample(elapsedMs, rssi)))
 }

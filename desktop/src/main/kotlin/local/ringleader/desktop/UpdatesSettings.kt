@@ -14,18 +14,27 @@ import local.ringleader.core.*
 internal object DesktopUpdates {
     val checker by lazy { UpdateChecker(AppVersion.value, UpdatePreferences(AppData.configDir.resolve("updates.properties"), SaveStatus::notice)) }
 }
+/** Same claim as the README: two HTTPS requests, this User-Agent, nothing about you or your servers. */
+internal const val UPDATE_CONSENT = "A check makes two HTTPS requests with User-Agent RingMASTER/<version> and nothing about you or your servers. GitHub sees normal web request details, including your IP address."
 private val updateWhen = java.time.format.DateTimeFormatter.ofPattern("d MMM yyyy, HH:mm").withZone(java.time.ZoneId.systemDefault())
 private val updateDay = java.time.format.DateTimeFormatter.ofPattern("d MMM yyyy").withZone(java.time.ZoneId.systemDefault())
-internal fun updateStateWords(state: UpdateState): String = when(state) {
+internal fun updateStateWords(state: UpdateState, consent: String? = null): String = when(state) {
     UpdateState.Disabled -> "Update checks are disabled by your packager."
     UpdateState.NotConfigured -> "Update checks are not set up in this build."
     UpdateState.NeedsConsent -> "Choose whether RingMASTER may check for updates."
-    is UpdateState.Idle -> "Ready to check for updates."
+    is UpdateState.Idle -> if (consent == "no") "Update checks are off." else "Ready to check for updates."
     UpdateState.Checking -> "Checking the signed update feed..."
     is UpdateState.UpToDate -> state.message
     is UpdateState.Available -> "RingMASTER ${state.update.manifest.version} is available."
     is UpdateState.Skipped -> "Version ${state.version} is skipped."
     is UpdateState.Failed -> state.reason
+}
+/** File name, size and SHA-256 of the offered package. Shown as text; the app does not download it. */
+internal fun offeredAssetLines(asset: UpdateAsset): List<String> {
+    val name = runCatching {
+        java.net.URI(asset.url).path.orEmpty().substringAfterLast('/').ifBlank { asset.url }
+    }.getOrDefault(asset.url)
+    return listOf(name, "${asset.size} bytes", asset.sha256)
 }
 @Composable internal fun UpdatesSettings(checker: UpdateChecker = DesktopUpdates.checker, preview: UpdateState? = null) {
     val actual by checker.state.collectAsState()
@@ -37,10 +46,10 @@ internal fun updateStateWords(state: UpdateState): String = when(state) {
     var consent by remember(preview) { mutableStateOf(if (preview == UpdateState.NeedsConsent) null else if (preview != null) "yes" else checker.preferences.consent) }
     val enabled = !web && state !in listOf(UpdateState.Disabled, UpdateState.NotConfigured)
     Text("Running ${AppVersion.value}",fontSize=18.sp,color=Tech.Ink)
-    Text(if(web) "Update checks are available in the desktop app." else updateStateWords(state),fontSize=13.sp,color=if(state is UpdateState.Available) Tech.Amber else Tech.Muted)
+    Text(if(web) "Update checks are available in the desktop app." else updateStateWords(state, consent),fontSize=13.sp,color=if(state is UpdateState.Available) Tech.Amber else Tech.Muted)
     Text("Last checked: ${checker.preferences.lastChecked?.let(updateWhen::format) ?: "Never"}",fontSize=11.sp,fontFamily=Tech.Mono,color=Tech.Muted)
     if (enabled && consent != "yes") {
-        Text("Checks fetch a small signed file and its signature from GitHub. No account or app identifiers are sent. GitHub sees normal web request details, including your IP address.",fontSize=12.sp,color=Tech.Muted)
+        Text(UPDATE_CONSENT,fontSize=12.sp,color=Tech.Muted)
         MiniAction("Enable update checks") { checker.consent(true); consent="yes" }
     }
     MiniAction("Check now",enabled=enabled && consent == "yes" && state != UpdateState.Checking) { scope.launch { checker.check() } }
@@ -63,6 +72,11 @@ internal fun updateStateWords(state: UpdateState): String = when(state) {
             Text("RingMASTER ${m.version}",fontSize=18.sp,color=Tech.Amber)
             Text("Published ${updateDay.format(m.published)}",fontFamily=Tech.Mono,fontSize=11.sp,color=Tech.Muted)
             SelectionContainer { Text(m.notes,Modifier.fillMaxWidth().heightIn(max=170.dp).verticalScroll(rememberScrollState()),fontSize=12.sp,color=Tech.Ink) }
+            SelectionContainer {
+                Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    offeredAssetLines(state.update.asset).forEach { line -> Text(line, Modifier.fillMaxWidth(), fontFamily = Tech.Mono, fontSize = 11.sp, color = Tech.Muted) }
+                }
+            }
             if(state.update.asset.platform != "windows-x64-msi") Text("The package installs with your system's package manager.",fontSize=12.sp,color=Tech.Muted)
             Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
                 MiniAction("Open download page",primary=true,enabled=!web) { open(RELEASE_PAGE) }
@@ -86,6 +100,6 @@ internal fun updateStateWords(state: UpdateState): String = when(state) {
         TechAction("Check automatically",active=true) { checker.consent(true); prompt=false; scope.launch { checker.check() } }
         TechAction("Not now") { checker.consent(false); prompt=false }
     }) {
-        Text("A check fetches a small file and its signature from GitHub over HTTPS. No account or app identifiers are sent. GitHub sees normal web request details, including your IP address.",fontSize=13.sp,color=Tech.Ink)
+        Text(UPDATE_CONSENT,fontSize=13.sp,color=Tech.Ink)
     }
 }

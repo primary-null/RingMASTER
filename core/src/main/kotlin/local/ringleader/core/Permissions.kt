@@ -15,16 +15,21 @@ import kotlinx.serialization.json.*
  *   - a fixed set of top-level paths (/, /access, /access/groups, /nodes, /pool, /sdn, /storage, /vms),
  *   - every path that has an ACL entry, and every /vms/{id} and /storage/{id} that a pool lists,
  *   - and only those where the identity has at least one privilege (empty paths are dropped).
- *   Each listed path already includes what it inherits. A privilege's flag says whether children inherit it
- *   (AccessControl::roles applies a role at a child only when it was set with Propagate; a role set on the child itself
- *   replaces what the child would inherit). So a path that is not listed is answered from the nearest listed parent, keeping
- *   only the privileges whose flag is set. That is what [effectivePrivileges] does.
+ *   Each listed path is the effective set on that path. A privilege's flag says whether children inherit it.
+ *   AccessControl::roles walks from / toward the checked path. On every path that is not the final one, a role applies
+ *   only when Propagate is set, and an entry with no propagating role does not replace what was carried from above
+ *   (`if ($new) { $roles = $new }`). [effectivePrivileges] does the same: a listed ancestor with no propagating privilege
+ *   does not hide a privilege propagated from further up. A role set on the path itself still replaces what it would inherit.
  *
- * Known limit: a path that has its own ACL entry but leaves the identity with nothing (a NoAccess role) is omitted
- * from the response, so it is answered from its parent. `GET /access/permissions?path=<path>` would answer it exactly.
+ * An empty path is omitted from the response, including a NoAccess path. Guests and storages in the inventory are already
+ * audit-filtered, so answering an unlisted guest or storage from its parent is the same answer the server would give.
+ * Nodes are not filtered that way. An online node row with no CPU, memory or uptime means no Sys.Audit
+ * (extract_node_stats with exclude_stats). [evaluateFeatures] uses that signal and does not report a parent role as
+ * Allowed on that node.
  */
 
 const val PERMISSIONS_PATH = "/api2/json/access/permissions"
+const val PVE_VERSION_PATH = "/api2/json/version"
 const val PERMISSIONS_NOT_FOUND = "The permission read returned HTTP 404."
 const val PERMISSIONS_REFUSED = "The permission read path was refused."
 const val PERMISSIONS_EMPTY_BODY = "The server returned no permissions."
@@ -40,7 +45,7 @@ private const val PERMISSION_MAX_PRIVILEGES = 256
  * Effective privileges per ACL path, as the server listed them. [paths] maps a path to its privileges, and each privilege
  * to its propagate flag. A privilege that is present is granted on that path whatever the flag says.
  */
-data class PermissionDump(val paths: Map<String, Map<String, Boolean>>)
+data class PermissionDump(val paths: Map<String, Map<String, Boolean>>, val release: String? = null)
 
 enum class PermissionIdentity { Token, User, Sample }
 
@@ -110,6 +115,9 @@ data class EffectivePrivileges(
     val privileges: Set<String>,
     val source: String?,
     val notInherited: Set<String> = emptySet(),
+    /** Privileges on a closer listed path that do not propagate. They do not replace [privileges]. */
+    val blocked: Set<String> = emptySet(),
+    val blockedFrom: String? = null,
 ) {
     val exact: Boolean get() = source == path
 }
@@ -118,14 +126,25 @@ fun effectivePrivileges(dump: PermissionDump, rawPath: String): EffectivePrivile
     val path = normalizedAclPathOrNull(rawPath) ?: return EffectivePrivileges(rawPath, emptySet(), null)
     dump.paths[path]?.let { return EffectivePrivileges(path, it.keys, path) }
     var parent = parentAclPath(path)
+    var blocked = emptySet<String>()
+    var blockedFrom: String? = null
     while (parent != null) {
         val listed = dump.paths[parent]
         if (listed != null) {
-            return EffectivePrivileges(path, listed.filterValues { it }.keys, parent, listed.filterValues { !it }.keys)
+            val propagating = listed.filterValues { it }.keys
+            val localBlocked = listed.filterValues { !it }.keys
+            // A listed ancestor with nothing propagating does not erase what a higher path propagated.
+            if (propagating.isNotEmpty()) {
+                return EffectivePrivileges(path, propagating, parent, localBlocked, blocked, blockedFrom)
+            }
+            if (blockedFrom == null) {
+                blocked = localBlocked
+                blockedFrom = parent
+            }
         }
         parent = parentAclPath(parent)
     }
-    return EffectivePrivileges(path, emptySet(), null)
+    return EffectivePrivileges(path, emptySet(), null, blocked = blocked, blockedFrom = blockedFrom)
 }
 
 /**
@@ -155,6 +174,7 @@ enum class PermissionScope(val template: String, val collection: String) {
     Node("/nodes/{node}", "/nodes"),
     Guest("/vms/{vmid}", "/vms"),
     Storage("/storage/{storage}", "/storage"),
+    Sdn("/sdn", "/sdn"),
     Notifications("/mapping/notifications", "/mapping/notifications"),
 }
 
@@ -169,8 +189,11 @@ data class PrivilegeNeed(
     val any: Boolean = false,
     val legacy: List<String> = emptyList(),
     val guestKind: String? = null,
+    /** The call is open to any signed-in identity. [privileges] stays empty. */
+    val open: Boolean = false,
 ) {
     fun label(): String {
+        if (open) return "Any signed-in identity @ ${scope.template}"
         val names = privileges.joinToString(if (any) " or " else " + ")
         return "$names @ ${scope.template}" + if (legacy.isNotEmpty()) " (PVE 8: ${legacy.joinToString()})" else ""
     }
@@ -191,6 +214,8 @@ data class FeatureRequirement(
     val planned: Boolean = false,
     val alsoNeeds: List<List<PrivilegeNeed>> = emptyList(),
     val alsoNote: String? = null,
+    /** Extra checks that must all hold before the row is Allowed. Unlike [alsoNeeds], these are not alternatives. */
+    val alsoRequires: List<PrivilegeNeed> = emptyList(),
 )
 
 const val GROUP_TODAY = "In use"
@@ -253,9 +278,16 @@ val FEATURE_REQUIREMENTS: List<FeatureRequirement> = listOf(
             listOf(need(PermissionScope.Storage, "Datastore.Allocate")),
             listOf(need(PermissionScope.Storage, "Datastore.AllocateSpace"), need(PermissionScope.Guest, "VM.Backup")),
         ),
-        alsoNote = "Backup archives list only with Datastore.AllocateSpace on the storage and VM.Backup on the guest (or Datastore.Allocate on the storage). Disk images need VM.Config.Disk on the guest. Snippets need Datastore.Allocate. The server omits the rest without an error."),
+        alsoNote = "Disk images need VM.Config.Disk on the guest. Backup archives list only with Datastore.AllocateSpace on the storage and VM.Backup on the guest (or Datastore.Allocate on the storage). Snippets need Datastore.Allocate. The server omits the rest without an error.",
+        alsoRequires = listOf(need(PermissionScope.Guest, "VM.Config.Disk"))),
     FeatureRequirement("services", "Node services", GROUP_TODAY, listOf(need(PermissionScope.Node, "Sys.Audit")),
         "GET /nodes/{node}/services"),
+    FeatureRequirement("node-network", "Node network", GROUP_TODAY,
+        listOf(PrivilegeNeed(PermissionScope.Node, emptyList(), open = true)),
+        "GET /nodes/{node}/network",
+        "Any signed-in identity may read the list. It does not need Sys.Audit.",
+        alsoNeeds = listOf(listOf(need(PermissionScope.Sdn, "SDN.Audit", "SDN.Use", any = true))),
+        alsoNote = "Bridges are left out unless SDN.Audit or SDN.Use is held on that bridge. The list itself still succeeds."),
     FeatureRequirement("syslog", "System log", GROUP_TODAY, listOf(need(PermissionScope.Node, "Sys.Syslog")),
         "GET /nodes/{node}/syslog",
         "Sys.Audit does not include the log."),
@@ -277,10 +309,17 @@ val FEATURE_REQUIREMENTS: List<FeatureRequirement> = listOf(
 )
 
 /** The nodes, guests and storages the checks run against. Built from the recorded inventory, not from the server's tree. */
+/**
+ * What one recorded node row says about Sys.Audit. [showsUsage] is true when CPU, memory or uptime is present.
+ * An online node with none of those has no Sys.Audit. A present zero still counts as present.
+ */
+data class NodeAuditSignal(val online: Boolean, val showsUsage: Boolean)
+
 data class PermissionTargets(
     val nodes: List<String> = emptyList(),
     val guests: List<Pair<Int, String>> = emptyList(),
     val storages: List<String> = emptyList(),
+    val nodeAudit: Map<String, NodeAuditSignal> = emptyMap(),
 )
 
 fun permissionTargets(overview: Overview?): PermissionTargets {
@@ -289,6 +328,13 @@ fun permissionTargets(overview: Overview?): PermissionTargets {
         nodes = overview.members.mapNotNull { pveNodeNameOrNull(it.name) }.distinct().sorted(),
         guests = overview.guests.filter { it.scope.isEmpty() && it.id >= 100 }.map { it.id to it.kind }.distinct().sortedBy { it.first },
         storages = overview.storage.mapNotNull { pveStorageIdOrNull(it.id) }.distinct().sorted(),
+        nodeAudit = overview.members.mapNotNull { member ->
+            val name = pveNodeNameOrNull(member.name) ?: return@mapNotNull null
+            name to NodeAuditSignal(
+                online = member.status == "online",
+                showsUsage = member.cpuFraction != null || member.memoryBytes != null || member.uptimeSeconds != null,
+            )
+        }.toMap(),
     )
 }
 
@@ -302,21 +348,33 @@ data class FeatureCheck(
     val summary: String,
 )
 
-private const val PATH_CHECK_LIMIT = 2_000
+internal const val PATH_CHECK_LIMIT = 2_000
 
-internal fun needPaths(need: PrivilegeNeed, targets: PermissionTargets): List<String> = when (need.scope) {
+private fun allNeedPaths(need: PrivilegeNeed, targets: PermissionTargets): List<String> = when (need.scope) {
     PermissionScope.Root -> listOf("/")
+    PermissionScope.Sdn -> listOf("/sdn")
     PermissionScope.Notifications -> listOf(need.scope.template)
     PermissionScope.Node -> targets.nodes.map { "/nodes/$it" }
     PermissionScope.Guest -> targets.guests.filter { need.guestKind == null || it.second == need.guestKind }.map { "/vms/${it.first}" }
     PermissionScope.Storage -> targets.storages.map { "/storage/$it" }
-}.take(PATH_CHECK_LIMIT).ifEmpty { listOf(need.scope.collection) }
+}.ifEmpty { listOf(need.scope.collection) }
+
+internal fun needPaths(need: PrivilegeNeed, targets: PermissionTargets): List<String> =
+    allNeedPaths(need, targets).take(PATH_CHECK_LIMIT)
 
 private data class PathVerdict(val path: String, val held: Boolean, val legacyOnly: Boolean, val reason: String)
 
-private class NeedOutcome(val need: PrivilegeNeed, val paths: List<String>, val held: Int, val failures: List<PathVerdict>) {
+private class NeedOutcome(
+    val need: PrivilegeNeed,
+    val paths: List<String>,
+    val held: Int,
+    val failures: List<PathVerdict>,
+    val total: Int,
+) {
     val checked: Int get() = paths.size
+    val truncated: Boolean get() = total > checked
     val status: FeatureStatus get() = when {
+        truncated && held == checked -> FeatureStatus.Unknown
         held == checked -> FeatureStatus.Allowed
         failures.all { it.legacyOnly } -> FeatureStatus.Unknown
         held == 0 -> FeatureStatus.Missing
@@ -329,6 +387,10 @@ private fun privilegeText(names: List<String>, any: Boolean) =
 
 private fun whyNotHeld(effective: EffectivePrivileges, missing: List<String>, any: Boolean): String {
     val wanted = privilegeText(missing, any)
+    val closer = missing.filter { it in effective.blocked }
+    if (closer.isNotEmpty() && effective.blockedFrom != null) {
+        return "${privilegeText(closer, any)} is set on ${effective.blockedFrom} without Propagate, so ${effective.path} does not inherit it."
+    }
     val source = effective.source
     return when {
         source == null -> "No role applies on ${effective.path} or its parents, so $wanted is not granted."
@@ -341,24 +403,68 @@ private fun whyNotHeld(effective: EffectivePrivileges, missing: List<String>, an
     }
 }
 
-private fun verdict(dump: PermissionDump, need: PrivilegeNeed, path: String): PathVerdict {
+/**
+ * Online node rows are a second answer. No CPU, memory or uptime means no Sys.Audit, so a missing node path must not
+ * inherit Allowed from a parent. Usage on an online node means Sys.Audit is held; if the permission list disagrees, the
+ * row is Unknown.
+ */
+private fun nodeInventoryVerdict(
+    need: PrivilegeNeed,
+    path: String,
+    effective: EffectivePrivileges,
+    targets: PermissionTargets,
+): PathVerdict? {
+    if (need.scope != PermissionScope.Node || need.open) return null
+    if (!path.startsWith("/nodes/")) return null
+    val name = path.removePrefix("/nodes/")
+    if (name.isEmpty() || '/' in name) return null
+    val signal = targets.nodeAudit[name] ?: return null
+    if (!signal.online) return null
+    val auditCheck = need.privileges == listOf("Sys.Audit")
+    if (!signal.showsUsage) {
+        if (!effective.exact) {
+            return PathVerdict(path, false, false,
+                "$path is not in the permission list. $name is online with no CPU, memory or uptime, so a role on a parent does not apply.")
+        }
+        if (auditCheck && "Sys.Audit" in effective.privileges) {
+            return PathVerdict(path, false, true,
+                "$name is online with no CPU, memory or uptime, so it has no Sys.Audit, but the permission list grants it. The two answers disagree.")
+        }
+        return null
+    }
+    if (auditCheck && "Sys.Audit" !in effective.privileges) {
+        return PathVerdict(path, false, true,
+            "$name is online and the inventory includes CPU, memory or uptime, which needs Sys.Audit, but the permission list does not grant it. The two answers disagree.")
+    }
+    return null
+}
+
+private fun verdict(dump: PermissionDump, need: PrivilegeNeed, path: String, targets: PermissionTargets): PathVerdict {
+    if (need.open) return PathVerdict(path, true, false, "")
     val effective = effectivePrivileges(dump, path)
+    nodeInventoryVerdict(need, path, effective, targets)?.let { return it }
     val have = effective.privileges
     val satisfied = if (need.any) need.privileges.any { it in have } else need.privileges.all { it in have }
     if (satisfied) return PathVerdict(path, true, false, "")
     val missing = if (need.any) need.privileges else need.privileges.filter { it !in have }
     val legacy = need.legacy.filter { it in have }
     if (legacy.isNotEmpty()) {
-        return PathVerdict(path, false, true,
-            "$path has ${legacy.joinToString()}, which Proxmox VE 8 and earlier accept. Version 9 needs ${privilegeText(need.privileges, need.any)}.")
+        return when (releaseBeforeNine(dump.release)) {
+            true -> PathVerdict(path, true, false, "")
+            false -> PathVerdict(path, false, false,
+                "$path has ${legacy.joinToString()}, which Proxmox VE 9 does not accept. It needs ${privilegeText(need.privileges, need.any)}.")
+            null -> PathVerdict(path, false, true,
+                "$path has ${legacy.joinToString()}, which Proxmox VE 8 and earlier accept. Version 9 needs ${privilegeText(need.privileges, need.any)}.")
+        }
     }
     return PathVerdict(path, false, false, whyNotHeld(effective, missing, need.any))
 }
 
 private fun evaluateNeed(dump: PermissionDump, need: PrivilegeNeed, targets: PermissionTargets): NeedOutcome {
-    val paths = needPaths(need, targets)
-    val verdicts = paths.map { verdict(dump, need, it) }
-    return NeedOutcome(need, paths, verdicts.count { it.held }, verdicts.filterNot { it.held })
+    val all = allNeedPaths(need, targets)
+    val paths = all.take(PATH_CHECK_LIMIT)
+    val verdicts = paths.map { verdict(dump, need, it, targets) }
+    return NeedOutcome(need, paths, verdicts.count { it.held }, verdicts.filterNot { it.held }, all.size)
 }
 
 private fun noun(scope: PermissionScope, many: Boolean) = when (scope) {
@@ -368,15 +474,25 @@ private fun noun(scope: PermissionScope, many: Boolean) = when (scope) {
     else -> "path"
 }
 
+private fun seenPhrase(scope: PermissionScope): String = if (scope == PermissionScope.Guest) " this identity can see" else ""
+
 private fun describe(outcome: NeedOutcome): String {
     val first = outcome.failures.firstOrNull()?.reason.orEmpty()
     val many = outcome.checked > 1
+    val see = seenPhrase(outcome.need.scope)
+    val word = noun(outcome.need.scope, true)
+    val cap = if (outcome.truncated) " ${outcome.total - outcome.checked} more were not checked." else ""
     return when (outcome.status) {
         FeatureStatus.Allowed ->
-            if (many) "Allowed on all ${outcome.checked} ${noun(outcome.need.scope, true)}." else "Allowed on ${outcome.paths.single()}."
-        FeatureStatus.Missing -> if (many) "Missing on all ${outcome.checked} ${noun(outcome.need.scope, true)}. $first" else first
-        FeatureStatus.Partial -> "Missing on ${outcome.failures.size} of ${outcome.checked} ${noun(outcome.need.scope, true)}. $first"
-        FeatureStatus.Unknown -> first
+            if (many) "Allowed on all ${outcome.checked} $word$see." else "Allowed on ${outcome.paths.single()}."
+        FeatureStatus.Missing -> (if (many) "Missing on all ${outcome.checked} $word$see. $first" else first) + cap
+        FeatureStatus.Partial -> "Missing on ${outcome.failures.size} of ${outcome.checked} $word$see. $first$cap"
+        FeatureStatus.Unknown -> when {
+            outcome.truncated && outcome.failures.isEmpty() ->
+                "Allowed on ${outcome.checked} of ${outcome.total} $word$see.$cap"
+            outcome.truncated -> (if (many) "Checked ${outcome.checked} of ${outcome.total} $word$see. $first" else first) + cap
+            else -> first
+        }
     }
 }
 
@@ -402,8 +518,28 @@ fun evaluateFeatures(
     val hidden = requirement.alsoNeeds.isNotEmpty() && requirement.alsoNeeds.none { alternative ->
         alternative.all { evaluateNeed(dump, it, targets).status == FeatureStatus.Allowed }
     }
-    if (hidden) return@map FeatureCheck(requirement, FeatureStatus.Partial, labels, requirement.alsoNote.orEmpty())
+    val requiredMissing = requirement.alsoRequires.any { evaluateNeed(dump, it, targets).status != FeatureStatus.Allowed }
+    if (hidden || requiredMissing) return@map FeatureCheck(requirement, FeatureStatus.Partial, labels, requirement.alsoNote.orEmpty())
     FeatureCheck(requirement, FeatureStatus.Allowed, labels, describe(worst))
+}
+
+private val releasePattern = Regex("""^(\d+)\.(\d+)""")
+
+/** `x.y` from a `GET /version` body. The repo id is dropped. Null when the body has no release. */
+fun parsePveRelease(body: String): String? {
+    val root = try { Json.parseToJsonElement(body) as? JsonObject } catch (_: Exception) { null } ?: return null
+    val data = root["data"] as? JsonObject ?: return null
+    val raw = (data["release"] as? JsonPrimitive)?.contentOrNull
+        ?: (data["version"] as? JsonPrimitive)?.contentOrNull
+        ?: return null
+    val match = releasePattern.find(raw.trim()) ?: return null
+    return "${match.groupValues[1]}.${match.groupValues[2]}"
+}
+
+/** True on Proxmox VE 8 and earlier, false on 9 and later, null when [release] is missing. */
+internal fun releaseBeforeNine(release: String?): Boolean? {
+    val major = release?.substringBefore('.')?.toIntOrNull() ?: return null
+    return major < 9
 }
 
 /** Counts per status, for the table header. */

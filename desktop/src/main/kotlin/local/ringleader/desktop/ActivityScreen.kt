@@ -53,6 +53,10 @@ import local.ringleader.core.powerPhaseLabel
 import local.ringleader.core.powerVisibleFields
 import local.ringleader.core.taskListFields
 import local.ringleader.core.taskDuration
+import local.ringleader.core.LOST_POWER_RESULT_ADVICE
+import local.ringleader.core.lostPowerResultText
+import local.ringleader.core.unresolvedActionText
+import local.ringleader.core.unresolvedSubmission
 
 private val taskClock = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
 internal fun activityClock(time: Instant?): String = try {
@@ -104,12 +108,15 @@ private fun statusColor(outcome: TaskOutcome) = when (outcome) {
             state.tasksError?.let { Text(it, color = Tech.Red, fontSize = 13.sp) }
             }
             }
+            if (state.connected && state.lostPowerResults.isNotEmpty()) {
+                item { LostPowerResults(state, workspace) }
+            }
             if ((state.connected || state.demo) && state.submissions.isNotEmpty()) {
                 item {
                 Column(verticalArrangement = Arrangement.spacedBy(Tech.Space8)) {
                 SectionLabel("Submitted actions", suffix = state.submissions.size.toString())
-                Text("Accepted is not finished. A task is complete only when its status is stopped and its exit status is OK. Check status reads once.",
-                    fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = Tech.Muted)
+                Text(SUBMISSIONS_EXPLANATION, fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = Tech.Muted)
+                unresolvedSubmission(state)?.let { Text(unresolvedActionText(it), color = Tech.Amber, fontSize = Tech.Label) }
                 }
                 }
                 items(state.submissions, key = { "submission:${it.localId}" }) { submission ->
@@ -142,12 +149,16 @@ private fun statusColor(outcome: TaskOutcome) = when (outcome) {
                     SectionLabel("Recent tasks", suffix = if (state.demo) "${tasks.size} · SAMPLE" else tasks.size.toString())
                     if (tasks.isEmpty()) Text(if (state.demo) "No sample tasks." else "No recent tasks are visible to this token.", color = Tech.Muted)
                     else Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        val warned = tasks.count { it.outcome == TaskOutcome.Succeeded && taskHasWarnings(it) }
                         listOf(TaskOutcome.Running to "RUNNING", TaskOutcome.Succeeded to "OK", TaskOutcome.Unsuccessful to "FAILED", TaskOutcome.Unknown to "UNKNOWN").forEach { (outcome, label) ->
                             val n = tasks.count { it.outcome == outcome }
-                            if (n > 0 || outcome != TaskOutcome.Unknown) Row(Modifier.border(1.dp, statusColor(outcome).copy(alpha = if (n > 0) .6f else .2f), Tech.Control).padding(horizontal = 8.dp, vertical = 3.dp),
+                            // The OK count includes tasks that finished with warnings; then it is amber, not green.
+                            val tint = counterColor(outcome, warned)
+                            if (n > 0 || outcome != TaskOutcome.Unknown) Row(Modifier.border(1.dp, tint.copy(alpha = if (n > 0) .6f else .2f), Tech.Control).padding(horizontal = 8.dp, vertical = 3.dp),
                                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                 Text(label, fontSize = 9.sp, letterSpacing = 1.sp, fontFamily = Tech.Mono, color = Tech.Muted)
-                                Text("$n", fontSize = 12.sp, fontFamily = Tech.Mono, fontWeight = FontWeight.SemiBold, color = if (n > 0) statusColor(outcome) else Tech.Muted)
+                                Text("$n", fontSize = 12.sp, fontFamily = Tech.Mono, fontWeight = FontWeight.SemiBold, color = if (n > 0) tint else Tech.Muted)
+                                if (outcome == TaskOutcome.Succeeded && warned > 0) Text("$warned WITH WARNINGS", fontSize = 9.sp, letterSpacing = 1.sp, fontFamily = Tech.Mono, color = Tech.Amber)
                             }
                         }
                     }
@@ -259,8 +270,41 @@ internal fun taskTypeName(type: String): String = taskTypeNames[type] ?: type
 }
 
 @Composable private fun TaskDurationText(task: ClusterTask, color: androidx.compose.ui.graphics.Color) {
-    val end = task.endedAt ?: (LocalNow.current ?: Instant.now())
-    Text(task.startedAt?.let { taskDuration(java.time.Duration.between(it, end).seconds.coerceAtLeast(0)) } ?: "—",Modifier.width(activityCols().duration),fontFamily=Tech.Mono,fontSize=10.sp,color=color,maxLines=1)
+    Text(activityElapsed(task.startedAt, task.endedAt, LocalNow.current ?: Instant.now()),Modifier.width(activityCols().duration),fontFamily=Tech.Mono,fontSize=10.sp,color=color,maxLines=1)
+}
+
+/**
+ * Elapsed time for one task row. A running task is measured against this computer's clock; when that clock is behind
+ * the node's the difference is negative, so the row says Unavailable instead of a misleading 0s.
+ */
+internal fun activityElapsed(startedAt: Instant?, endedAt: Instant?, now: Instant): String {
+    val start = startedAt ?: return "—"
+    val seconds = java.time.Duration.between(start, endedAt ?: now).seconds
+    return if (seconds < 0) "Unavailable" else taskDuration(seconds)
+}
+
+/** Counter tint. OK is green only when no task in it finished with warnings. */
+internal fun counterColor(outcome: TaskOutcome, warned: Int): Color =
+    if (outcome == TaskOutcome.Succeeded && warned > 0) Tech.Amber else statusColor(outcome)
+
+internal const val SUBMISSIONS_EXPLANATION =
+    "Accepted is not finished. RingMASTER reads the status of each accepted task until it stops. Check status reads it again now. A task is complete only when its status is stopped and its exit status is OK."
+
+/** Actions from an earlier session to this server whose result was lost. Dismiss only hides the note; nothing is sent. */
+@Composable internal fun LostPowerResults(state: WorkspaceState, workspace: Workspace) {
+    TechPanel(Modifier.fillMaxWidth(), rail = Tech.Amber) {
+        SectionLabel("Result not confirmed", suffix = state.lostPowerResults.size.toString())
+        Spacer(Modifier.height(6.dp))
+        state.lostPowerResults.forEach { item ->
+            Row(Modifier.fillMaxWidth().padding(vertical = 3.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Tech.Space12)) {
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(lostPowerResultText(item), color = Tech.Amber, fontSize = Tech.Label)
+                    Text("$LOST_POWER_RESULT_ADVICE Noted ${activityClock(item.at)}.", color = Tech.Muted, fontSize = 11.sp)
+                }
+                MiniAction("Dismiss") { workspace.dismissLostPowerResult(item.id) }
+            }
+        }
+    }
 }
 
 private data class ActivityColumns(val type: androidx.compose.ui.unit.Dp, val status: androidx.compose.ui.unit.Dp, val user: androidx.compose.ui.unit.Dp,

@@ -56,6 +56,45 @@ class OwnerOnlyTest {
         } finally { delete(directory) }
     }
 
+    @Test fun posixDirectoryAndFileAreOwnerOnlyAndALinkIsNotFollowed() {
+        val directory = tempDirectory()
+        try {
+            if (!directory.fileSystem.supportedFileAttributeViews().contains("posix")) return
+            val parentPerms = Files.getPosixFilePermissions(directory)
+            val child = directory.resolve("ringmaster")
+            createOwnerOnlyDirectories(child)
+            assertEquals(parentPerms, Files.getPosixFilePermissions(directory))
+            assertEquals(ownerDirectoryPermissions(), Files.getPosixFilePermissions(child))
+            val file = child.resolve("secret")
+            Files.writeString(file, "x")
+            grantOwnerOnly(file)
+            assertEquals(ownerFilePermissions(), Files.getPosixFilePermissions(file))
+            val link = directory.resolve("link")
+            Files.createSymbolicLink(link, child)
+            val before = Files.getPosixFilePermissions(child)
+            createOwnerOnlyDirectories(link)
+            assertEquals(before, Files.getPosixFilePermissions(child))
+        } finally { delete(directory) }
+    }
+
+    @Test fun aclDirectoryIsRestrictedToOneAllowEntry() {
+        val directory = tempDirectory()
+        try {
+            if (directory.fileSystem.supportedFileAttributeViews().contains("posix")) return
+            if (Files.getFileAttributeView(directory, AclFileAttributeView::class.java, LinkOption.NOFOLLOW_LINKS) == null) return
+            val child = directory.resolve("ringmaster")
+            createOwnerOnlyDirectories(child)
+            val entries = Files.getFileAttributeView(child, AclFileAttributeView::class.java, LinkOption.NOFOLLOW_LINKS)!!.acl
+            assertEquals(1, entries.size)
+            assertEquals(AclEntryType.ALLOW, entries.single().type())
+            assertEquals(AclEntryPermission.values().toSet(), entries.single().permissions())
+            val file = child.resolve("secret")
+            Files.writeString(file, "x")
+            grantOwnerOnly(file)
+            assertEquals(1, Files.getFileAttributeView(file, AclFileAttributeView::class.java, LinkOption.NOFOLLOW_LINKS)!!.acl.size)
+        } finally { delete(directory) }
+    }
+
     private fun tempDirectory() = Files.createTempDirectory("ringmaster-owner-")
 
     private fun delete(directory: Path) {

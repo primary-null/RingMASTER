@@ -33,10 +33,10 @@ object ConsoleHost {
 
     private fun buildApp(): CefApp {
         val builder = CefAppBuilder()
-        val cacheRoot = System.getenv("XDG_CACHE_HOME")?.let(::File) ?: File(System.getProperty("user.home"), ".cache")
-        builder.setInstallDir(File(cacheRoot, "ring-leader/jcef-152.0.6"))
+        val cacheRoot = cacheDirectory().toFile()
+        builder.setInstallDir(File(cacheRoot, "jcef-152.0.6"))
         builder.addJcefArgs("--no-first-run", "--no-default-browser-check")
-        builder.cefSettings.root_cache_path = File(cacheRoot, "ring-leader/chromium-profile").absolutePath
+        builder.cefSettings.root_cache_path = File(cacheRoot, "chromium-profile").absolutePath
         builder.cefSettings.windowless_rendering_enabled = false
         return builder.build()
     }

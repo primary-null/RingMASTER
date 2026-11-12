@@ -21,10 +21,18 @@ const val SPICE_BAD_TICKET = "The server returned an unusable SPICE ticket."
  * so [toString] never prints the fields and the viewer file is written only by the launcher.
  */
 class SpiceTicket internal constructor(val title: String, val proxy: String, private val fields: List<Pair<String, String>>) {
-    /** remote-viewer `.vv` file text. PVE already escapes newlines in the CA certificate as `\n`. */
+    /**
+     * remote-viewer `.vv` file text. PVE already escapes newlines in the CA certificate as `\n`. `delete-this-file=1`
+     * is added when PVE leaves it out, so remote-viewer removes the password file as soon as it has read it.
+     */
     fun viewerFile(): String = buildString {
         append("[virt-viewer]\n")
         fields.forEach { (key, value) -> append(key).append('=').append(value).append('\n') }
+        if (fields.none { it.first == "delete-this-file" }) append("delete-this-file=1\n")
+    }
+    /** True when [text] contains the one-time password, the proxy ticket in `host`, or another secret field. */
+    fun mentionsSecret(text: String): Boolean = fields.any { (key, value) ->
+        value.length >= 4 && (Redact.key(key) || key == "host") && value in text
     }
     override fun toString() = "SpiceTicket($title via $proxy)"
 }

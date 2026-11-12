@@ -9,7 +9,7 @@
 //! Usage: ringmaster-bt --seconds N   (N is clamped to 3..30)
 
 use serde_json::{Map, Value, json};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use windows::Devices::Bluetooth::BluetoothAdapter;
@@ -42,6 +42,27 @@ fn emit(value: &Value) {
     if writeln!(out, "{value}").and_then(|_| out.flush()).is_err() {
         std::process::exit(0);
     }
+}
+
+/// First line. The app ignores `t=hello` and uses it to tell this build from an older helper.
+fn hello_line() -> Value {
+    json!({ "t": "hello", "v": env!("CARGO_PKG_VERSION") })
+}
+
+/// Exit when the app closes our stdin. A normal scan keeps the pipe open until it stops us.
+fn stop_when_stdin_closes() {
+    std::thread::spawn(|| {
+        let mut input = std::io::stdin();
+        let mut buf = [0u8; 8];
+        loop {
+            match input.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => break,
+            }
+        }
+        // No "done" line: the app reports that the scan ended early.
+        std::process::exit(0);
+    });
 }
 
 /// The listening window from `--seconds N`: 10 when absent or unreadable, always within 3..30.
@@ -87,6 +108,7 @@ fn read_props(map: &IMapView<HSTRING, IInspectable>) -> Map<String, Value> {
 }
 
 fn run() -> Result<()> {
+    emit(&hello_line());
     let seconds = seconds_from_args();
     let adapter = match BluetoothAdapter::GetDefaultAsync()?.get() {
         Ok(a) => a,
@@ -159,6 +181,7 @@ fn run() -> Result<()> {
 }
 
 fn main() {
+    stop_when_stdin_closes();
     // SAFETY: called once on the main thread before any WinRT use; the multithreaded apartment lets watcher
     // callbacks arrive on pool threads while the main thread sleeps.
     unsafe { let _ = RoInitialize(RO_INIT_MULTITHREADED); }
@@ -171,7 +194,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_seconds;
+    use super::{hello_line, parse_seconds};
     fn args(v: &[&str]) -> Vec<String> { v.iter().map(|s| s.to_string()).collect() }
 
     #[test]
@@ -181,5 +204,12 @@ mod tests {
         assert_eq!(parse_seconds(&args(&["bt", "--seconds", "1"])), 3);
         assert_eq!(parse_seconds(&args(&["bt", "--seconds", "x"])), 10);
         assert_eq!(parse_seconds(&args(&["bt"])), 10);
+    }
+
+    #[test]
+    fn hello_names_a_version() {
+        let v = hello_line();
+        assert_eq!(v["t"], "hello");
+        assert!(v["v"].as_str().unwrap().len() > 0);
     }
 }

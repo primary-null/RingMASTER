@@ -62,6 +62,10 @@ class NodeToolsParsingTest {
         assertEquals(ServiceHealth.Stopped, health("dead", "disabled", "inactive"))
         assertEquals(ServiceHealth.NotInstalled, health("dead", "not-found", "inactive"))
         assertEquals(ServiceHealth.Transitioning, health("start", "enabled", "activating"))
+        assertEquals(ServiceHealth.Restarting, health("auto-restart", "enabled", "activating"))
+        assertEquals(ServiceHealth.Restarting, health("auto-restart-queued", "enabled", "active"))
+        assertEquals(ServiceHealth.NotInstalled, health("auto-restart", "not-found", "inactive"), "A missing unit stays not installed")
+        assertEquals(ServiceHealth.Failed, health("failed-before-auto-restart", "enabled", "failed"))
         // Older servers send the state alone.
         assertEquals(ServiceHealth.Running, health("running", null, null))
         assertEquals(ServiceHealth.Stopped, health("dead", null, null))
@@ -147,12 +151,46 @@ class NodeToolsParsingTest {
         assertEquals(70, syslogTailStart(100, 30))
     }
 
-    @Test fun followRereadsTheHeldTailLineAndWhatComesAfterIt() {
+    @Test fun followRereadsTheHeldTailAndWhatComesAfterIt() {
         assertNull(syslogFollowRequest(emptyList()))
         assertEquals(0 to 501, syslogFollowRequest(listOf(line(1))))
-        assertEquals(1_199 to 501, syslogFollowRequest(listOf(line(1_199), line(1_200))))
-        // The node returns lines with n > start, so start = held - 1 returns the held line first.
+        // Two held lines are both part of the anchor, so start is one before the older of them.
+        assertEquals(1_198 to 502, syslogFollowRequest(listOf(line(1_199), line(1_200))))
+        assertEquals(1_197 to 503, syslogFollowRequest((701..1_200).map(::line)))
+        // The node returns lines with n > start, so start = oldest anchor - 1 returns that line first.
         assertEquals(SYSLOG_PAGE + 1, syslogFollowRequest(listOf(line(5)))!!.second)
+    }
+
+    @Test fun followDelayGrowsWithTheLastCallAndWithRepeatedFailures() {
+        assertEquals(5_000, syslogFollowDelayMs(0, 0))
+        assertEquals(5_000, syslogFollowDelayMs(1_000, 0))
+        assertEquals(9_000, syslogFollowDelayMs(3_000, 0))
+        assertEquals(5_000, syslogFollowDelayMs(0, 1), "The first retry keeps the paced wait")
+        assertEquals(10_000, syslogFollowDelayMs(0, 2))
+        assertEquals(20_000, syslogFollowDelayMs(0, 3))
+        assertEquals(40_000, syslogFollowDelayMs(0, 4))
+        assertEquals(60_000, syslogFollowDelayMs(0, 5))
+        assertEquals(60_000, syslogFollowDelayMs(0, 9))
+        assertEquals(18_000, syslogFollowDelayMs(3_000, 2))
+        assertTrue(syslogCallTooSlow(10_000))
+        assertFalse(syslogCallTooSlow(9_999))
+    }
+
+    @Test fun aFollowReadMustMatchTheLastThreeHeldLines() {
+        val held = listOf(line(1_198), line(1_199), line(1_200))
+        val appended = checkSyslogFollow(held, page(1_198..1_203, 1_203)) as SyslogFollowResult.Appended
+        assertEquals(listOf(1_201, 1_202, 1_203), appended.lines.map { it.n })
+        assertEquals(SyslogFollowResult.NothingNew(1_200), checkSyslogFollow(held, page(1_198..1_200, 1_200)))
+        // One line of the anchor changed. A vacuum can keep the last line and still have shifted the ones before it.
+        val shifted = SyslogPage(listOf(SyslogLine(1_198, "other"), line(1_199), line(1_200), line(1_201)), 1_201)
+        assertEquals(SyslogFollowResult.Resync, checkSyslogFollow(held, shifted))
+    }
+
+    @Test fun thePackageListNoteDoesNotClaimAFreshAptUpdate() {
+        assertEquals(
+            "Compares installed packages with candidates from the node's last apt update. Reading this can rebuild the node's local package cache. It does not run apt update, and the list has no refresh time.",
+            NODE_UPDATES_NOTE,
+        )
     }
 
     @Test fun aVerifiedFollowReadAppendsOnlyWhatIsNew() {

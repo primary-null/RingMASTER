@@ -41,6 +41,7 @@ class BluezTest {
             parseBluezScanOutput("RINGMASTER-BLUEZ:NODAEMON\n", BtSource.Local, at).note)
         assertEquals(BT_NO_ADAPTER, scan("""{"data":[{}]}""").note)
         assertEquals(BT_NO_ADAPTER, parseBluezScanOutput("RINGMASTER-BLUEZ:NOADAPTER", BtSource.Local, at).note)
+        assertEquals(BT_SCAN_ENDED_EARLY, parseBluezScanOutput("RINGMASTER-BLUEZ:EARLY\n", BtSource.Local, at).note)
         assertTrue("/sys/class/bluetooth" in bluezScanScript(10))
         assertEquals(BT_ADAPTER_OFF, scan(sample.replace("\"data\":true", "\"data\":false")).note)
     }
@@ -57,11 +58,23 @@ class BluezTest {
     }
 
     @Test fun scriptIsBoundedAndDiscoveryOnly() {
-        assertContains(bluezScanScript(-10), "--timeout 3 scan on")
-        assertContains(bluezScanScript(100), "--timeout 30 scan on")
-        assertContains(bluezScanScript(12), "--timeout 12 scan on")
+        // Discovery is `select` plus `scan on` in one bluetoothctl session, on the adapter that reported Powered: yes.
+        // The old `bluetoothctl --timeout N scan on` line did not choose that adapter. The redirect is on the process,
+        // so the guest script no longer contains the substring `scan on >/dev/null`.
+        val guest = bluezScanScript(12)
+        assertContains(guest, "timeout -k 2 20")
+        assertContains(guest, "timeout 3 \"$@\"")
+        assertContains(guest, "bluetoothctl --timeout 12")
+        assertContains(guest, "select %s\\nscan on\\n")
+        assertContains(guest, "Powered: yes")
+        assertContains(guest, ">/dev/null 2>&1")
+        assertFalse(guest.contains("scan on >/dev/null"), guest)
+        assertContains(bluezScanScript(-10), "bluetoothctl --timeout 3")
+        assertContains(bluezScanScript(-10), "timeout -k 2 11")
+        assertContains(bluezScanScript(100), "bluetoothctl --timeout 30")
+        assertContains(bluezScanScript(100), "timeout -k 2 38")
         for (forbidden in listOf("power on", "pair", "trust", "connect")) {
-            assertFalse(bluezScanScript(10).contains(forbidden))
+            assertFalse(bluezScanScript(10).contains(forbidden), forbidden)
         }
         assertEquals(listOf("sh", "-c", bluezScanScript(10)), bluezScanCommand(10))
     }
@@ -83,16 +96,19 @@ class BluezTest {
         val script = bluezLiveScript(12)
         assertTrue(script.indexOf("RINGMASTER-BLUEZ:MISSING") < script.indexOf("RINGMASTER-BLUEZ:NOADAPTER"))
         assertTrue(script.indexOf("RINGMASTER-BLUEZ:NOADAPTER") < script.indexOf("RINGMASTER-BLUEZ:LIVE"))
-        assertTrue(script.indexOf("RINGMASTER-BLUEZ:LIVE") < script.indexOf("--timeout 12 scan on"))
+        assertTrue(script.indexOf("RINGMASTER-BLUEZ:LIVE") < script.indexOf("scan on"), script)
         assertTrue(script.indexOf("scan on") < script.indexOf("RINGMASTER-BLUEZ:OBJECTS"))
         assertContains(script, "RINGMASTER-BLUEZ:NODAEMON")
         assertContains(script, "stdbuf -oL")
         assertContains(script, "| cat")
-        assertFalse(script.contains("scan on >/dev/null"))
-        assertContains(bluezScanScript(12), "scan on >/dev/null")
-        assertContains(bluezLiveScript(-10), "--timeout 3 scan on")
-        assertContains(bluezLiveScript(100), "--timeout 30 scan on")
-        for (forbidden in listOf("power on", "pair", "trust", "connect")) assertFalse(script.contains(forbidden))
+        assertContains(script, "select %s\\nscan on\\n")
+        assertContains(script, "bluetoothctl --timeout 12")
+        assertContains(script, "timeout 3 \"$@\"")
+        assertFalse(script.contains("scan on >/dev/null"), script)
+        assertFalse(script.contains("timeout -k"), "the local live script has no outer timeout -k")
+        assertContains(bluezLiveScript(-10), "bluetoothctl --timeout 3")
+        assertContains(bluezLiveScript(100), "bluetoothctl --timeout 30")
+        for (forbidden in listOf("power on", "pair", "trust", "connect")) assertFalse(script.contains(forbidden), forbidden)
     }
 
     @Test fun liveTranscriptMergesWithoutDroppingSamples() {
@@ -196,6 +212,13 @@ class BluezTest {
         garbage.accept("RINGMASTER-BLUEZ:OBJECTS", 0)
         garbage.accept("garbage", 0)
         assertFailsWith<IllegalStateException> { garbage.finish(1) }
+        val early = BluezLiveParser(BtSource.Local, 3_000, at)
+        early.accept("RINGMASTER-BLUEZ:LIVE", 0)
+        early.accept("[NEW] Device 4C:87:5D:12:34:56 Pixel", 10)
+        val stopped = early.finish(40)
+        assertEquals(BT_SCAN_ENDED_EARLY, stopped.note)
+        assertTrue(stopped.finished)
+        assertEquals("Pixel", stopped.devices.single().name)
     }
 
     @Test fun liveUpdatesAtMostEvery150ms() {
@@ -242,6 +265,87 @@ class BluezTest {
         nowNs = 0L
         assertEquals(result, scanner.scan(10))
     }
+
+    @Test fun aQuietPipeFlushesTheTrailingSighting() {
+        var nowNs = 0L
+        val control = BtScanControl()
+        val scanner = BluezScanner(
+            control = control,
+            stream = { _, _, onLine ->
+                onLine("RINGMASTER-BLUEZ:LIVE")
+                onLine("[NEW] Device 4C:87:5D:12:34:56 Pixel")
+                nowNs = 20_000_000L
+                onLine("[CHG] Device 4C:87:5D:12:34:56 RSSI: -67")
+                nowNs = 200_000_000L
+                control.idle()
+                onLine("RINGMASTER-BLUEZ:OBJECTS")
+                onLine(poweredOnly)
+            },
+            clock = { nowNs },
+            now = { at },
+        )
+        val updates = mutableListOf<BtScan>()
+        scanner.scan(10) { updates += it }
+        assertEquals(listOf(0L, 200L), updates.filter { !it.finished }.map { it.elapsedMs })
+        assertEquals(-67, updates[1].devices.single().rssi)
+    }
+
+    @Test fun aScanThatStopsBeforeObjectsEndsEarly() {
+        val scanner = BluezScanner(
+            stream = { _, _, onLine ->
+                onLine("RINGMASTER-BLUEZ:LIVE")
+                onLine("[NEW] Device 4C:87:5D:12:34:56 Pixel")
+            },
+            clock = { 0L },
+            now = { at },
+        )
+        val result = scanner.scan(5)
+        assertEquals(BT_SCAN_ENDED_EARLY, result.note)
+        assertTrue(result.finished)
+        assertEquals("Pixel", result.devices.single().name)
+        assertNotEquals(5_000L, result.elapsedMs)
+    }
+
+    @Test fun aSecondScanDoesNotStartBesideARunningOne() {
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val running = java.util.concurrent.atomic.AtomicInteger(0)
+        val max = java.util.concurrent.atomic.AtomicInteger(0)
+        val scanner = BluezScanner(stream = { _, _, _ ->
+            val n = running.incrementAndGet()
+            max.updateAndGet { m -> kotlin.math.max(m, n) }
+            entered.countDown()
+            assertTrue(release.await(20, java.util.concurrent.TimeUnit.SECONDS))
+            running.decrementAndGet()
+        })
+        val first = Thread { runCatching { scanner.scan(5) } }
+        first.isDaemon = true
+        first.start()
+        assertTrue(entered.await(10, java.util.concurrent.TimeUnit.SECONDS))
+        val second = assertFailsWith<IllegalStateException> { scanner.scan(5) }
+        assertContains(second.message.orEmpty(), "already running")
+        release.countDown()
+        first.join(10_000)
+        assertEquals(1, max.get())
+    }
+
+    @Test fun cancelKillsTheScanProcess() {
+        val control = BtScanControl()
+        val started = java.util.concurrent.CountDownLatch(1)
+        val thread = Thread {
+            streamProcess(slowCommand(), 30, { started.countDown() }, control)
+        }
+        thread.isDaemon = true
+        thread.start()
+        assertTrue(started.await(15, java.util.concurrent.TimeUnit.SECONDS))
+        control.cancel()
+        thread.join(10_000)
+        assertFalse(thread.isAlive, "cancel left the scan process running")
+    }
+
+    private fun slowCommand(): List<String> =
+        if (System.getProperty("os.name").startsWith("Windows")) listOf("cmd.exe", "/c", "echo started & ping -n 30 127.0.0.1 >nul")
+        else listOf("sh", "-c", "echo started; sleep 30")
 
     private val poweredOnly = """{"type":"a{oa{sa{sv}}}","data":[{"/org/bluez/hci0":{"org.bluez.Adapter1":{"Address":{"type":"s","data":"02:00:00:00:00:10"},"Alias":{"type":"s","data":"test-hci0"},"Powered":{"type":"b","data":true}}}}]}"""
     private val mergeDump = """{"type":"a{oa{sa{sv}}}","data":[{"/org/bluez/hci0":{"org.bluez.Adapter1":{"Address":{"type":"s","data":"02:00:00:00:00:10"},"Alias":{"type":"s","data":"test-hci0"},"Name":{"type":"s","data":"test-hci0"},"Powered":{"type":"b","data":true},"Discovering":{"type":"b","data":false}}},"/org/bluez/hci0/dev_4C_87_5D_12_34_56":{"org.bluez.Device1":{"Address":{"type":"s","data":"4C:87:5D:12:34:56"},"Name":{"type":"s","data":"Pixel 8 Pro"},"Alias":{"type":"s","data":"Pixel 8 Pro"},"Class":{"type":"u","data":5898764},"Icon":{"type":"s","data":"computer"},"Paired":{"type":"b","data":true},"Connected":{"type":"b","data":false},"RSSI":{"type":"n","data":-55},"Adapter":{"type":"o","data":"/org/bluez/hci0"}}},"/org/bluez/hci0/dev_AA_BB_CC_DD_EE_01":{"org.bluez.Device1":{"Address":{"type":"s","data":"AA:BB:CC:DD:EE:01"},"AddressType":{"type":"s","data":"random"},"Name":{"type":"s","data":"Beacon"},"RSSI":{"type":"n","data":-40},"Adapter":{"type":"o","data":"/org/bluez/hci0"}}},"/org/bluez/hci0/dev_AA_BB_CC_DD_EE_02":{"org.bluez.Device1":{"Address":{"type":"s","data":"AA:BB:CC:DD:EE:02"},"Name":{"type":"s","data":"Headphones"},"Paired":{"type":"b","data":true},"Adapter":{"type":"o","data":"/org/bluez/hci0"}}}}]}"""

@@ -12,6 +12,9 @@ import androidx.compose.ui.unit.*
 import io.ktor.websocket.*
 import kotlinx.coroutines.*
 import kotlinx.serialization.json.*
+import local.ringleader.core.Trace
+import local.ringleader.core.TraceOutcome
+import local.ringleader.core.TraceSource
 import local.ringleader.desktop.*
 import org.jetbrains.skia.*
 import java.nio.ByteBuffer
@@ -30,7 +33,8 @@ class TileDiff {
         }
     }
 }
-class WebScene(private val hostActions: Boolean = false) : AutoCloseable {
+/** [onInput] runs for every browser message; the server counts it as session activity. */
+class WebScene(private val hostActions: Boolean = false, private val onInput: () -> Unit = {}) : AutoCloseable {
     private val dispatcher = java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r,"browser-scene").apply { isDaemon=true } }.asCoroutineDispatcher()
     override fun close() = dispatcher.close()
     suspend fun run(socket: WebSocketSession) = withContext(dispatcher) {
@@ -42,15 +46,15 @@ class WebScene(private val hostActions: Boolean = false) : AutoCloseable {
         scene.constraints = Constraints.fixed(width,height)
         val diff = TileDiff()
         var forceRender = true
-        var lastInput = System.nanoTime()
+        var ignored = 0
         try {
             while(isActive) {
                 val started = System.nanoTime()
                 var next = socket.incoming.tryReceive().getOrNull()
                 var count = 0
                 while(next != null && count++ < 128) {
-                    if(next is Frame.Text) {
-                        lastInput = System.nanoTime()
+                    if(next is Frame.Text) try {
+                        onInput()
                         val msg = Json.parseToJsonElement(next.readText()).jsonObject
                         fun number(k: String, default: Float = 0f) = msg[k]?.jsonPrimitive?.floatOrNull ?: default
                         fun str(k: String) = msg[k]?.jsonPrimitive?.content.orEmpty()
@@ -82,10 +86,14 @@ class WebScene(private val hostActions: Boolean = false) : AutoCloseable {
                             }
                             "text" -> sendText(scene,str("text"))
                         }
+                    } catch (e: CancellationException) { throw e } catch (e: Exception) {
+                        // One bad message is dropped; the socket and the Desk stay. A flood is noted only a few times.
+                        if (ignored++ < 20) Trace.emit(TraceSource.Web, "message", "Browser message ignored", mapOf("error" to e.javaClass.simpleName), outcome = TraceOutcome.Warn)
                     }
                     next = socket.incoming.tryReceive().getOrNull()
                 }
-                if(socket.incoming.isClosedForReceive || System.nanoTime()-lastInput > 1800000000000L) break
+                // Idle and absolute session limits are enforced by the server, which closes the socket with a reason.
+                if(socket.incoming.isClosedForReceive) break
                 if(forceRender || scene.hasInvalidations()) {
                     forceRender = false
                     scene.render(System.nanoTime()).use { image -> for(tile in diff.frame(image,width,height)) socket.send(Frame.Binary(true,tile)) }

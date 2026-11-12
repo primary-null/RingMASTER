@@ -29,8 +29,9 @@ import local.ringleader.core.WorkspaceState
 private const val UPDATE_ROWS_SHOWN = 100
 
 /**
- * Packages the node lists as upgradable (`GET /nodes/{node}/apt/update`, read-only). It is the node's cached list from its last
- * package-list refresh; this panel never refreshes it. Shows the first 100 packages and a button for the rest.
+ * Packages the node lists as upgradable (`GET /nodes/{node}/apt/update`, read-only). The list compares installed
+ * packages with candidates from the node's last apt update. Reading it can rebuild the node's local cache. It does
+ * not run apt update, and the list has no refresh time. Shows the first 100 packages and a button for the rest.
  */
 @Composable fun NodeUpdatesPanel(state: WorkspaceState, workspace: Workspace, node: String, modifier: Modifier = Modifier) {
     val section = state.nodeUpdates
@@ -53,7 +54,7 @@ private const val UPDATE_ROWS_SHOWN = 100
             else -> {
                 view.updates.take(if (showAll) Int.MAX_VALUE else UPDATE_ROWS_SHOWN).forEach { UpdateRow(it) }
                 if (!showAll && view.updates.size > UPDATE_ROWS_SHOWN) MiniAction("Show all ${view.updates.size}") { showAll = true }
-                Text("UPDATED ${readClock(section.updatedAt)}", fontFamily = Tech.Mono, fontSize = 10.sp, color = Tech.Muted)
+                Text("Read ${readClock(section.updatedAt)}", fontFamily = Tech.Mono, fontSize = 10.sp, color = Tech.Muted)
             }
         }
     }
@@ -78,6 +79,6 @@ internal fun updateVersionText(update: PackageUpdate): String = when {
             }
             Text(updateVersionText(update), fontFamily = Tech.Mono, fontSize = 10.5.sp, color = Tech.Ink, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
-        (update.description ?: update.title)?.let { Text(it, fontSize = 10.sp, color = Tech.Muted, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+        update.title?.let { Text(it, fontSize = 10.sp, color = Tech.Muted, maxLines = 1, overflow = TextOverflow.Ellipsis) }
     }
 }

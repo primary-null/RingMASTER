@@ -7,6 +7,7 @@ import kotlin.random.Random
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -45,7 +46,7 @@ class Connection(
     }
     override fun close() {
         synchronized(this) { token?.fill('\u0000'); token = null; code?.fill('\u0000'); code = null }
-        tickets.clear()
+        tickets.close()
     }
     override fun toString() = "Connection(redacted)"
 }
@@ -144,6 +145,8 @@ data class WorkspaceState(
     val tasks: List<ClusterTask>? = null, val tasksLoading: Boolean = false,
     val tasksError: String? = null, val tasksStale: Boolean = false, val tasksUpdatedAt: Instant? = null,
     val submissions: List<PowerSubmission> = emptyList(), val powerBusy: Boolean = false, val powerNotice: String? = null,
+    /** Actions from an earlier session to this server whose result was lost. Memory only; shown until dismissed. */
+    val lostPowerResults: List<LostPowerResult> = emptyList(),
     val kind: String = DIRECT_PVE_KIND,
     val selectedNode: String? = null, val nodeStatus: NodeLiveStatus? = null, val nodeStatusLoading: Boolean = false,
     val nodeStatusError: String? = null, val nodeStatusStale: Boolean = false, val nodeStatusUpdatedAt: Instant? = null,
@@ -152,7 +155,8 @@ data class WorkspaceState(
     val liveIntervalSeconds: Int = LIVE_INTERVAL_DEFAULT,
     val liveBackoffSeconds: Int? = null,
     val chartHistory: InspectionSection<List<HistoryPoint>> = InspectionSection(), val chartHistoryLoading: Boolean = false,
-    val nodeNetwork: InspectionSection<List<NodeInterface>> = InspectionSection(), val nodeNetworkLoading: Boolean = false, val nodeNetworkNode: String? = null,
+    val nodeNetwork: InspectionSection<List<NodeInterface>> = InspectionSection(), val nodeNetworkPending: String? = null,
+    val nodeNetworkLoading: Boolean = false, val nodeNetworkNode: String? = null,
     val history: FleetHistory = FleetHistory(),
     /** Last known console frames, memory only (never written to disk), newest last, at most [CONSOLE_STILL_LIMIT]. */
     val consoleStills: Map<ResourceId, ConsoleStill> = emptyMap(),
@@ -187,7 +191,15 @@ fun findCurrentGuest(remote: String, selected: Guest, guests: List<Guest>): Gues
     return guests.singleOrNull { it.resource == selected.resource }
 }
 
-/** Called on the UI dispatcher. Generation checks discard late results even if I/O ignores cancellation. */
+/**
+ * Called on the UI dispatcher. Generation checks discard late results even if I/O ignores cancellation.
+ *
+ * Thread confinement: every public function and every coroutine this class launches must run on the one dispatcher of
+ * [scope] (the Compose UI dispatcher in the app, the test dispatcher in tests). The session fields (generation counters,
+ * [connection], the job fields, the history counters, the confirmation and task id maps) have no lock and rely on that.
+ * Blocking I/O goes through `runInterruptible(Dispatchers.IO)` and resumes on the caller. Do not call a mutator from a
+ * `withContext(Dispatchers.IO)` block or a callback thread; post it to the UI dispatcher first (as the SPICE exit callback does).
+ */
 class Workspace(
     private val scope: CoroutineScope,
     private val gateway: InventoryGateway = LiveInventoryGateway(),
@@ -226,6 +238,14 @@ class Workspace(
     private var powerBusy = false
     /** Server task ids for this session only. Cleared with the secret. Never written to a profile. */
     private val submittedUpids = mutableMapOf<String, String>()
+    /** Automatic status reads of accepted tasks, by submission id. GET only; nothing is sent again. */
+    private val powerFollowJobs = mutableMapOf<String, Job>()
+    private var powerCatchUpJob: Job? = null
+    /** The confirmation whose POST is in flight, so a session that ends before its answer can say it may have run. */
+    private var powerInFlight: PowerConfirmation? = null
+    /** Lost results for this app run. Shared by every session window; memory only. */
+    internal var lostResults: LostPowerResultStore = LostPowerResultStore.shared
+    private var captureNotice: String? = null
     private var liveLoop: Job? = null
     private var liveTick: Job? = null
     private var taskLoop: Job? = null
@@ -264,6 +284,7 @@ class Workspace(
         mutableState.value = WorkspaceState(
             connected = true, address = value.address, kind = value.kind, connectionEpoch = ++epochCounter,
             live = true, liveIntervalSeconds = LIVE_INTERVAL_DEFAULT,
+            lostPowerResults = lostResults.forRemote(value.address),
         )
         refresh()
         startLiveLoop()
@@ -299,6 +320,13 @@ class Workspace(
         if (!mutableState.value.connected && !mutableState.value.demo) return
         mutableState.update { it.copy(live = enabled, liveIntervalSeconds = clamped, liveBackoffSeconds = null) }
         startLiveLoop()
+    }
+
+    /** [setLive] on, with a jittered first wait, so sessions restored together (window un-minimised) do not poll in the same second. */
+    internal fun resumeLive() {
+        if (!mutableState.value.connected && !mutableState.value.demo) return
+        mutableState.update { it.copy(live = true, liveBackoffSeconds = null) }
+        startLiveLoop(stagger = true)
     }
 
     /** While enabled, repeat the direct cluster task read every 10 seconds. PDM does not call that feed. */
@@ -349,6 +377,7 @@ class Workspace(
                 if (current.kind != PDM_KIND) holdMember(remote)
             } catch (e: CancellationException) { throw e }
             catch (e: SessionExpiredException) { if (generation == expected) expire() }
+            catch (e: TwoFactorRequiredException) { if (generation == expected) expire(e.message) }
             catch (e: Exception) {
                 if (generation == expected) mutableState.update {
                     it.copy(loading = false, stale = it.overview != null, error = readableError(e), nodeStatusLoading = false, nodeStatusStale = it.nodeStatus != null || it.nodeStatusStale)
@@ -419,27 +448,33 @@ class Workspace(
         val session = generation
         val epoch = snapshot.connectionEpoch
         mutableState.update { it.copy(taskLog = TaskLogState(task, loading = true, following = true)) }
+        // Read status and the lines after the last one held, every 2 s while the task runs. A failed read keeps the
+        // lines, says so, and tries again after a longer wait (up to 30 s). Only permission denial or session expiry stops it.
         taskLogJob = scope.launch {
-            try {
-                val status = taskLogGateway.status(current, task.node, task.upid)
-                val page = taskLogGateway.page(current, task.node, task.upid, 0, TASK_LOG_PAGE_LIMIT)
+            var failures = 0
+            var first = true
+            while (isActive) {
+                if (!first || failures > 0) delay(taskLogRetryDelay(failures))
                 if (!logCurrent(token, session, epoch, task)) return@launch
-                publishLog(token, session, epoch, task, status, page)
-                var currentStatus = status
-                while (isActive && taskLogKeepsPolling(currentStatus)) {
-                    delay(TASK_LOG_POLL_MS)
-                    if (!logCurrent(token, session, epoch, task)) return@launch
-                    currentStatus = taskLogGateway.status(current, task.node, task.upid)
+                try {
+                    val status = taskLogGateway.status(current, task.node, task.upid)
                     if (!logCurrent(token, session, epoch, task)) return@launch
                     val start = mutableState.value.taskLog?.lines?.lastOrNull()?.n ?: 0
-                    val next = taskLogGateway.page(current, task.node, task.upid, start, TASK_LOG_PAGE_LIMIT)
+                    val page = taskLogGateway.page(current, task.node, task.upid, start, TASK_LOG_PAGE_LIMIT)
                     if (!logCurrent(token, session, epoch, task)) return@launch
-                    publishLog(token, session, epoch, task, currentStatus, next)
+                    publishLog(token, session, epoch, task, status, page)
+                    first = false
+                    failures = 0
+                    if (!taskLogKeepsPolling(status)) return@launch
+                } catch (e: CancellationException) { throw e }
+                catch (e: SessionExpiredException) { if (generation == session) expire(); return@launch }
+                catch (e: GuestPermissionException) { failLog(token, session, epoch, task, TASK_LOG_AUDIT_DENIED); return@launch }
+                catch (e: Exception) {
+                    failures++
+                    val wait = taskLogRetryDelay(failures) / 1000
+                    retryLog(token, session, epoch, task, "${readableError(e)} Trying again in $wait s.")
                 }
-            } catch (e: CancellationException) { throw e }
-            catch (e: SessionExpiredException) { if (generation == session) expire() }
-            catch (e: GuestPermissionException) { failLog(token, session, epoch, task, TASK_LOG_AUDIT_DENIED) }
-            catch (e: Exception) { failLog(token, session, epoch, task, readableError(e)) }
+            }
         }
     }
 
@@ -485,7 +520,8 @@ class Workspace(
             } catch (e: CancellationException) { throw e }
             catch (e: SessionExpiredException) { if (generation == session) expire() }
             catch (e: GuestPermissionException) { failLog(token, session, epoch, task, TASK_LOG_AUDIT_DENIED) }
-            catch (e: Exception) { failLog(token, session, epoch, task, readableError(e)) }
+            // One failed Load more keeps the lines and any running follow; the button can be used again.
+            catch (e: Exception) { retryLog(token, session, epoch, task, readableError(e)) }
         }
     }
 
@@ -527,9 +563,20 @@ class Workspace(
             if (taskLogToken != token || generation != session || state.connectionEpoch != epoch) return@update state
             val log = state.taskLog ?: return@update state
             if (log.task.identity != task.identity) return@update state
-            val lines = mergeTaskLogLines(log.lines, page.lines)
-            val total = maxOf(log.total, page.total, lines.lastOrNull()?.n ?: 0)
-            state.copy(taskLog = log.copy(lines = lines, total = total, status = status ?: log.status, error = null, loading = false))
+            val merged = mergeTaskLogLines(log.lines, page.lines)
+            val total = maxOf(log.total, page.total, merged.lastOrNull()?.n ?: 0)
+            val (lines, dropped) = capTaskLogLines(merged)
+            state.copy(taskLog = log.copy(lines = lines, total = total, status = status ?: log.status, error = null, loading = false, dropped = log.dropped + dropped))
+        }
+    }
+
+    /** A follow read failed. Keep the lines and the follow; show the reason until the next good read. */
+    private fun retryLog(token: Long, session: Long, epoch: Long, task: ClusterTask, message: String) {
+        mutableState.update { state ->
+            if (taskLogToken != token || generation != session || state.connectionEpoch != epoch) return@update state
+            val log = state.taskLog ?: return@update state
+            if (log.task.identity != task.identity) return@update state
+            state.copy(taskLog = log.copy(loading = false, error = message))
         }
     }
 
@@ -559,7 +606,19 @@ class Workspace(
             PowerConfirmation(current.connectionEpoch, current.address, current.address, label, listed.resource, listed.node, listed.name, listed.kind, action, listed.status, listed.template)
         } else return null
         val bound = confirmation.copy(snapshot = snapshot)
-        return if (powerRefusal(bound, current) == null) bound else null
+        val refusal = powerRefusal(bound, current)
+        // A refused click says why instead of doing nothing. A later successful capture clears that sentence.
+        val previous = captureNotice
+        captureNotice = refusal
+        if (refusal != null) mutableState.update { it.copy(powerNotice = refusal) }
+        else if (previous != null) mutableState.update { if (it.powerNotice == previous) it.copy(powerNotice = null) else it }
+        return if (refusal == null) bound else null
+    }
+
+    /** Forget one lost result. Nothing is sent to the server. */
+    fun dismissLostPowerResult(id: String) {
+        lostResults.dismiss(id)
+        mutableState.update { state -> state.copy(lostPowerResults = state.lostPowerResults.filterNot { it.id == id }) }
     }
 
     /**
@@ -593,6 +652,7 @@ class Workspace(
             return false
         }
         powerBusy = true
+        powerInFlight = confirmation
         val session = generation
         mutableState.update { it.copy(powerBusy = true, powerNotice = null) }
         powerJob = scope.launch {
@@ -623,6 +683,7 @@ class Workspace(
             } finally {
                 if (generation == session) {
                     powerBusy = false
+                    powerInFlight = null
                     mutableState.update { if (it.connectionEpoch == confirmation.epoch) it.copy(powerBusy = false) else it }
                 }
             }
@@ -630,7 +691,10 @@ class Workspace(
         return true
     }
 
-    /** One manual status read for a task this session submitted. This does not poll and does not send the action again. */
+    /**
+     * One manual status read for a task this session submitted. It never sends the action again.
+     * Accepted tasks are also followed automatically; this reads once more on demand.
+     */
     fun checkPower(localId: String) {
         if (mutableState.value.demo || statusJob?.isActive == true) return
         val item = mutableState.value.submissions.find { it.localId == localId } ?: return
@@ -647,13 +711,7 @@ class Workspace(
             try {
                 val status = powerGateway.status(current, item.node, upid)
                 if (generation != session) return@launch
-                mutableState.update { state ->
-                    if (state.connectionEpoch != epoch) state
-                    else state.copy(submissions = state.submissions.map { submission ->
-                        if (submission.localId != localId) submission
-                        else submission.copy(checking = false, phase = status.phase, detail = status.detail)
-                    })
-                }
+                applyPowerStatus(localId, epoch, session, status, manual = true)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: SessionExpiredException) {
@@ -679,11 +737,134 @@ class Workspace(
 
     private fun rememberSubmission(submission: PowerSubmission, epoch: Long, upid: String?) {
         if (upid != null) submittedUpids[submission.localId] = upid
+        var stored = false
         mutableState.update { state ->
             if (state.connectionEpoch != epoch) {
                 submittedUpids.remove(submission.localId)
+                stored = false
                 state
-            } else state.copy(submissions = listOf(submission) + state.submissions, powerNotice = null, powerBusy = false)
+            } else {
+                stored = true
+                state.copy(submissions = listOf(submission) + state.submissions, powerNotice = null, powerBusy = false)
+            }
+        }
+        if (stored && upid != null && submission.phase == PowerPhase.Accepted && submission.checkable) followPower(submission.localId, submission.node, upid, epoch)
+        // A snapshot outcome that is already final (simulated in demo, or refused) refreshes the open guest page now.
+        if (stored) snapshotInspectionRefresh(submission)
+    }
+
+    /**
+     * Apply one status read to a submission, the same way for the automatic follow and the manual check. When an
+     * accepted task reaches another phase the block on other actions lifts and the resource list is read once.
+     */
+    private fun applyPowerStatus(localId: String, epoch: Long, session: Long, status: PowerTaskStatus, manual: Boolean) {
+        var finished = false
+        var changed: PowerSubmission? = null
+        mutableState.update { state ->
+            if (state.connectionEpoch != epoch) return@update state
+            finished = false
+            changed = null
+            state.copy(submissions = state.submissions.map { submission ->
+                if (submission.localId != localId) submission
+                else {
+                    finished = submission.phase == PowerPhase.Accepted && status.phase != PowerPhase.Accepted
+                    submission.copy(checking = if (manual) false else submission.checking, phase = status.phase, detail = status.detail)
+                        .also { if (it.phase != submission.phase) changed = it }
+                }
+            })
+        }
+        if (finished) {
+            if (manual) powerFollowJobs.remove(localId)?.cancel()
+            catchUpAfterPower(session, epoch)
+        }
+        // A snapshot task that reached its end refreshes the open guest page (followed or checked by hand).
+        changed?.let { snapshotInspectionRefresh(it) }
+    }
+
+    /**
+     * Follow an accepted task with GET of its status: after 1 s, then each wait one second longer up to 5 s, until it
+     * stops. Paused while live reads are off (the window is minimised); stopped on disconnect or session change.
+     * A failed read keeps the earlier phase and tries again. Permission denial stops the follow; Check status stays.
+     */
+    private fun followPower(localId: String, node: String, upid: String, epoch: Long) {
+        val current = connection ?: return
+        if (current.kind != DIRECT_PVE_KIND) return
+        val session = generation
+        powerFollowJobs.remove(localId)?.cancel()
+        val job = scope.launch {
+            var attempt = 0
+            var failures = 0
+            while (isActive) {
+                delay(powerFollowDelay(attempt++))
+                if (!powerFollowCurrent(session, epoch, localId)) break
+                if (!mutableState.value.live) {
+                    // Paused: wait for live reads to come back (or the session to change), then read at once.
+                    mutableState.first { it.connectionEpoch != epoch || it.live }
+                    if (!powerFollowCurrent(session, epoch, localId)) break
+                }
+                if (mutableState.value.submissions.firstOrNull { it.localId == localId }?.checking == true) continue
+                try {
+                    val status = powerGateway.status(current, node, upid)
+                    if (!powerFollowCurrent(session, epoch, localId)) break
+                    failures = 0
+                    applyPowerStatus(localId, epoch, session, status, manual = false)
+                    if (status.phase != PowerPhase.Accepted) break
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: SessionExpiredException) {
+                    if (generation == session) expire()
+                    break
+                } catch (e: GuestPermissionException) {
+                    if (powerFollowCurrent(session, epoch, localId)) mutableState.update {
+                        it.copy(powerNotice = POWER_FOLLOW_DENIED)
+                    }
+                    break
+                } catch (e: Exception) {
+                    if (!powerFollowCurrent(session, epoch, localId)) break
+                    if (++failures == POWER_FOLLOW_NOTICE_FAILURES) mutableState.update {
+                        it.copy(powerNotice = "Reading the task status failed. RingMASTER keeps trying; the action was not sent again. ${readableError(e)}")
+                    }
+                }
+            }
+        }
+        powerFollowJobs[localId] = job
+        job.invokeOnCompletion { if (powerFollowJobs[localId] === job) powerFollowJobs.remove(localId) }
+    }
+
+    private fun powerFollowCurrent(session: Long, epoch: Long, localId: String): Boolean {
+        if (generation != session) return false
+        val state = mutableState.value
+        return state.connectionEpoch == epoch && state.submissions.any { it.localId == localId && it.phase == PowerPhase.Accepted }
+    }
+
+    /** Read the resource list once, a few seconds after a task ends, so the guest row catches up with the task. */
+    private fun catchUpAfterPower(session: Long, epoch: Long) {
+        powerCatchUpJob?.cancel()
+        powerCatchUpJob = scope.launch {
+            delay(POWER_CATCH_UP_DELAY_MS)
+            if (generation != session || mutableState.value.connectionEpoch != epoch) return@launch
+            mutableState.first { it.connectionEpoch != epoch || it.live }
+            inventoryJob?.join()
+            liveTick?.join()
+            if (!liveCurrent(session, epoch)) return@launch
+            val tick = launch { quietTick(session, epoch) }
+            liveTick = tick
+            tick.join()
+        }
+    }
+
+    /** Keep what this app cannot prove about a sent action when its session ends, so the next connection can say so. */
+    private fun recordLostResults() {
+        val current = connection ?: return
+        val state = mutableState.value
+        if (state.demo || !state.connected) return
+        val now = clock()
+        state.submissions.filter { !it.simulated && (it.phase == PowerPhase.Accepted || it.phase == PowerPhase.Unknown) }.forEach {
+            lostResults.add(LostPowerResult(newLocalId(), current.address, it.node, it.vmid, it.kind, it.name, it.action, it.phase == PowerPhase.Accepted, now))
+        }
+        val inFlight = powerInFlight
+        if (powerBusy && inFlight != null) {
+            lostResults.add(LostPowerResult(newLocalId(), current.address, inFlight.node, inFlight.resource.vmid, inFlight.kind, inFlight.name, inFlight.action, false, now))
         }
     }
 
@@ -740,7 +921,8 @@ class Workspace(
     }
 
     fun select(guest: Guest) {
-        dropInspection()
+        val previous = mutableState.value.selected
+        if (previous?.resource != guest.resource) dropInspection()
         clearMember()
         val remote = currentRemote() ?: run { clearSelection(); return }
         require(guest.remote == remote) { "This guest belongs to a different connection." }
@@ -758,6 +940,7 @@ class Workspace(
                 } else it.updatedAt
                 it.copy(selected = guest, details = pdmListDetails(guest), detailsLoading = false, detailsError = null, detailsUpdatedAt = readAt)
             }
+            refreshInspectionIfGuestMoved(previous, guest)
             return
         }
         detailJob?.cancel()
@@ -767,9 +950,11 @@ class Workspace(
         mutableState.update { it.copy(selected = guest, details = null, detailsLoading = true, detailsError = null, detailsUpdatedAt = null) }
         if (mutableState.value.demo) {
             mutableState.update { it.copy(details = demoDetails(guest), detailsLoading = false, detailsUpdatedAt = Instant.now()) }
+            refreshInspectionIfGuestMoved(previous, guest)
             return
         }
         val current = connection ?: run { clearSelection(); return }
+        refreshInspectionIfGuestMoved(previous, guest)
         detailJob = scope.launch {
             try {
                 val details = gateway.details(current, guest)
@@ -829,7 +1014,7 @@ class Workspace(
         val session = generation
         val id = live.resource
         mutableState.update { it.copy(consoleStillBusy = it.consoleStillBusy + id, consoleStillErrors = it.consoleStillErrors - id) }
-        scope.launch {
+        consoleStillJobs[id] = scope.launch {
             try {
                 val still = consoleStillGateway.capture(current, live)
                 if (generation == session) mutableState.update {
@@ -841,9 +1026,13 @@ class Workspace(
             catch (e: SessionExpiredException) { if (generation == session) expire() }
             catch (e: Exception) {
                 if (generation == session) mutableState.update { it.copy(consoleStillBusy = it.consoleStillBusy - id, consoleStillErrors = it.consoleStillErrors + (id to (if (e is java.io.IOException) readableError(e) else e.message ?: "The screen could not be captured."))) }
+            } finally {
+                if (consoleStillJobs[id] === currentCoroutineContext()[Job]) consoleStillJobs.remove(id)
             }
         }
     }
+    /** Console captures in flight, one per guest at most (the busy set). Cancelled with the session. */
+    private val consoleStillJobs = mutableMapOf<ResourceId, Job>()
 
     /**
      * Opens a live console for a VM in the current direct-PVE inventory. The session holds the websocket;
@@ -886,54 +1075,113 @@ class Workspace(
 
     private var historyGeneration = 0L
     private var networkGeneration = 0L
-
-    /** Reads [node]'s network configuration into [WorkspaceState.nodeNetwork]; demo mode shows sample interfaces. */
-    fun loadNodeNetwork(node: String) {
-        val state = mutableState.value
-        val expected = ++networkGeneration
-        val session = generation
-        mutableState.update { it.copy(nodeNetwork = InspectionSection(), nodeNetworkLoading = true, nodeNetworkNode = node) }
-        if (state.demo) { mutableState.update { it.copy(nodeNetwork = InspectionSection(demoNodeNetwork), nodeNetworkLoading = false) }; return }
-        val current = connection ?: run { mutableState.update { it.copy(nodeNetworkLoading = false) }; return }
-        if (state.kind == PDM_KIND) { mutableState.update { it.copy(nodeNetworkLoading = false) }; return }
-        scope.launch {
-            val result = try {
-                InspectionSection(kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { PveClient().nodeNetwork(current, node) })
-            } catch (e: CancellationException) { throw e }
-              catch (e: SessionExpiredException) { if (session == generation) expire(); return@launch }
-              catch (e: GuestPermissionException) { InspectionSection<List<NodeInterface>>(error = "Not permitted for this token") }
-              catch (e: Exception) { InspectionSection<List<NodeInterface>>(error = e.message ?: "Unavailable") }
-            if (session == generation && expected == networkGeneration && mutableState.value.nodeNetworkNode == node)
-                mutableState.update { it.copy(nodeNetwork = result, nodeNetworkLoading = false) }
+    private var historyJob: Job? = null
+    private var networkJob: Job? = null
+    /** The chart in [WorkspaceState.chartHistory]: target (guest or node), timeframe and consolidation. Null when it holds no good series. */
+    private var historyShown: Any? = null
+    /** One RRD read, a node's when the node is given, else the guest's. A GET; tests replace it. */
+    internal var historyRead: suspend (Connection, String?, Guest?, String, String) -> List<HistoryPoint> = { current, node, guest, timeframe, cf ->
+        runInterruptible(Dispatchers.IO) {
+            val client = PveClient()
+            parseHistory(if (node != null) client.nodeHistoryRead(current, node, timeframe, cf) else client.guestRead(current, requireNotNull(guest), historySuffix(timeframe, cf)))
         }
     }
 
+    /**
+     * Reads [node]'s network configuration into [WorkspaceState.nodeNetwork]. A pending `/etc/network/interfaces.new`
+     * is kept beside the rows, not shown as the live network. The same node's last rows stay on screen while a refresh runs.
+     * Demo mode shows sample interfaces. An offline or unknown node is not requested.
+     */
+    fun loadNodeNetwork(node: String) {
+        val state = mutableState.value
+        if (!state.connected && !state.demo) return
+        val expected = ++networkGeneration
+        val session = generation
+        networkJob?.cancel()
+        val keep = state.nodeNetworkNode == node && state.nodeNetwork.value != null
+        mutableState.update {
+            it.copy(
+                nodeNetwork = if (keep) state.nodeNetwork.copy(error = null) else InspectionSection(),
+                nodeNetworkPending = if (keep) state.nodeNetworkPending else null,
+                nodeNetworkLoading = true,
+                nodeNetworkNode = node,
+            )
+        }
+        val refusal = if (state.demo) {
+            if (pveNodeNameOrNull(node) == null) NODE_TOOLS_NODE_UNKNOWN else null
+        } else nodeToolsRefusal(state, node)
+        if (state.demo && refusal == null) {
+            mutableState.update { it.copy(nodeNetwork = InspectionSection(demoNodeNetwork), nodeNetworkPending = null, nodeNetworkLoading = false, nodeNetworkNode = node) }
+            return
+        }
+        if (refusal != null) {
+            mutableState.update { it.copy(nodeNetwork = InspectionSection(error = refusal), nodeNetworkPending = null, nodeNetworkLoading = false, nodeNetworkNode = node) }
+            return
+        }
+        val current = connection ?: run { mutableState.update { it.copy(nodeNetworkLoading = false) }; return }
+        networkJob = scope.launch {
+            try {
+                val report = nodeToolsGateway.network(current, node)
+                if (session == generation && expected == networkGeneration && mutableState.value.nodeNetworkNode == node) {
+                    mutableState.update { it.copy(nodeNetwork = InspectionSection(report.interfaces), nodeNetworkPending = report.pendingChanges, nodeNetworkLoading = false) }
+                }
+            } catch (e: CancellationException) { throw e }
+            catch (e: SessionExpiredException) { if (session == generation) expire() }
+            catch (e: GuestPermissionException) { failNodeNetwork(session, expected, node, NODE_NETWORK_DENIED) }
+            catch (e: Exception) { failNodeNetwork(session, expected, node, readableError(e)) }
+        }
+    }
+
+    private fun failNodeNetwork(session: Long, expected: Long, node: String, message: String) {
+        if (session != generation || expected != networkGeneration || mutableState.value.nodeNetworkNode != node) return
+        mutableState.update { it.copy(nodeNetwork = it.nodeNetwork.copy(error = message), nodeNetworkLoading = false) }
+    }
+
+    /**
+     * Reads one RRD history into [WorkspaceState.chartHistory]. When it cannot be read now (no connection, PDM, a stale
+     * inventory, nothing selected) the loading flag is cleared at once: the same chart keeps its last good series, another
+     * chart shows why it is empty. A reload of the same chart keeps its series on screen until the new one arrives.
+     */
     fun inspectHistory(timeframe: String, cf: String, node: String? = null) {
         historySuffix(timeframe, cf)
         val state = mutableState.value
         val guest = state.selected
         val expected = ++historyGeneration
         val session = generation
-        mutableState.update { it.copy(chartHistory = InspectionSection(), chartHistoryLoading = true) }
+        historyJob?.cancel()
+        val key = listOf(node?.let { "node" to it } ?: guest?.resource, timeframe, cf)
         if(state.demo) {
             val points = if(node != null) demoNodeHistory(timeframe,cf) else guest?.let { demoInspection(it,timeframe).history.value.orEmpty().map { p -> p.copy(values=p.values.mapValues { (k,v) -> if(cf == "MAX" && k !in listOf("maxmem","maxcpu")) v?.times(1.25) else v }) } }.orEmpty()
+            historyShown = key
             mutableState.update { it.copy(chartHistory=InspectionSection(points), chartHistoryLoading=false) }; return
         }
-        val current = connection ?: return
-        if(state.kind == PDM_KIND || state.stale || (node == null && (guest == null || guest.scope.isNotEmpty()))) return
-        scope.launch {
+        val current = connection
+        val refusal = when {
+            current == null -> HISTORY_NOT_CONNECTED
+            state.kind == PDM_KIND || current.kind == PDM_KIND || (node == null && guest != null && guest.scope.isNotEmpty()) -> HISTORY_DIRECT_ONLY
+            node == null && guest == null -> HISTORY_NOTHING_SELECTED
+            state.stale -> HISTORY_STALE
+            else -> null
+        }
+        val keep = historyShown == key && state.chartHistory.value != null
+        if (refusal != null || current == null) {
+            if (!keep) historyShown = null
+            mutableState.update { if (keep) it.copy(chartHistoryLoading = false) else it.copy(chartHistory = InspectionSection(error = refusal ?: HISTORY_NOT_CONNECTED), chartHistoryLoading = false) }
+            return
+        }
+        if (!keep) historyShown = null
+        mutableState.update { it.copy(chartHistory = if (keep) it.chartHistory else InspectionSection(), chartHistoryLoading = true) }
+        historyJob = scope.launch {
             val result = try {
-                val points = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                    val client = PveClient()
-                    parseHistory(if(node != null) client.nodeHistoryRead(current,node,timeframe,cf) else client.guestRead(current,requireNotNull(guest),historySuffix(timeframe,cf)))
-                }
-                InspectionSection(points)
+                InspectionSection(historyRead(current, node, guest, timeframe, cf))
             } catch(e: CancellationException) { throw e }
               catch(e: SessionExpiredException) { if(session == generation) expire(); return@launch }
               catch(e: GuestPermissionException) { InspectionSection<List<HistoryPoint>>(error="Not permitted for this token") }
               catch(e: Exception) { InspectionSection<List<HistoryPoint>>(error=e.message ?: "Unavailable") }
-            if(session == generation && expected == historyGeneration && (if(node != null) mutableState.value.selectedNode == node else mutableState.value.selected?.resource == guest?.resource))
+            if(session == generation && expected == historyGeneration && (if(node != null) mutableState.value.selectedNode == node else mutableState.value.selected?.resource == guest?.resource)) {
+                historyShown = key.takeIf { result.value != null }
                 mutableState.update { it.copy(chartHistory=result, chartHistoryLoading=false) }
+            }
         }
     }
     private var inspectionGeneration = 0L
@@ -946,20 +1194,54 @@ class Workspace(
         inspectionJob?.cancel()
         val expected = ++inspectionGeneration
         val session = generation
+        val epoch = state.connectionEpoch
         if (state.demo) { mutableState.update { it.copy(inspection = demoInspection(guest,timeframe), inspectionLoading = false) }; return }
         val current = connection ?: return
-        val storages = state.overview?.storage.orEmpty().filter { it.node == guest.node && it.remote == guest.remote && "backup" in it.content.orEmpty().split(',') }.map { it.id }.distinct()
-        mutableState.update { it.copy(inspection = null, inspectionLoading = true) }
+        val recorded = state.overview?.storage.orEmpty().filter { storage ->
+            storage.node == guest.node && storage.remote == guest.remote &&
+                storage.content.orEmpty().split(',').any { it.trim() == "backup" }
+        }
+        val active = recorded.filter { backupStorageActive(it.status) }.map { it.id }.distinct()
+        mutableState.update {
+            val keep = it.inspection?.takeIf { report -> report.resource == guest.resource }
+            it.copy(inspection = keep, inspectionLoading = true, detailsError = null)
+        }
         inspectionJob = scope.launch {
             try {
-                val result = inspectionGateway.read(current,guest,storages,timeframe)
-                if(generation == session && inspectionGeneration == expected && mutableState.value.selected?.resource == guest.resource && mutableState.value.selected?.node == guest.node)
-                    mutableState.update { it.copy(inspection = result, inspectionLoading = false) }
+                inspectionGateway.readPublishing(current, guest, active, { partial ->
+                    if (generation != session || inspectionGeneration != expected) return@readPublishing
+                    val selected = mutableState.value.selected
+                    if (selected?.resource != guest.resource || selected.node != guest.node) return@readPublishing
+                    mutableState.update { state ->
+                        val live = state.selected
+                        if (state.connectionEpoch != epoch || live?.resource != guest.resource || live.node != guest.node) state
+                        else state.copy(inspection = mergeGuestInspection(state.inspection, partial), inspectionLoading = true)
+                    }
+                }, backupKnown = recorded.isNotEmpty(), timeframe = timeframe)
+                if (generation == session && inspectionGeneration == expected && mutableState.value.selected?.resource == guest.resource && mutableState.value.selected?.node == guest.node)
+                    mutableState.update { it.copy(inspectionLoading = false) }
             } catch(e: CancellationException) { throw e }
             catch(e: SessionExpiredException) { if(generation == session) expire() }
             catch(e: Exception) { if(generation == session && inspectionGeneration == expected) mutableState.update { it.copy(inspectionLoading = false, detailsError = readableError(e)) } }
         }
     }
+
+    /** Same guest, new node: read again, and leave the previous sections up until the new ones arrive. */
+    private fun refreshInspectionIfGuestMoved(previous: Guest?, guest: Guest) {
+        if (previous?.resource != guest.resource || previous.node == guest.node) return
+        if (mutableState.value.inspection?.resource != guest.resource) return
+        inspectGuest()
+    }
+
+    /** A snapshot task is finished only at a terminal phase. Accepted and unknown do not refresh the page. */
+    private fun snapshotInspectionRefresh(submission: PowerSubmission) {
+        if (submission.action !in listOf(PowerAction.SnapshotCreate, PowerAction.SnapshotRollback, PowerAction.SnapshotDelete)) return
+        if (submission.phase != PowerPhase.Succeeded && submission.phase != PowerPhase.Unsuccessful && submission.phase != PowerPhase.Simulated) return
+        val guest = mutableState.value.selected ?: return
+        if (submission.remote != guest.remote || submission.vmid != guest.id || submission.kind != guest.kind) return
+        inspectGuest()
+    }
+
     private fun dropInspection() {
         inspectionGeneration++; inspectionJob?.cancel()
         mutableState.update { it.copy(inspection = null, inspectionLoading = false) }
@@ -1107,6 +1389,12 @@ class Workspace(
     }
 
     private fun closeSession() {
+        recordLostResults()
+        powerInFlight = null
+        captureNotice = null
+        powerFollowJobs.values.toList().forEach { it.cancel() }
+        powerFollowJobs.clear()
+        powerCatchUpJob?.cancel()
         dropInspection()
         pendingNodeSelection = null
         usedConfirmations.clear()
@@ -1115,6 +1403,8 @@ class Workspace(
         powerBusy = false
         submittedUpids.clear()
         inventoryJob?.cancel(); detailJob?.cancel(); taskJob?.cancel(); powerJob?.cancel(); statusJob?.cancel(); nodeJob?.cancel()
+        historyJob?.cancel(); networkJob?.cancel(); historyShown = null
+        consoleStillJobs.values.toList().forEach { it.cancel() }; consoleStillJobs.clear()
         liveLoop?.cancel(); liveTick?.cancel(); taskLoop?.cancel(); taskTick?.cancel(); taskLogJob?.cancel(); taskLogMoreJob?.cancel()
         netCounters = emptyMap()
         historyReadings = emptyMap()
@@ -1134,7 +1424,17 @@ class Workspace(
         return generation == session && state.connectionEpoch == epoch && state.live && (state.connected || state.demo)
     }
 
-    private fun startLiveLoop() {
+    /** -1..1, scaled by [liveWaitMillis]. Tests replace it to make the error and resume waits exact. */
+    internal var liveJitter: () -> Double = { Random.nextDouble(-1.0, 1.0) }
+
+    /**
+     * The quiet inventory loop. It waits [liveWaitMillis]: the chosen interval, or the larger error backoff, never less
+     * than the interval. After a failure, and on the first wait after [resumeLive], the wait is jittered so sessions that
+     * failed or resumed together spread out. A tick that comes due while another read is running looks again after
+     * [LIVE_BUSY_RECHECK_MS] instead of waiting a whole interval; when a manual refresh read the inventory meanwhile, the
+     * interval starts again. Every live read is a GET and may be repeated; no mutation is sent from this loop.
+     */
+    private fun startLiveLoop(stagger: Boolean = false) {
         liveLoop?.cancel()
         liveTick?.cancel()
         val state = mutableState.value
@@ -1142,14 +1442,25 @@ class Workspace(
         val session = generation
         val epoch = state.connectionEpoch
         liveLoop = scope.launch {
+            var jitterNext = stagger
             while (isActive && liveCurrent(session, epoch)) {
-                val wait = (mutableState.value.liveBackoffSeconds ?: mutableState.value.liveIntervalSeconds).coerceIn(LIVE_INTERVAL_MIN, LIVE_INTERVAL_MAX)
                 val backoff = mutableState.value.liveBackoffSeconds
-                traceLoop { TraceLiveLoop(state = if (backoff != null) "backoff" else "waiting", nextTickAt = java.time.Instant.now().plusSeconds(wait.toLong()),
-                    intervalMs = mutableState.value.liveIntervalSeconds * 1000L, backoffSeconds = backoff?.toLong() ?: 0L) }
-                delay(wait * 1000L)
+                val interval = mutableState.value.liveIntervalSeconds
+                val wait = liveWaitMillis(interval, backoff, if (backoff != null || jitterNext) liveJitter() else 0.0)
+                jitterNext = false
+                traceLoop { TraceLiveLoop(state = if (backoff != null) "backoff" else "waiting", nextTickAt = java.time.Instant.now().plusMillis(wait),
+                    intervalMs = interval * 1000L, backoffSeconds = backoff?.toLong() ?: 0L) }
+                delay(wait)
                 if (!isActive || !liveCurrent(session, epoch)) break
-                if (inventoryJob?.isActive == true || detailJob?.isActive == true || nodeJob?.isActive == true || liveTick?.isActive == true) continue
+                val readBefore = mutableState.value.updatedAt
+                var waited = false
+                while (liveBusy()) {
+                    waited = true
+                    traceLoop { it.copy(state = "waiting", nextTickAt = java.time.Instant.now().plusMillis(LIVE_BUSY_RECHECK_MS)) }
+                    delay(LIVE_BUSY_RECHECK_MS)
+                    if (!isActive || !liveCurrent(session, epoch)) return@launch
+                }
+                if (waited && mutableState.value.updatedAt != readBefore) continue
                 traceLoop { it.copy(state = "refreshing", nextTickAt = null) }
                 Trace.emit(TraceSource.LiveLoop, "tick", if (mutableState.value.demo) "Refresh tick · sample data" else "Refresh tick")
                 val tick = launch { quietTick(session, epoch) }
@@ -1158,6 +1469,8 @@ class Workspace(
             }
         }
     }
+
+    private fun liveBusy() = inventoryJob?.isActive == true || detailJob?.isActive == true || nodeJob?.isActive == true || liveTick?.isActive == true
 
     private fun startTaskLoop() {
         taskLoop?.cancel()
@@ -1180,7 +1493,10 @@ class Workspace(
         }
     }
 
-    /** Inventory plus the selected guest and selected member. Does not set loading or clear the open inspector. */
+    /**
+     * Inventory plus the selected guest and selected member. Does not set loading or clear the open inspector.
+     * Only a failed inventory read marks the fleet stale and backs off; the side reads keep their failures on their own fields.
+     */
     private suspend fun quietTick(session: Long, epoch: Long) {
         try {
             if (!liveCurrent(session, epoch)) return
@@ -1194,6 +1510,8 @@ class Workspace(
             throw e
         } catch (e: SessionExpiredException) {
             if (generation == session) expire()
+        } catch (e: TwoFactorRequiredException) {
+            if (generation == session) expire(e.message)
         } catch (e: Exception) {
             if (generation == session && mutableState.value.connectionEpoch == epoch) markLiveFailure(e)
         }
@@ -1204,9 +1522,7 @@ class Workspace(
         val readAt = clock()
         demoCursor = stepDemoOverview(demoCursor, demoRandom)
         val overview = demoCursor
-        publishOverview(overview, readAt)
-        quietReconcile(DEMO_REMOTE_KEY, overview.guests)
-        recordHistory(overview, readAt)
+        publishTick(DEMO_REMOTE_KEY, overview, readAt)
         val selected = mutableState.value.selected
         if (selected != null) {
             mutableState.update { state ->
@@ -1216,9 +1532,13 @@ class Workspace(
             }
         }
         quietHoldMember(DEMO_REMOTE_KEY)
-        if (liveCurrent(session, epoch)) markLiveSuccess(readAt)
     }
 
+    /**
+     * The inventory is published, with its history step, as soon as it arrives. The selected guest's and node's status are
+     * read after it, and only for the session in view: a session in the background keeps its rail live with the one
+     * inventory read and catches up on the side reads when it comes into view.
+     */
     private suspend fun directQuietTick(current: Connection, session: Long, epoch: Long) {
         val remote = current.remoteKey
         val fetched = gateway.overview(current)
@@ -1227,14 +1547,11 @@ class Workspace(
         val overview = requireActiveRemote(remote, adoptRecordedIndex(remote, fetched), DIRECT_PVE_KIND)
         if (!liveCurrent(session, epoch)) return
         val readAt = clock()
-        publishOverview(overview, readAt)
-        quietReconcile(remote, overview.guests)
-        recordHistory(overview, readAt)
-        quietGuestDetails(current, session, epoch, readAt)
+        publishTick(remote, overview, readAt)
         quietHoldMember(remote)
+        if (!inView) return
+        quietGuestDetails(current, session, epoch, readAt)
         quietMemberStatus(current, session, epoch, readAt)
-        if (!liveCurrent(session, epoch)) return
-        markLiveSuccess(readAt)
     }
 
     private suspend fun pdmQuietTick(current: Connection, session: Long, epoch: Long) {
@@ -1245,20 +1562,33 @@ class Workspace(
         val overview = mergePdmFleet(mutableState.value.overview, remote, document)
         if (!liveCurrent(session, epoch)) return
         val readAt = clock()
-        publishOverview(overview, readAt)
-        quietReconcile(remote, overview.guests)
-        recordHistory(overview, readAt)
+        publishTick(remote, overview, readAt)
         quietGuestDetails(current, session, epoch, readAt)
-        if (!liveCurrent(session, epoch)) return
-        markLiveSuccess(readAt)
     }
 
-    private fun publishOverview(overview: Overview, readAt: Instant) {
-        mutableState.update { it.copy(overview = overview, updatedAt = readAt) }
-    }
-
-    private fun markLiveSuccess(readAt: Instant) {
-        mutableState.update { it.copy(stale = false, error = null, liveBackoffSeconds = null, updatedAt = readAt) }
+    /**
+     * One state update for a successful inventory read: the overview, the selected guest's new row, the history step and
+     * the cleared error and backoff, so the fleet redraws once per read. A selected guest that left the inventory is
+     * dropped after it. No suspension in between; runs on the UI dispatcher like every other state write.
+     */
+    private fun publishTick(remote: String, overview: Overview, readAt: Instant) {
+        val step = nextFleetHistory(mutableState.value.history, netCounters, overview, readAt, historyReadings)
+        netCounters = step.counters
+        historyReadings = step.readings
+        val selected = mutableState.value.selected
+        val fresh = selected?.let { findCurrentGuest(remote, it, overview.guests) }
+        mutableState.update {
+            it.copy(
+                overview = overview, updatedAt = readAt,
+                // Nothing recorded when the server had refreshed nothing since the last read: the charts move only with new data.
+                history = if (step.fresh) step.history else it.history,
+                selected = if (fresh != null && it.selected?.resource == fresh.resource) fresh else it.selected,
+                stale = false, error = null, liveBackoffSeconds = null,
+            )
+        }
+        if (selected != null && fresh == null) clearSelection()
+        // Same guest on a new node (migration): read its page again, keeping the old sections up meanwhile.
+        else if (selected != null && fresh != null) refreshInspectionIfGuestMoved(selected, fresh)
     }
 
     private fun markLiveFailure(error: Exception) {
@@ -1272,20 +1602,13 @@ class Workspace(
         }
     }
 
-    /** Keep the same guest identity. Replace the row, and drop the selection only when that guest is gone. */
-    private fun quietReconcile(remote: String, guests: List<Guest>) {
-        val selected = mutableState.value.selected ?: return
-        val fresh = findCurrentGuest(remote, selected, guests)
-        if (fresh == null) clearSelection()
-        else if (fresh != selected) mutableState.update { it.copy(selected = fresh) }
-    }
-
     private fun quietHoldMember(remote: String) {
         val name = mutableState.value.selectedNode ?: return
         val present = mutableState.value.overview?.members?.any { it.remote == remote && it.name == name } == true
         if (!present) clearMember()
     }
 
+    /** A failed read keeps the last details and shows the error on them; it does not touch the fleet. A lost login still ends the session. */
     private suspend fun quietGuestDetails(current: Connection, session: Long, epoch: Long, readAt: Instant) {
         val guest = mutableState.value.selected ?: return
         if (guest.remote != current.remoteKey && !mutableState.value.demo) return
@@ -1301,16 +1624,25 @@ class Workspace(
         if (detailJob?.isActive == true) return
         val expectedDetail = detailGeneration
         val resource = guest.resource
-        val details = gateway.details(current, guest)
+        fun stillCurrent(state: WorkspaceState) =
+            liveCurrent(session, epoch) && state.connectionEpoch == epoch && state.selected?.resource == resource && detailGeneration == expectedDetail
+        val details = try {
+            gateway.details(current, guest)
+        } catch (e: CancellationException) { throw e }
+        catch (e: SessionExpiredException) { throw e }
+        catch (e: Exception) {
+            if (stillCurrent(mutableState.value)) mutableState.update { state -> if (!stillCurrent(state)) state else state.copy(detailsError = readableError(e)) }
+            return
+        }
         currentCoroutineContext().ensureActive()
-        if (!liveCurrent(session, epoch) || detailGeneration != expectedDetail) return
-        if (mutableState.value.selected?.resource != resource) return
+        if (!stillCurrent(mutableState.value)) return
         mutableState.update { state ->
-            if (state.connectionEpoch != epoch || state.selected?.resource != resource || detailGeneration != expectedDetail) state
+            if (!stillCurrent(state)) state
             else state.copy(details = details, detailsError = null, detailsUpdatedAt = readAt)
         }
     }
 
+    /** Like [quietGuestDetails]: a failure stays on the node status fields, the last status kept and marked stale. */
     private suspend fun quietMemberStatus(current: Connection, session: Long, epoch: Long, readAt: Instant) {
         if (current.kind != DIRECT_PVE_KIND) return
         val state = mutableState.value
@@ -1320,11 +1652,23 @@ class Workspace(
         if (nodeJob?.isActive == true) return
         val expected = nodeGeneration
         val name = member.name
-        val status = nodeStatusGateway.status(current, member.remote, name, "")
+        fun stillCurrent(state: WorkspaceState) =
+            liveCurrent(session, epoch) && state.connectionEpoch == epoch && state.selectedNode == name && nodeGeneration == expected
+        val status = try {
+            nodeStatusGateway.status(current, member.remote, name, "")
+        } catch (e: CancellationException) { throw e }
+        catch (e: SessionExpiredException) { throw e }
+        catch (e: Exception) {
+            if (stillCurrent(mutableState.value)) mutableState.update {
+                if (!stillCurrent(it)) it
+                else it.copy(nodeStatusError = readableError(e), nodeStatusStale = it.nodeStatus?.node == name, nodeStatusNote = null)
+            }
+            return
+        }
         currentCoroutineContext().ensureActive()
-        if (!liveCurrent(session, epoch) || nodeGeneration != expected || mutableState.value.selectedNode != name) return
+        if (!stillCurrent(mutableState.value)) return
         mutableState.update {
-            if (it.connectionEpoch != epoch || it.selectedNode != name || nodeGeneration != expected) it
+            if (!stillCurrent(it)) it
             else it.copy(nodeStatus = status, nodeStatusError = null, nodeStatusStale = false, nodeStatusNote = null, nodeStatusUpdatedAt = readAt)
         }
     }
@@ -1388,6 +1732,9 @@ class Workspace(
     private var syslogVisible = false
     private var syslogFollowing = true
     private var syslogCatchUp = false
+    private var syslogFailures = 0
+    private var lastSyslogDurationMs = 0L
+    private var syslogSawSlow = false
     private var demoSyslogTotal = DEMO_SYSLOG_START_TOTAL
     private var storageGeneration = 0L
     private var storageJob: Job? = null
@@ -1396,7 +1743,7 @@ class Workspace(
         permissionsGeneration++; servicesGeneration++; updatesGeneration++; syslogGeneration++; storageGeneration++
         permissionsJob?.cancel(); servicesJob?.cancel(); updatesJob?.cancel(); storageJob?.cancel()
         syslogJob?.cancel(); syslogMoreJob?.cancel(); syslogLoop?.cancel()
-        syslogFollowing = true; syslogCatchUp = false; demoSyslogTotal = DEMO_SYSLOG_START_TOTAL
+        syslogFollowing = true; syslogCatchUp = false; syslogFailures = 0; lastSyslogDurationMs = 0; syslogSawSlow = false; demoSyslogTotal = DEMO_SYSLOG_START_TOTAL
     }
 
     private fun readCurrent(session: Long, epoch: Long) = generation == session && mutableState.value.connectionEpoch == epoch
@@ -1565,11 +1912,23 @@ class Workspace(
 
     private fun syslogCurrent(session: Long, epoch: Long, expected: Long) = readCurrent(session, epoch) && syslogGeneration == expected
 
-    /** The newest [SYSLOG_PAGE] lines: one read for the total, one for the tail. */
+    /** The newest [SYSLOG_PAGE] lines: one read for the total, one for the tail. Each call is timed for the follow pace. */
     private suspend fun readSyslogTail(current: Connection, node: String, service: String?): SyslogPage {
-        val head = nodeToolsGateway.syslog(current, node, 0, 1, service)
+        val head = timedSyslog { nodeToolsGateway.syslog(current, node, 0, 1, service) }
         if (head.total <= 0) return SyslogPage(emptyList(), 0)
-        return nodeToolsGateway.syslog(current, node, syslogTailStart(head.total), SYSLOG_PAGE, service)
+        return timedSyslog { nodeToolsGateway.syslog(current, node, syslogTailStart(head.total), SYSLOG_PAGE, service) }
+    }
+
+    /** Record how long one syslog call took. A call of about 10 seconds or more stops Follow after this read. */
+    private suspend fun <T> timedSyslog(block: suspend () -> T): T {
+        val started = clock()
+        try {
+            return block()
+        } finally {
+            val elapsed = java.time.Duration.between(started, clock()).toMillis().coerceAtLeast(0)
+            lastSyslogDurationMs = elapsed
+            if (syslogCallTooSlow(elapsed)) syslogSawSlow = true
+        }
     }
 
     private fun failSyslog(session: Long, epoch: Long, expected: Long, message: String, denied: Boolean) {
@@ -1586,6 +1945,7 @@ class Workspace(
         if (!state.connected && !state.demo) return
         syslogJob?.cancel(); syslogMoreJob?.cancel(); syslogLoop?.cancel()
         val expected = ++syslogGeneration
+        syslogSawSlow = false
         val unit = syslogServiceOrNull(service)
         if (pveNodeNameOrNull(node) == null || (service != null && unit == null)) {
             mutableState.update { it.copy(nodeSyslog = ReadSection<SyslogView>().failed(if (unit == null && service != null) NODE_SYSLOG_REFUSED else NODE_TOOLS_NODE_UNKNOWN)) }
@@ -1612,13 +1972,20 @@ class Workspace(
             try {
                 val page = readSyslogTail(current, node, unit)
                 if (!syslogCurrent(session, epoch, expected)) return@launch
-                mutableState.update { it.copy(nodeSyslog = ReadSection.loaded(SyslogView(node, unit, page.lines, page.total, syslogFollowing), clock())) }
+                val follow = syslogFollowing && !syslogSawSlow
+                if (!follow) syslogFollowing = false
+                val notice = if (syslogSawSlow) NODE_SYSLOG_FOLLOW_PAUSED else null
+                mutableState.update { it.copy(nodeSyslog = ReadSection.loaded(SyslogView(node, unit, page.lines, page.total, follow, notice), clock())) }
                 syslogCatchUp = false
-                restartSyslogFollow()
+                syslogFailures = 0
+                if (follow) restartSyslogFollow()
             } catch (e: CancellationException) { throw e }
             catch (e: SessionExpiredException) { if (generation == session) expire() }
             catch (e: GuestPermissionException) { failSyslog(session, epoch, expected, NODE_SYSLOG_DENIED, true) }
-            catch (e: Exception) { failSyslog(session, epoch, expected, readableError(e), false) }
+            catch (e: Exception) {
+                if (!syslogCurrent(session, epoch, expected)) return@launch
+                if (syslogSawSlow) pauseSyslogFollow(NODE_SYSLOG_FOLLOW_PAUSED) else failSyslog(session, epoch, expected, readableError(e), false)
+            }
         }
     }
 
@@ -1630,14 +1997,18 @@ class Workspace(
         restartSyslogFollow()
     }
 
-    /** Follow on: read the tail every [SYSLOG_FOLLOW_MS] ms while visible. Follow off: no reads until it is turned on or Refresh is used. */
+    /** Follow on: read the tail while visible, waiting longer after a slow or failed read. Follow off: no reads until it is turned on or Refresh is used. */
     fun setSyslogFollowing(following: Boolean) {
+        if (syslogFollowing == following) return
         syslogFollowing = following
         mutableState.update { state ->
             val section = state.nodeSyslog
             section.value?.let { state.copy(nodeSyslog = section.copy(value = it.copy(following = following))) } ?: state
         }
-        if (following) syslogCatchUp = true
+        if (following) {
+            syslogFailures = 0
+            syslogCatchUp = true
+        }
         restartSyslogFollow()
     }
 
@@ -1652,18 +2023,23 @@ class Workspace(
         syslogMoreJob = scope.launch { pollSyslog(view.node, view.service, session, epoch, expected) }
     }
 
-    /** Read the page of lines before the oldest one on screen. */
+    /** Read the page of lines before the oldest one on screen. Follow turns off first, so the view stays on the older lines. */
     fun loadEarlierSyslog() {
         val state = mutableState.value
         val view = state.nodeSyslog.value ?: return
         val (start, limit) = syslogEarlierRequest(view.lines) ?: return
+        if (syslogFollowing) setSyslogFollowing(false)
         if (syslogMoreJob?.isActive == true) return
         val expected = syslogGeneration
         val session = generation
         val epoch = state.connectionEpoch
         if (state.demo) {
             val older = applySyslogEarlier(view.lines, demoSyslogPage(view.node, start, limit, demoSyslogTotal)) ?: return
-            mutableState.update { it.copy(nodeSyslog = it.nodeSyslog.copy(value = view.copy(lines = older))) }
+            mutableState.update { s ->
+                val section = s.nodeSyslog
+                val held = section.value ?: return@update s
+                s.copy(nodeSyslog = section.copy(value = held.copy(lines = older, following = false)))
+            }
             return
         }
         val current = connection ?: return
@@ -1694,6 +2070,9 @@ class Workspace(
     fun closeNodeSyslog() {
         syslogGeneration++
         syslogJob?.cancel(); syslogMoreJob?.cancel(); syslogLoop?.cancel()
+        syslogFailures = 0
+        lastSyslogDurationMs = 0
+        syslogSawSlow = false
         mutableState.update { it.copy(nodeSyslog = ReadSection()) }
     }
 
@@ -1710,11 +2089,23 @@ class Workspace(
         syslogCatchUp = false
         syslogLoop = scope.launch {
             while (isActive && syslogCurrent(session, epoch, expected) && syslogVisible && syslogFollowing) {
-                if (!immediate) delay(SYSLOG_FOLLOW_MS)
+                if (!immediate) delay(syslogFollowDelayMs(lastSyslogDurationMs, syslogFailures))
                 immediate = false
                 if (!isActive || !syslogCurrent(session, epoch, expected) || !syslogVisible || !syslogFollowing) break
                 pollSyslog(view.node, view.service, session, epoch, expected)
             }
+        }
+    }
+
+    /** Stop Follow and say why. The lines already read stay. */
+    private fun pauseSyslogFollow(notice: String) {
+        syslogFollowing = false
+        syslogFailures = 0
+        mutableState.update { state ->
+            val section = state.nodeSyslog
+            val held = section.value
+            if (held == null) return@update state.copy(nodeSyslog = section.failed(notice))
+            state.copy(nodeSyslog = section.copy(value = held.copy(following = false, notice = notice), error = null, denied = false, stale = false, loading = false))
         }
     }
 
@@ -1734,14 +2125,16 @@ class Workspace(
         syslogPollLock.withLock { pollSyslogLocked(node, service, session, epoch, expected) }
 
     /**
-     * One tail read: the line already held is read again with what follows it and must come back unchanged, otherwise the node's
-     * numbering moved and the tail is loaded again (see [checkSyslogFollow]). Reads up to a few pages to catch up.
+     * One tail read: the last few held lines are read again and must come back unchanged, otherwise the node's numbering
+     * moved and the tail is loaded again (see [checkSyslogFollow]). Reads up to a few pages to catch up. A call of about
+     * 10 seconds stops Follow. A failed read waits longer the next time.
      */
     private suspend fun pollSyslogLocked(node: String, service: String?, session: Long, epoch: Long, expected: Long) {
         try {
             if (!syslogCurrent(session, epoch, expected)) return
             if (mutableState.value.demo) {
                 demoSyslogTotal += 2
+                syslogFailures = 0
                 mutableState.update { s ->
                     val section = s.nodeSyslog
                     val held = section.value?.takeIf { it.node == node && it.service == service } ?: return@update s
@@ -1753,24 +2146,26 @@ class Workspace(
             }
             val current = connection ?: return
             nodeToolsRefusal(mutableState.value, node)?.let { stopSyslogFollow(it, false); return }
+            syslogSawSlow = false
             var pages = 0
             while (pages++ < SYSLOG_CATCH_UP_PAGES) {
                 val held = mutableState.value.nodeSyslog.value?.takeIf { it.node == node && it.service == service } ?: return
-                val last = held.lines.lastOrNull()
                 val request = syslogFollowRequest(held.lines)
-                if (last == null || request == null) {
+                if (held.lines.isEmpty() || request == null) {
                     reloadSyslogTail(current, node, service, session, epoch, expected, null)
+                    if (syslogSawSlow) pauseSyslogFollow(NODE_SYSLOG_FOLLOW_PAUSED) else syslogFailures = 0
                     return
                 }
-                val page = nodeToolsGateway.syslog(current, node, request.first, request.second, service)
+                val page = timedSyslog { nodeToolsGateway.syslog(current, node, request.first, request.second, service) }
                 if (!syslogCurrent(session, epoch, expected)) return
-                when (val result = checkSyslogFollow(last, page)) {
+                when (val result = checkSyslogFollow(held.lines, page)) {
                     is SyslogFollowResult.NothingNew -> {
                         mutableState.update { s ->
                             val section = s.nodeSyslog
                             val now = section.value?.takeIf { it.node == node && it.service == service } ?: return@update s
                             s.copy(nodeSyslog = ReadSection.loaded(now.copy(total = result.total, notice = null), clock(), section.sample))
                         }
+                        if (syslogSawSlow) pauseSyslogFollow(NODE_SYSLOG_FOLLOW_PAUSED) else syslogFailures = 0
                         return
                     }
                     is SyslogFollowResult.Appended -> {
@@ -1779,18 +2174,25 @@ class Workspace(
                             val now = section.value?.takeIf { it.node == node && it.service == service } ?: return@update s
                             s.copy(nodeSyslog = ReadSection.loaded(now.copy(lines = appendSyslog(now.lines, result.lines), total = result.total, notice = null), clock(), section.sample))
                         }
-                        if (!result.more) return
+                        if (syslogSawSlow) { pauseSyslogFollow(NODE_SYSLOG_FOLLOW_PAUSED); return }
+                        if (!result.more) { syslogFailures = 0; return }
                     }
                     SyslogFollowResult.Resync -> {
                         reloadSyslogTail(current, node, service, session, epoch, expected, NODE_SYSLOG_RESYNCED)
+                        if (syslogSawSlow) pauseSyslogFollow(NODE_SYSLOG_FOLLOW_PAUSED) else syslogFailures = 0
                         return
                     }
                 }
             }
+            if (syslogSawSlow) pauseSyslogFollow(NODE_SYSLOG_FOLLOW_PAUSED) else syslogFailures = 0
         } catch (e: CancellationException) { throw e }
         catch (e: SessionExpiredException) { if (generation == session) expire() }
         catch (e: GuestPermissionException) { if (syslogCurrent(session, epoch, expected)) stopSyslogFollow(NODE_SYSLOG_DENIED, true) }
-        catch (e: Exception) { failSyslog(session, epoch, expected, readableError(e), false) }
+        catch (e: Exception) {
+            if (!syslogCurrent(session, epoch, expected)) return
+            if (syslogSawSlow) pauseSyslogFollow(NODE_SYSLOG_FOLLOW_PAUSED)
+            else { syslogFailures++; failSyslog(session, epoch, expected, readableError(e), false) }
+        }
     }
 
     private suspend fun reloadSyslogTail(current: Connection, node: String, service: String?, session: Long, epoch: Long, expected: Long, notice: String?) {
@@ -1803,9 +2205,13 @@ class Workspace(
         }
     }
 
-    private fun expire() {
+    /**
+     * The session cannot go on: the server refused it, or a new login needs a two-factor code the app no longer has
+     * (the code is used once). Close it like Disconnect and show [message], so the desk's code field is usable again.
+     */
+    private fun expire(message: String? = SessionExpiredException().message) {
         closeSession()
-        mutableState.value = WorkspaceState(error = SessionExpiredException().message)
+        mutableState.value = WorkspaceState(error = message)
     }
     override fun close() = disconnect()
 }

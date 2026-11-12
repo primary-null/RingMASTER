@@ -85,6 +85,11 @@ object MotionEase {
     val Productive = CubicBezierEasing(0.2f, 0f, 0.38f, 0.9f)
     /** Constant-rate sweeps and rotation only. */
     val Linear = LinearEasing
+    /**
+     * Whole-screen colour crossfades (theme changes): a soft start and a soft landing, symmetric, so no single frame
+     * carries a large share of the change. [Standard] front-loads its motion, which reads as a flash on a full-screen fade.
+     */
+    val Crossfade = CubicBezierEasing(0.45f, 0f, 0.55f, 1f)
 }
 
 /** A spring preset: copied values, applied as an ordinary [spring] so no Material 3 type is involved. */
@@ -198,6 +203,62 @@ fun motionTierFor(reduce: Boolean, softwareRenderer: Boolean): MotionTier = when
 
 fun isSoftwareRenderApi(api: GraphicsApi?): Boolean = api == GraphicsApi.SOFTWARE_FAST || api == GraphicsApi.SOFTWARE_COMPAT
 
+/** Skiko's own software APIs, or OpenGL that runs on the CPU ([SoftwareGl]): both get the Lite tier. */
+fun isSoftwareRenderer(api: GraphicsApi?, softwareGl: Boolean): Boolean = isSoftwareRenderApi(api) || (api == GraphicsApi.OPENGL && softwareGl)
+
+/** How the window draws, for Settings: "Direct3D", "OpenGL (software)" and so on. */
+fun renderApiLabel(api: GraphicsApi?, softwareGl: Boolean): String = when (api) {
+    null -> "an unknown renderer"
+    GraphicsApi.DIRECT3D -> "Direct3D"
+    GraphicsApi.OPENGL -> if (softwareGl) "OpenGL (software)" else "OpenGL"
+    GraphicsApi.SOFTWARE_FAST, GraphicsApi.SOFTWARE_COMPAT -> "software drawing"
+    GraphicsApi.METAL -> "Metal"
+    GraphicsApi.VULKAN -> "Vulkan"
+    GraphicsApi.ANGLE -> "ANGLE"
+    else -> api.name
+}
+
+/**
+ * Linux OpenGL that is really a CPU rasteriser (Mesa llvmpipe or softpipe). Skiko reports it as plain OPENGL, so the
+ * render API alone never selects Lite on a virtual machine without a GPU (QXL on the test VMs). Skiko reads the GL
+ * renderer string only inside its own context and does not expose it, so this looks at what decides the renderer:
+ *
+ *  - Mesa's own switches: `LIBGL_ALWAYS_SOFTWARE`, `GALLIUM_DRIVER`, `MESA_LOADER_DRIVER_OVERRIDE`;
+ *  - the kernel display drivers in `/sys/class/drm`: when every card is a display-only driver with no Mesa 3D driver
+ *    (QXL, Bochs, Cirrus, simpledrm, VirtualBox's old adapter, Hyper-V, server BMCs, USB displays), GL is llvmpipe.
+ *
+ * virtio-gpu is left alone (it has 3D with virgl). `-Dringmaster.softwareGl=true|false` overrides the guess.
+ */
+object SoftwareGl {
+    internal val displayOnlyDrivers = setOf("qxl", "bochs", "bochs-drm", "cirrus", "cirrus-qemu", "simpledrm", "simple-framebuffer",
+        "vboxvideo", "hyperv_drm", "hyperv-drm", "ast", "mgag200", "udl", "gm12u320", "ofdrm", "vkms")
+    private val softwareGallium = setOf("llvmpipe", "softpipe", "swr")
+    private val softwareLoader = setOf("swrast", "kms_swrast", "llvmpipe", "softpipe")
+
+    /** [drmDrivers] is null when the driver list could not be read; then only the switches count. */
+    internal fun classify(env: Map<String, String>, drmDrivers: List<String>?, override: String?): Boolean {
+        when (override?.trim()?.lowercase()) { "true", "1", "yes" -> return true; "false", "0", "no" -> return false }
+        if (env["LIBGL_ALWAYS_SOFTWARE"]?.trim()?.lowercase() in setOf("1", "true", "yes")) return true
+        if (env["GALLIUM_DRIVER"]?.trim()?.lowercase() in softwareGallium) return true
+        if (env["MESA_LOADER_DRIVER_OVERRIDE"]?.trim()?.lowercase() in softwareLoader) return true
+        return !drmDrivers.isNullOrEmpty() && drmDrivers.all { it.lowercase() in displayOnlyDrivers }
+    }
+
+    /** The driver of each `/sys/class/drm/cardN`, or null when there is no such directory (not Linux, or no sysfs). */
+    internal fun drmDrivers(root: java.nio.file.Path = java.nio.file.Paths.get("/sys/class/drm")): List<String>? = runCatching {
+        if (!java.nio.file.Files.isDirectory(root)) return@runCatching null
+        java.nio.file.Files.list(root).use { cards ->
+            cards.filter { it.fileName.toString().matches(Regex("card\\d+")) }.toList()
+        }.mapNotNull { card -> runCatching { card.resolve("device/driver").toRealPath().fileName.toString() }.getOrNull() }
+    }.getOrNull()
+
+    /** Read once: the display hardware does not change while the app runs. */
+    val detected: Boolean by lazy {
+        System.getProperty("os.name").orEmpty().lowercase().contains("linux") &&
+            runCatching { classify(System.getenv(), drmDrivers(), System.getProperty("ringmaster.softwareGl")) }.getOrDefault(false)
+    }
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Operating system preference
 // ---------------------------------------------------------------------------------------------------------------------
@@ -290,8 +351,8 @@ fun explicitReduceChoice(preferences: MotionPreferences): Boolean? =
 // Window facts: render API, focus, minimised
 // ---------------------------------------------------------------------------------------------------------------------
 
-@Composable private fun rememberSoftwareRender(window: ComposeWindow?): Boolean {
-    if (window == null) return false
+@Composable private fun rememberRenderApi(window: ComposeWindow?): GraphicsApi? {
+    if (window == null) return null
     var api by remember(window) { mutableStateOf(window.renderApi) }
     DisposableEffect(window) {
         var live = true
@@ -300,8 +361,11 @@ fun explicitReduceChoice(preferences: MotionPreferences): Boolean? =
         api = window.renderApi
         onDispose { live = false }
     }
-    return isSoftwareRenderApi(api)
+    return api
 }
+
+/** The render API of the main window (null in a test scene and in the browser-served scene). Settings shows it. */
+val LocalRenderApi = staticCompositionLocalOf<GraphicsApi?> { null }
 
 private fun java.awt.Window.iconified(): Boolean = (this as? java.awt.Frame)?.let { it.extendedState and java.awt.Frame.ICONIFIED != 0 } ?: false
 
@@ -353,7 +417,8 @@ private fun java.awt.Window.iconified(): Boolean = (this as? java.awt.Frame)?.le
         if (windowActive) osState.value = OsAnimationSetting.refreshIfStale()
     }
     val reduce = if (tierOverride != null) tierOverride == MotionTier.Reduced else resolveReduceMotion(explicit ?: if (userReduce) true else null, osState.value)
-    val software = rememberSoftwareRender(window as? ComposeWindow) || softwareHint
+    val renderApi = rememberRenderApi(window as? ComposeWindow)
+    val software = isSoftwareRenderer(renderApi, SoftwareGl.detected) || softwareHint
     val tier = tierOverride ?: motionTierFor(reduce, software)
     val motion = remember(tier) { RmMotion(tier) }
     val anchors = remember { MotionAnchors() }
@@ -363,6 +428,7 @@ private fun java.awt.Window.iconified(): Boolean = (this as? java.awt.Frame)?.le
         LocalSetReduceMotion provides { value -> saveReduce(value); choiceRevision++ },
         LocalMotion provides motion,
         LocalWindowActive provides windowActive,
+        LocalRenderApi provides renderApi,
         LocalMotionAnchors provides anchors,
         LocalSparks provides sparks,
     ) {

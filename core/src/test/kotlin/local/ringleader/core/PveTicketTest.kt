@@ -129,6 +129,62 @@ class PveTicketTest {
         }
         assertEquals(listOf<String?>("pass & word", "ticket+value", "pass & word", "pass & word"), passwords)
     }
+    /** A handler that holds the first login on the wire until [release] opens. */
+    private class HeldLogin {
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val logins = java.util.concurrent.atomic.AtomicInteger()
+        fun handle(e: HttpExchange): Pair<Int, String> {
+            e.requestBody.readAllBytes()
+            logins.incrementAndGet(); entered.countDown()
+            check(release.await(15, java.util.concurrent.TimeUnit.SECONDS))
+            return 200 to """{"data":{"ticket":"ticket+value","CSRFPreventionToken":"csrf","username":"root@pam"}}"""
+        }
+    }
+    private fun background(action: () -> Any?): Pair<Thread, java.util.concurrent.atomic.AtomicReference<Any?>> {
+        val outcome = java.util.concurrent.atomic.AtomicReference<Any?>()
+        return Thread { outcome.set(try { action() } catch (t: Throwable) { t }) }.apply { isDaemon = true; start() } to outcome
+    }
+    @Test fun concurrentLoginsShareOneRequest() {
+        val held = HeldLogin()
+        fixture(held::handle) { c ->
+            val (first, a) = background { c.tickets.get(c) }
+            assertTrue(held.entered.await(10, java.util.concurrent.TimeUnit.SECONDS))
+            val (second, b) = background { c.tickets.get(c) }
+            Thread.sleep(300)
+            held.release.countDown()
+            first.join(10_000); second.join(10_000)
+            assertIs<PveTicket>(a.get()); assertSame(a.get(), b.get())
+        }
+        assertEquals(1, held.logins.get())
+    }
+    @Test fun closeDoesNotWaitOnALoginInFlight() {
+        val held = HeldLogin()
+        try {
+            fixture(held::handle) { c ->
+                val (leader, a) = background { c.tickets.get(c) }
+                assertTrue(held.entered.await(10, java.util.concurrent.TimeUnit.SECONDS))
+                val (follower, b) = background { c.tickets.get(c) }
+                Thread.sleep(300)
+                val started = System.nanoTime()
+                c.close()
+                assertTrue(System.nanoTime() - started < 2_000_000_000L, "close waited on the login")
+                follower.join(2_000)
+                assertEquals("This connection is closed.", (b.get() as? IllegalStateException)?.message)
+                held.release.countDown()
+                leader.join(10_000)
+                // The ticket that arrived after close is not kept or handed out.
+                assertEquals("This connection is closed.", (a.get() as? IllegalStateException)?.message)
+                assertEquals("This connection is closed.", assertFailsWith<IllegalStateException> { c.tickets.get(c) }.message)
+            }
+        } finally { held.release.countDown() }
+        assertEquals(1, held.logins.get())
+    }
+    @Test fun refusedTicketIsDroppedWithoutClosing() = fixture({ 200 to success }) { c ->
+        val first = c.tickets.get(c)
+        c.tickets.clear()
+        assertNotSame(first, c.tickets.get(c))
+    }
     @Test fun passwordLoginPinAndRedirectBoundaries() {
         var calls = 0
         fixture({ calls++; 302 to "{}" }) { c ->

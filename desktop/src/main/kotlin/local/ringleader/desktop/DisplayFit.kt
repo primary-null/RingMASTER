@@ -114,21 +114,119 @@ object WindowMemory {
     }.onFailure { SaveStatus.report("Window placement", it) }
 }
 
+/** Smallest window: the 960 by 640 dp floor of the spec at the current interface size, never larger than the work area. */
+internal fun minimumWindowSize(uiScale: Float, work: Rectangle): java.awt.Dimension {
+    val scale = if (uiScale.isFinite() && uiScale > 0f) uiScale else 1f
+    return java.awt.Dimension(min((960 * scale).roundToInt(), work.width), min((640 * scale).roundToInt(), work.height))
+}
+
+/** Screen edge a taskbar sits on. */
+enum class TaskbarEdge { Left, Top, Right, Bottom }
+
+/**
+ * Where a maximised borderless window goes on a monitor with [screen] bounds and [insets] (both AWT user space): the
+ * work area, so a visible taskbar stays visible. An auto-hide taskbar reserves no space, and a window that covers the
+ * whole monitor counts as full screen, so the hidden taskbar could no longer slide out. With [autoHide] set and no inset
+ * on that edge, one unit is left free there.
+ */
+internal fun maximizedBoundsFor(screen: Rectangle, insets: java.awt.Insets, autoHide: TaskbarEdge?): Rectangle {
+    var left = insets.left; var top = insets.top; var right = insets.right; var bottom = insets.bottom
+    when (autoHide) {
+        TaskbarEdge.Left -> if (left == 0) left = 1
+        TaskbarEdge.Top -> if (top == 0) top = 1
+        TaskbarEdge.Right -> if (right == 0) right = 1
+        TaskbarEdge.Bottom -> if (bottom == 0) bottom = 1
+        null -> {}
+    }
+    return Rectangle(screen.x + left, screen.y + top, (screen.width - left - right).coerceAtLeast(1), (screen.height - top - bottom).coerceAtLeast(1))
+}
+
+/**
+ * The Windows taskbar's auto-hide setting and edge, from `StuckRects3`: byte 8 bit 0 is auto-hide, byte 12 the edge
+ * (0 left, 1 top, 2 right, 3 bottom). Read off the UI thread by a short-lived `reg query`, at most once a minute.
+ */
+object WindowsTaskbar {
+    private val settings = Regex("""Settings\s+REG_BINARY\s+([0-9A-Fa-f]+)""")
+    @Volatile var autoHideEdge: TaskbarEdge? = null
+        private set
+    private val lastRead = java.util.concurrent.atomic.AtomicLong(0L)
+
+    /** The auto-hide edge, or null when the taskbar is always shown or the text does not hold the setting. */
+    internal fun parse(output: String): TaskbarEdge? {
+        val hex = settings.find(output)?.groupValues?.get(1) ?: return null
+        if (hex.length < 26 || hex.length % 2 != 0) return null
+        val flags = hex.substring(16, 18).toIntOrNull(16) ?: return null
+        if (flags and 0x01 == 0) return null
+        return when (hex.substring(24, 26).toIntOrNull(16)) { 0 -> TaskbarEdge.Left; 1 -> TaskbarEdge.Top; 2 -> TaskbarEdge.Right; else -> TaskbarEdge.Bottom }
+    }
+
+    /** Starts a read on a daemon thread unless one ran in the last minute; [then] runs on the AWT thread if the answer changed. */
+    fun refresh(then: () -> Unit = {}) {
+        val now = System.currentTimeMillis()
+        val last = lastRead.get()
+        if ((last != 0L && now - last < 60_000L) || !lastRead.compareAndSet(last, now)) return
+        Thread({
+            val edge = runCatching {
+                val reg = System.getenv("SystemRoot")?.let { java.io.File(it, "System32/reg.exe") }?.takeIf { it.isFile }?.path ?: "reg"
+                val process = ProcessBuilder(reg, "query", "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StuckRects3", "/v", "Settings")
+                    .redirectErrorStream(true).start()
+                process.outputStream.close()
+                if (!process.waitFor(3, java.util.concurrent.TimeUnit.SECONDS)) { process.destroyForcibly(); null }
+                else parse(process.inputStream.bufferedReader().use { it.readText() })
+            }.getOrNull()
+            val changed = edge != autoHideEdge
+            autoHideEdge = edge
+            if (changed) javax.swing.SwingUtilities.invokeLater(then)
+        }, "taskbar-settings").apply { isDaemon = true }.start()
+    }
+}
+
+private val onWindows = System.getProperty("os.name").orEmpty().lowercase().startsWith("windows")
+
+/**
+ * Windows only: a borderless window maximises over the whole monitor, taskbar included, unless the frame is told the
+ * maximised bounds. Sets them for the monitor the window is on now; call it again whenever that monitor may have changed.
+ * Linux window managers maximise into their own work area, so nothing is set there.
+ */
+fun applyMaximizedBounds(window: Window) {
+    if (!onWindows) return
+    val frame = window as? java.awt.Frame ?: return
+    val gc = window.graphicsConfiguration ?: return
+    val insets = runCatching { Toolkit.getDefaultToolkit().getScreenInsets(gc) }.getOrNull() ?: java.awt.Insets(0, 0, 0, 0)
+    val wanted = maximizedBoundsFor(gc.bounds, insets, WindowsTaskbar.autoHideEdge)
+    if (frame.maximizedBounds != wanted) frame.maximizedBounds = wanted
+}
+
 /**
  * Keeps the main window right for whatever monitor it lands on, however it got there (title-bar drag, Win+Shift+Arrow,
  * Snap, a monitor unplugged). Once a move settles: a window that changed monitor takes the size it last had on that
  * monitor, or is fitted to it; any window is kept inside the work area. [onDisplay] reports the monitor so the interface
- * size can follow it. Acts only on a floating window; maximised and minimised windows belong to the OS.
+ * size can follow it. Fitting acts only on a floating window; maximised and minimised windows belong to the OS. The
+ * minimum size follows the interface size, and the maximised bounds follow the monitor.
  */
 @Composable fun InstallDisplayFit(window: Window, state: WindowState, onDisplay: (DisplayInfo) -> Unit) {
+    val scale = Appearance.uiScale
+    val settleNow = androidx.compose.runtime.remember(window) { arrayOfNulls<() -> Unit>(1) }
     DisposableEffect(window) {
         var lastKey: String? = null
+        // A window that is maximised outside its maximised bounds (it came up maximised before they were set, or its
+        // monitor changed) is maximised again, once for each new set of bounds so it can never loop.
+        var remaximizedFor: Rectangle? = null
         fun settle() {
             val display = displayOf(window.graphicsConfiguration)
-            window.minimumSize = java.awt.Dimension(min(960, display.work.width), min(640, display.work.height))
+            window.minimumSize = minimumWindowSize(Appearance.uiScale, display.work)
+            applyMaximizedBounds(window)
             if (lastKey != display.key) {
                 local.ringleader.core.Trace.emit(local.ringleader.core.TraceSource.App, "display", "Display changed", mapOf("display" to display.summary))
                 onDisplay(display)
+            }
+            val frame = window as? java.awt.Frame
+            val maxBounds = frame?.maximizedBounds
+            if (onWindows && frame != null && maxBounds != null && state.placement == WindowPlacement.Maximized && !state.isMinimized && remaximizedFor != maxBounds &&
+                !Rectangle(maxBounds.x - 2, maxBounds.y - 2, maxBounds.width + 4, maxBounds.height + 4).contains(window.bounds)) {
+                remaximizedFor = Rectangle(maxBounds)
+                frame.extendedState = java.awt.Frame.NORMAL
+                frame.extendedState = java.awt.Frame.MAXIMIZED_BOTH
             }
             if (state.placement != WindowPlacement.Floating || state.isMinimized) { lastKey = display.key; return }
             val current = window.bounds
@@ -140,21 +238,32 @@ object WindowMemory {
             if (fitted != current) window.bounds = fitted
             WindowMemory.remember(display.key, fitted)
         }
+        settleNow[0] = ::settle
         val timer = javax.swing.Timer(450) { settle() }.apply { isRepeats = false }
         val moves = object : ComponentAdapter() {
             override fun componentMoved(e: ComponentEvent) = timer.restart()
             override fun componentResized(e: ComponentEvent) = timer.restart()
         }
-        val monitor = java.beans.PropertyChangeListener { timer.restart() }
+        // A new monitor gets its maximised bounds at once, so a maximise right after the move uses the right work area.
+        val monitor = java.beans.PropertyChangeListener { applyMaximizedBounds(window); timer.restart() }
+        val focus = object : java.awt.event.WindowAdapter() {
+            override fun windowGainedFocus(e: java.awt.event.WindowEvent) { if (onWindows) WindowsTaskbar.refresh { applyMaximizedBounds(window) } }
+        }
         window.addComponentListener(moves)
         window.addPropertyChangeListener("graphicsConfiguration", monitor)
+        window.addWindowFocusListener(focus)
+        if (onWindows) WindowsTaskbar.refresh { applyMaximizedBounds(window) }
         javax.swing.SwingUtilities.invokeLater { settle() }
         onDispose {
+            settleNow[0] = null
             timer.stop()
             window.removeComponentListener(moves)
             window.removePropertyChangeListener("graphicsConfiguration", monitor)
+            window.removeWindowFocusListener(focus)
         }
     }
+    // A new interface size moves the minimum at once (and grows a window that is now below it).
+    androidx.compose.runtime.LaunchedEffect(scale) { settleNow[0]?.invoke() }
 }
 
 /** Starting bounds for the main window: the last placement when it is still on a connected display, else the default. */

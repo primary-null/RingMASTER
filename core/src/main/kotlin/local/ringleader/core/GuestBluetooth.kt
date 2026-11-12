@@ -32,6 +32,36 @@ const val GUEST_BT_NOT_RUNNING = "Start the VM to scan inside it."
 const val GUEST_BT_NO_PERMISSION = "This token cannot run commands in the guest (needs VM.GuestAgent.Unrestricted on the VM)."
 const val GUEST_BT_AGENT = "The QEMU guest agent did not answer. It must be installed and running inside the VM."
 const val GUEST_BT_TIMEOUT = "The scan inside the VM did not finish in time."
+const val GUEST_BT_LOADING = "Loading the VM configuration…"
+const val GUEST_BT_WINDOWS = "This VM is Windows. Guest scans need Linux."
+const val GUEST_BT_AGENT_OFF = "The QEMU guest agent is turned off in this VM's options."
+const val GUEST_BT_NEED_DIRECT = "Guest scans need a direct Proxmox VE connection."
+
+/** Proxmox VE `ostype` codes for Windows guests. A BlueZ scan cannot run in those. */
+private val windowsGuestOs = setOf("wxp", "w2k", "w2k3", "w2k8", "wvista", "win7", "win8", "win10", "win11")
+
+/**
+ * Why a guest scan must not start, or null when it may.
+ * [hardware] null means the VM config has not loaded. A missing or `0` agent option is off.
+ * Windows `ostype` values are refused before any guest command is sent.
+ */
+fun guestBluetoothRefusal(guest: Guest, directPve: Boolean, hardware: HardwareSummary?): String? = when {
+    guest.kind != "VM" -> "Guest scans need a QEMU VM with the guest agent."
+    guest.status != "running" || guest.template -> GUEST_BT_NOT_RUNNING
+    !directPve -> GUEST_BT_NEED_DIRECT
+    hardware == null -> GUEST_BT_LOADING
+    hardware.fields["ostype"]?.lowercase() in windowsGuestOs -> GUEST_BT_WINDOWS
+    !qemuAgentEnabled(hardware.fields["agent"]) -> GUEST_BT_AGENT_OFF
+    else -> null
+}
+
+/** PVE `agent` is `1`, `0`, or `enabled=1` plus comma-separated options. Absent means off. */
+fun qemuAgentEnabled(raw: String?): Boolean {
+    if (raw.isNullOrBlank()) return false
+    val head = raw.split(',').first().trim()
+    val value = if ('=' in head) head.substringAfter('=') else head
+    return value == "1" || value.equals("true", ignoreCase = true)
+}
 
 data class AgentExecStatus(val exited: Boolean, val exitCode: Int?, val out: String, val err: String, val truncated: Boolean)
 

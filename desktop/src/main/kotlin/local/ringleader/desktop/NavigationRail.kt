@@ -20,6 +20,11 @@ import androidx.compose.ui.input.pointer.PointerButton
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.onPointerEvent
+import androidx.compose.ui.input.key.isAltPressed
+import androidx.compose.ui.input.key.isShiftPressed
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
@@ -143,10 +148,11 @@ private fun DrawScope.railIcon(kind: String, c: Color) {
     val hovered by interaction.collectIsHoveredAsState()
     val focused by interaction.collectIsFocusedAsState()
     val reduce = LocalReduceMotion.current
-    val bg by animateColorAsState(if (active) Tech.Raised else if (hovered || focused) Tech.Raised.copy(alpha = .6f) else Color.Transparent, tween(if (reduce) 0 else 120))
-    val tint by animateColorAsState(if (active) Tech.Amber else if (hovered || focused) Tech.Ink else Tech.Muted, tween(if (reduce) 0 else 120))
+    val motion = LocalMotion.current
+    val bg by animateColorAsState(if (active) Tech.Raised else if (hovered || focused) Tech.Raised.copy(alpha = .6f) else Color.Transparent, motion.fade(MotionDur.Quick))
+    val tint by animateColorAsState(if (active) Tech.Amber else if (hovered || focused) Tech.Ink else Tech.Muted, motion.fade(MotionDur.Quick))
     // The page you are on carries an amber edge; it grows in from the middle. Keyboard focus draws an amber outline.
-    val edge by animateFloatAsState(if (active) 1f else if (hovered) .35f else 0f, tween(if (reduce) 0 else 160))
+    val edge by animateFloatAsState(if (active) 1f else if (hovered) .35f else 0f, if (motion.reduced) snap() else motion.productive(MotionDur.Short))
     val row = @Composable {
         Row(Modifier.fillMaxWidth().heightIn(min = ITEM_HEIGHT.dp).background(bg)
             .drawBehind {
@@ -185,10 +191,12 @@ private fun DrawScope.railIcon(kind: String, c: Color) {
     LaunchedEffect(toggle) { if (toggle > 0) { expanded = !expanded; prefs.put("expanded", expanded) } }
     LaunchedEffect(state.connectionEpoch) { if (state.connected || state.demo) workspace.setLive(prefs.option("live", true), prefs.number("liveInterval", LIVE_INTERVAL_DEFAULT)) }
     val reduce = LocalReduceMotion.current
-    val width by animateDpAsState(if (expanded) 208.dp else 60.dp, tween(if (reduce) 0 else 200, easing = FastOutSlowInEasing))
+    val motion = LocalMotion.current
+    // Width and the active mark are movement: spatial springs, which snap under Reduce motion.
+    val width by animateDpAsState(if (expanded) 208.dp else 60.dp, motion.spatial(MotionSpring.SpatialDefault))
     val pages = pagesFor(LocalAppHost.current)
     val index = pages.indexOf(page)
-    val offset by animateDpAsState(((index.coerceAtLeast(0)) * ITEM_HEIGHT + 8).dp, if (reduce) snap() else spring(dampingRatio = .75f, stiffness = Spring.StiffnessMediumLow))
+    val offset by animateDpAsState(((index.coerceAtLeast(0)) * ITEM_HEIGHT + 8).dp, motion.spatial(MotionSpring.SpatialFast))
     val running = state.tasks.orEmpty().count { it.outcome == TaskOutcome.Running }
     val backoff = state.liveBackoffSeconds
     val beacon = when { !state.connected && !state.demo -> Tech.Muted; backoff != null || state.stale -> Tech.Amber; state.demo -> Tech.Amber; state.live -> Tech.Green; else -> Tech.Muted }
@@ -218,7 +226,8 @@ private fun DrawScope.railIcon(kind: String, c: Color) {
                 Box(Modifier.padding(horizontal = 16.dp).fillMaxWidth().height(1.dp).background(Tech.Edge))
                 if (expanded) Text("PINNED", Modifier.padding(start = 20.dp, top = 2.dp).height(16.dp), fontSize = 9.sp, letterSpacing = 1.2.sp, color = Tech.Muted, fontFamily = Tech.Mono)
                 entries.take(shown).forEachIndexed { index, pin ->
-                    PinRailRow(state, pin, index, entries.size, expanded, pins, connectionKey, onPin)
+                    // Keyed by pin, so hover, the open menu and keyboard focus follow the pin when the list reorders.
+                    key(pin.id) { PinRailRow(state, pin, index, entries.size, expanded, pins, connectionKey, onPin) }
                 }
                 if (hidden > 0) PinMoreRow(hidden, expanded) { moreOpen = true }
             }
@@ -257,21 +266,33 @@ private fun DrawScope.railIcon(kind: String, c: Color) {
 @OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
 @Composable private fun PinRailRow(state: WorkspaceState, pin: Pin, index: Int, total: Int, expanded: Boolean, store: PinStore, connectionKey: String, onPin: (Pin) -> Unit) {
     val guest = state.overview?.guests?.firstOrNull { pin.matches(it) }
-    val liveness = pinLiveness(guest, state.tasks, state.submissions)
+    val liveness = pinLiveness(guest, state.tasks, state.submissions, state.stale)
     val missing = liveness == PinLiveness.Missing
     val label = pin.railLabel(guest)
     val status = pinLivenessLabel(liveness, guest)
-    val dot = when (liveness) { PinLiveness.Running -> Tech.Green; PinLiveness.Busy -> Tech.Amber; else -> Tech.Muted }
+    val dot = when (liveness) { PinLiveness.Running -> Tech.Green; PinLiveness.Busy -> Tech.Amber; PinLiveness.Stale -> Tech.Muted; else -> Tech.Muted }
     val interaction = remember { MutableInteractionSource() }
     val hovered by interaction.collectIsHoveredAsState()
+    val focused by interaction.collectIsFocusedAsState()
     var menu by remember { mutableStateOf(false) }
-    val reduce = LocalReduceMotion.current
-    val bg by animateColorAsState(if (hovered) Tech.Raised.copy(alpha = .6f) else Color.Transparent, tween(if (reduce) 0 else 120))
+    val bg by animateColorAsState(if (hovered || focused) Tech.Raised.copy(alpha = .6f) else Color.Transparent, LocalMotion.current.fade(MotionDur.Quick))
     val row = @Composable {
-        Row(Modifier.fillMaxWidth().height(PIN_ROW.dp).background(bg).alpha(if (missing) .45f else 1f)
+        Row(Modifier.fillMaxWidth().height(PIN_ROW.dp).background(bg)
+            .drawBehind { if (focused) drawRect(Tech.Amber, style = Stroke(1.dp.toPx())) }
+            .alpha(if (missing) .45f else 1f)
             .hoverable(interaction)
             .onPointerEvent(PointerEventType.Press, pass = PointerEventPass.Initial) { if (it.button == PointerButton.Secondary) menu = true }
-            .clickable(interactionSource = interaction, indication = null, enabled = !missing || pin.target == PIN_SERVICE) {
+            // Keyboard: Alt+Up and Alt+Down move the pin, Shift+F10 or the menu key opens its menu.
+            .onKeyEvent { event ->
+                if (event.type != androidx.compose.ui.input.key.KeyEventType.KeyDown) return@onKeyEvent false
+                when (pinRowKey(event.key, event.isAltPressed, event.isShiftPressed)) {
+                    PinRowKey.MoveUp -> { if (index > 0) store.move(connectionKey, pin.id, -1); true }
+                    PinRowKey.MoveDown -> { if (index < total - 1) store.move(connectionKey, pin.id, 1); true }
+                    PinRowKey.Menu -> { menu = true; true }
+                    null -> false
+                }
+            }
+            .clickable(interactionSource = interaction, indication = null, enabled = !missing || pin.target == PIN_SERVICE, role = androidx.compose.ui.semantics.Role.Button) {
                 if (!missing || pin.target == PIN_SERVICE) onPin(pin)
             }
             .padding(start = 20.dp, end = 8.dp),
@@ -307,6 +328,16 @@ private fun DrawScope.railIcon(kind: String, c: Color) {
     }
 }
 
+/** What a key press on a focused pin row does. */
+internal enum class PinRowKey { MoveUp, MoveDown, Menu }
+
+internal fun pinRowKey(key: androidx.compose.ui.input.key.Key, alt: Boolean, shift: Boolean): PinRowKey? = when {
+    alt && key == androidx.compose.ui.input.key.Key.DirectionUp -> PinRowKey.MoveUp
+    alt && key == androidx.compose.ui.input.key.Key.DirectionDown -> PinRowKey.MoveDown
+    (shift && key == androidx.compose.ui.input.key.Key.F10) || key == androidx.compose.ui.input.key.Key.Menu -> PinRowKey.Menu
+    else -> null
+}
+
 /** One open connection in the rail: its number, a state dot and its name. The one in view carries the amber edge. */
 @Composable private fun SessionRailRow(session: OpenSession, number: Int, active: Boolean, expanded: Boolean, profile: ConnectionProfile?, onClick: () -> Unit) {
     val state by session.workspace.state.collectAsState()
@@ -316,11 +347,14 @@ private fun DrawScope.railIcon(kind: String, c: Color) {
     val dot = when { !open -> Tech.Muted; state.liveBackoffSeconds != null || state.stale || state.demo -> Tech.Amber; state.live -> Tech.Green; else -> Tech.Muted }
     val interaction = remember { MutableInteractionSource() }
     val hovered by interaction.collectIsHoveredAsState()
-    val reduce = LocalReduceMotion.current
-    val bg by animateColorAsState(if (active) Tech.Raised else if (hovered) Tech.Raised.copy(alpha = .6f) else Color.Transparent, tween(if (reduce) 0 else 120))
+    val focused by interaction.collectIsFocusedAsState()
+    val bg by animateColorAsState(if (active) Tech.Raised else if (hovered || focused) Tech.Raised.copy(alpha = .6f) else Color.Transparent, LocalMotion.current.fade(MotionDur.Quick))
     val row = @Composable {
         Row(Modifier.fillMaxWidth().height(SESSION_ROW.dp).background(bg)
-            .drawBehind { if (active) drawRect(Tech.Amber, Offset(0f, size.height * .18f), Size(3.dp.toPx(), size.height * .64f)) }
+            .drawBehind {
+                if (active) drawRect(Tech.Amber, Offset(0f, size.height * .18f), Size(3.dp.toPx(), size.height * .64f))
+                if (focused) drawRect(Tech.Amber, style = Stroke(1.dp.toPx()))
+            }
             .hoverable(interaction).clickable(interactionSource = interaction, indication = null, role = androidx.compose.ui.semantics.Role.Tab, onClick = onClick)
             .padding(start = 20.dp, end = 12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Box(Modifier.size(16.dp)) {
@@ -354,7 +388,7 @@ private fun DrawScope.railIcon(kind: String, c: Color) {
     }) {
         hidden.forEach { pin ->
             val guest = state.overview?.guests?.firstOrNull { pin.matches(it) }
-            val liveness = pinLiveness(guest, state.tasks, state.submissions)
+            val liveness = pinLiveness(guest, state.tasks, state.submissions, state.stale)
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(pin.railLabel(guest), Modifier.weight(1f).identity(), fontSize = 12.sp, color = if (liveness == PinLiveness.Missing) Tech.Muted else Tech.Ink, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(pinLivenessLabel(liveness, guest), fontSize = 10.sp, color = Tech.Muted, fontFamily = Tech.Mono, maxLines = 1)

@@ -31,7 +31,10 @@ class WinRtBluetoothTest {
         val phone = byName.getValue("Fixture Phone")
         assertEquals(BtKind.Dual, phone.kind); assertEquals(-36, phone.rssi); assertEquals("phone", phone.category)
         assertEquals("video-display", byName.getValue("Fixture TV").category)
-        assertEquals("input-mouse", byName.getValue("Fixture Mouse").category)
+        val mouse = byName.getValue("Fixture Mouse")
+        assertEquals("input-mouse", mouse.category)
+        assertNull(mouse.rssi, "present:false is a cached endpoint, not a device heard in this scan")
+        assertTrue(mouse.samples.isEmpty())
         val beacon = scan.devices.single { it.address == "27:FA:B7:00:00:03" }
         assertNull(beacon.name); assertEquals(BtKind.LowEnergy, beacon.kind)
         assertEquals("Fixture Keyboard", scan.devices.first().name, "connected devices sort first")
@@ -42,6 +45,38 @@ class WinRtBluetoothTest {
         val off = parseWinRtScan("""{"note":"ADAPTER_OFF","adapters":[$adapter],"devices":[]}""", at)
         assertEquals(BT_ADAPTER_OFF, off.note); assertEquals(1, off.adapters.size)
         assertFailsWith<IllegalStateException> { parseWinRtScan("Add-Type : something failed", at) }
+    }
+
+    @Test fun absentEndpointsAreListedButNotHeard() {
+        val parser = WinRtLiveParser(12_000, at)
+        try {
+            assertFalse(parser.accept("""{"t":"hello","v":"0.1.0"}"""))
+            assertTrue(parser.accept("""{"t":"add","ms":10,"id":"m","name":"Fixture Mouse","address":"fa:43:67:00:00:05","present":false,"rssi":-49,"protocol":"$le"}"""))
+            val absent = parser.snapshot(10, false).devices.single()
+            assertNull(absent.rssi)
+            assertNull(absent.firstSeenMs)
+            assertTrue(absent.samples.isEmpty())
+            assertTrue(parser.accept("""{"t":"add","ms":20,"id":"p","name":"Phone","address":"aa:bb:cc:00:00:09","rssi":-40,"protocol":"$le"}"""))
+            assertEquals(-40, parser.snapshot(20, false).devices.single { it.address == "AA:BB:CC:00:00:09" }.rssi)
+            assertTrue(parser.accept("""{"t":"upd","ms":30,"id":"p","SignalStrength":-30,"IsPresent":false}"""))
+            val phone = parser.snapshot(30, false).devices.single { it.address == "AA:BB:CC:00:00:09" }
+            assertEquals(listOf(BtSample(20, -40)), phone.samples)
+            assertEquals(-40, phone.rssi)
+        } finally {
+            parser.close()
+        }
+    }
+
+    @Test fun traceNamesTheParserAndClosesOnFailure() {
+        val before = Trace.snapshot().maxOfOrNull { it.id } ?: 0L
+        val parser = WinRtLiveParser(12_000, at, "Windows scan · native helper")
+        val failure = IllegalStateException("stopped")
+        parser.close(failure)
+        parser.close()
+        val row = Trace.snapshot().filter { it.id > before && it.source == TraceSource.Bluetooth }.single()
+        assertEquals("Windows scan · native helper", row.summary)
+        assertEquals("end", row.kind)
+        assertEquals(TraceOutcome.Error, row.outcome)
     }
 
     @Test fun classOfDeviceCategories() {

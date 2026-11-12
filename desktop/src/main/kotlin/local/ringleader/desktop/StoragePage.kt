@@ -48,6 +48,7 @@ import local.ringleader.core.PDM_KIND
 import local.ringleader.core.RECORDED_CAPTION
 import local.ringleader.core.RECORDED_SAMPLE_CAPTION
 import local.ringleader.core.RecordedStorage
+import local.ringleader.core.SHARED_DISAGREE_NOTE
 import local.ringleader.core.STORAGE_CONTENT_ACTIVATES
 import local.ringleader.core.STORAGE_CONTENT_DIRECT_ONLY
 import local.ringleader.core.STORAGE_VISIBILITY_NOTE
@@ -58,6 +59,8 @@ import local.ringleader.core.VOLUME_TYPE_OTHER
 import local.ringleader.core.Workspace
 import local.ringleader.core.WorkspaceState
 import local.ringleader.core.filterVolumes
+import local.ringleader.core.recordedStorageCount
+import local.ringleader.core.sharedStorageReport
 import local.ringleader.core.sortVolumes
 import local.ringleader.core.volumeTypeCounts
 
@@ -98,11 +101,17 @@ private fun recordedStorage(state: WorkspaceState): List<RecordedStorage> {
     val rows = recordedStorage(state)
     val members = state.overview?.members.orEmpty().associateBy { it.name }
     val grouped = rows.groupBy { it.node }.toSortedMap()
+    val count = recordedStorageCount(rows)
+    val disagree = sharedStorageReport(rows).disagreements.isNotEmpty()
     PaneFrame(modifier) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            SectionLabel("Storage", suffix = if (rows.isEmpty()) null else "${rows.size} on ${grouped.size} ${if (grouped.size == 1) "node" else "nodes"}")
+            SectionLabel("Storage", suffix = if (rows.isEmpty()) null else "$count on ${grouped.size} ${if (grouped.size == 1) "node" else "nodes"}")
         }
         Text(if (state.demo) RECORDED_SAMPLE_CAPTION else RECORDED_CAPTION, fontFamily = Tech.Mono, fontSize = 10.sp, color = if (state.demo) Tech.Amber else Tech.Muted)
+        if (disagree) {
+            Text(SHARED_DISAGREE_NOTE, fontSize = 10.sp, color = Tech.Amber)
+            Text("They are not added together.", fontSize = 10.sp, color = Tech.Muted)
+        }
         if (state.stale) Text("The inventory is stale. These rows are from the last good read.", fontSize = 10.sp, color = Tech.Amber)
         state.overview?.indexError?.let { Text(it, fontSize = 10.sp, lineHeight = 13.sp, color = Tech.Amber, maxLines = 3, overflow = TextOverflow.Ellipsis) }
         when {
@@ -162,7 +171,9 @@ private fun recordedStorage(state: WorkspaceState): List<RecordedStorage> {
                 Text("${storageSize(row.diskBytes)} / ${storageSize(row.maxDiskBytes)}", fontFamily = Tech.Mono, fontSize = 10.sp, color = Tech.Ink.copy(alpha = .85f), maxLines = 1)
             }
         } else {
-            Text("No usage recorded", fontFamily = Tech.Mono, fontSize = 10.sp, color = Tech.Muted)
+            HelpTip("No sample yet. The node has not reported this storage (inactive, disabled, or no audit right).") {
+                Text("No usage recorded", fontFamily = Tech.Mono, fontSize = 10.sp, color = Tech.Muted)
+            }
         }
         row.content?.let { Text(it, fontFamily = Tech.Mono, fontSize = 9.sp, color = Tech.Muted, maxLines = 1, overflow = TextOverflow.Ellipsis) }
     }

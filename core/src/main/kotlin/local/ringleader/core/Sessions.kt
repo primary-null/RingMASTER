@@ -93,7 +93,7 @@ class Sessions(private val scope: CoroutineScope, private val newWorkspace: () -
     /** Window restored: turn the live reads that [pause] stopped back on. False when nothing had been paused. */
     fun resume(): Boolean {
         if (pausedLive.isEmpty()) return false
-        mutableState.value.open.forEach { if (pausedLive[it.id] == true) it.workspace.setLive(true) }
+        mutableState.value.open.forEach { if (pausedLive[it.id] == true) it.workspace.resumeLive() }
         pausedLive.clear()
         return true
     }

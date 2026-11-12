@@ -76,7 +76,7 @@ import local.ringleader.core.permissionTargets
         ReadNotices(section, Modifier.padding(top = 4.dp))
         Text(
             "Read from the server for this identity. A path inherits a privilege from its parents only when it was set with Propagate. " +
-                "A token with separate privileges also needs each privilege on its owning user.",
+                "For a token with separate privileges Proxmox already shows the intersection of the token's and its owner's rights.",
             Modifier.padding(top = 4.dp, bottom = 6.dp), fontSize = 11.sp, lineHeight = 15.sp, color = Tech.Muted,
         )
         Column(Modifier.fillMaxWidth().onSizeChanged { width = it.width }) {

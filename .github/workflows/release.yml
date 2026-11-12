@@ -18,13 +18,14 @@ concurrency:
 jobs:
   windows:
     name: Windows MSI
-    runs-on: windows-latest
+    runs-on: windows-2025
     timeout-minutes: 60
     defaults:
       run:
         shell: bash
     steps:
       - uses: actions/checkout@v5
+      - uses: gradle/actions/wrapper-validation@v4
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -40,6 +41,9 @@ jobs:
         run: ./gradlew.bat :core:test :desktop:test :desktop:packageMsi --console=plain
       - name: Collect
         run: |
+          runtime_release=$(find desktop/build/compose/binaries -type f -path '*/runtime/release' | head -n 1)
+          test -n "$runtime_release"
+          grep '^JAVA_VERSION=' "$runtime_release"
           # The Rust Bluetooth helper must be inside the installer; without cargo the build would quietly leave it out.
           test -f desktop/resources/windows/ringmaster-bt.exe || { echo "::error::Bluetooth helper was not built"; exit 1; }
           mkdir dist
@@ -68,6 +72,7 @@ jobs:
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             openjdk-21-jdk fakeroot binutils dpkg-dev ca-certificates git fontconfig fonts-dejavu-core libgl1
       - uses: actions/checkout@v5
+      - uses: gradle/actions/wrapper-validation@v4
       - name: Read the version
         run: |
           version=$(sed -n 's/.*version = "\([0-9][0-9.]*\)".*/\1/p' build.gradle.kts | head -n 1)
@@ -81,8 +86,14 @@ jobs:
           ./gradlew :core:test :desktop:test :desktop:packageDeb --console=plain
       - name: Collect
         run: |
+          deb="desktop/build/compose/binaries/main/deb/ringmaster_${VERSION}_amd64.deb"
+          test -f "$deb"
+          sh packaging/linux/fix-desktop-entry.sh --deb "$deb"
+          runtime_release=$(find desktop/build/compose/binaries -type f -path '*/runtime/release' | head -n 1)
+          test -n "$runtime_release"
+          grep '^JAVA_VERSION=' "$runtime_release"
           mkdir dist
-          cp "desktop/build/compose/binaries/main/deb/ringmaster_${VERSION}_amd64.deb" "dist/ringmaster-${VERSION}-${{ matrix.platform }}-amd64.deb"
+          cp "$deb" "dist/ringmaster-${VERSION}-${{ matrix.platform }}-amd64.deb"
           dpkg-deb --field dist/*.deb Package Version Depends
       - uses: actions/upload-artifact@v6
         with:
@@ -99,9 +110,10 @@ jobs:
       - name: Install the build tools
         run: |
           # Fedora 45 ships OpenJDK 25 only. Temurin 21 comes from setup-java after git is present.
-          dnf -y install rpm-build binutils git fontconfig dejavu-sans-fonts mesa-libGL \
+          dnf -y install rpm-build rpmrebuild cpio binutils git fontconfig dejavu-sans-fonts mesa-libGL \
             libjpeg-turbo libX11 libXext libXrender libXtst libXi freetype alsa-lib tar gzip which
       - uses: actions/checkout@v5
+      - uses: gradle/actions/wrapper-validation@v4
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -122,6 +134,10 @@ jobs:
           mkdir dist
           rpm=$(echo desktop/build/compose/binaries/main/rpm/ringmaster-${VERSION}-*.x86_64.rpm)
           test -f "$rpm"
+          sh packaging/linux/fix-desktop-entry.sh --rpm "$rpm"
+          runtime_release=$(find desktop/build/compose/binaries -type f -path '*/runtime/release' | head -n 1)
+          test -n "$runtime_release"
+          grep '^JAVA_VERSION=' "$runtime_release"
           cp "$rpm" "dist/ringmaster-${VERSION}-fedora-45-x86_64.rpm"
           rpm -qpi dist/*.rpm
           rpm -qpR dist/*.rpm
@@ -185,6 +201,7 @@ jobs:
           archlinux-java set java-21-openjdk
           java -version 2>&1 | grep -E '21[\."]'
       - uses: actions/checkout@v5
+      - uses: gradle/actions/wrapper-validation@v4
       - name: Read the version
         run: |
           version=$(sed -n 's/.*version = "\([0-9][0-9.]*\)".*/\1/p' build.gradle.kts | head -n 1)
@@ -200,6 +217,10 @@ jobs:
         run: |
           app=desktop/build/compose/binaries/main/app/ringmaster
           test -d "$app"
+          sh packaging/linux/fix-desktop-entry.sh --require packaging/arch/ringmaster.desktop
+          runtime_release=$(find "$app" -type f -path '*/runtime/release' | head -n 1)
+          test -n "$runtime_release"
+          grep '^JAVA_VERSION=' "$runtime_release"
           tar -C desktop/build/compose/binaries/main/app -czf packaging/arch/ringmaster-app.tar.gz ringmaster
           cp LICENSE NOTICE packaging/arch/
           cp desktop/icons/ringmaster.png packaging/arch/ringmaster.png
@@ -282,6 +303,7 @@ jobs:
             dist/*.deb
             dist/*.rpm
             dist/*.pkg.tar.zst
+            dist/SHA256SUMS
       - name: Create the draft release
         env:
           GH_TOKEN: ${{ github.token }}

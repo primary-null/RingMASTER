@@ -6,4 +6,5 @@ Icon=ringmaster
 Terminal=false
 Type=Application
 Categories=System;
-StartupWMClass=ringmaster
+# StartupWMClass matches the X11 class JDK 21 derives from local.ringleader.desktop.MainKt (dots become hyphens).
+StartupWMClass=local-ringleader-desktop-MainKt

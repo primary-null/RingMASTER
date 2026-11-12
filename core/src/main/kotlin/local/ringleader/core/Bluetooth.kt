@@ -1,6 +1,10 @@
 package local.ringleader.core
 
 import java.time.Instant
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.math.exp
 
 /**
  * Shared Bluetooth model. Every source (this PC on Windows, this PC on Linux, a scan run inside a VM) produces the
@@ -38,6 +42,11 @@ data class BtDevice(
     val lastSeenMs: Long? = null,
     /** Live scans: signal readings in the order heard (capped at [BT_SAMPLE_CAP]). */
     val samples: List<BtSample> = emptyList(),
+    /**
+     * Smoothed signal in dBm, updated once per heard sample. Null when this scan has not heard the device.
+     * The field reads this instead of walking [samples] on every frame.
+     */
+    val smoothedRssi: Float? = null,
 )
 
 /** One signal reading, [ms] after the scan started. */
@@ -68,6 +77,9 @@ interface BluetoothScanner {
      * from the scanning thread. Backends that cannot stream report only the final result.
      */
     fun scan(seconds: Int, onUpdate: (BtScan) -> Unit): BtScan = scan(seconds).also(onUpdate)
+
+    /** Stops the scan in progress and kills its process tree. Does nothing when no scan is running. */
+    fun cancel() {}
 }
 
 /**
@@ -96,6 +108,7 @@ class BtLiveScan(private val source: BtSource, private val windowMs: Long, priva
         }
         devices[update.address] = if (rssi == null) merged else merged.copy(
             rssi = rssi,
+            smoothedRssi = smoothBtRssi(merged.smoothedRssi, merged.lastSeenMs, rssi, ms),
             firstSeenMs = merged.firstSeenMs ?: ms,
             lastSeenMs = ms,
             samples = (merged.samples + BtSample(ms, rssi)).takeLast(BT_SAMPLE_CAP),
@@ -115,6 +128,84 @@ class BtLiveScan(private val source: BtSource, private val windowMs: Long, priva
 const val BT_SCAN_SECONDS_DEFAULT = 10
 const val BT_NO_ADAPTER = "No Bluetooth adapter was found on this computer."
 const val BT_ADAPTER_OFF = "The Bluetooth adapter is turned off."
+/** The helper or script exited before it printed a normal completion line. */
+const val BT_SCAN_ENDED_EARLY = "The scan ended early."
+
+/**
+ * One step of the signal average. [previousMs] and [ms] are milliseconds into the scan.
+ * The blend is at least 0.35, and a long gap lets the new reading take over. The floor applies to the
+ * blend `(1 - e^(-dt/tau))`, not to the exponent: binding it to the exponent caps every step near 0.65.
+ */
+fun smoothBtRssi(previous: Float?, previousMs: Long?, rssi: Int, ms: Long): Float {
+    if (previous == null || previousMs == null) return rssi.toFloat()
+    val dt = (ms - previousMs).coerceAtLeast(0L).toFloat()
+    val step = (1f - exp(-dt / 700f)).coerceAtLeast(0.35f)
+    return previous + (rssi - previous) * step
+}
+
+/**
+ * At most one live partial every [intervalMs]. [onChange] is the leading edge (a new sighting).
+ * [onIdle] is the trailing edge, so a quiet room still publishes the last sighting once the interval has passed.
+ * [flush] publishes a sighting that is still waiting when the scan ends.
+ */
+class LiveEmitGate(private val intervalMs: Long = 150) {
+    private var lastEmit = Long.MIN_VALUE / 4
+    private var dirty = false
+
+    fun onChange(now: Long): Boolean {
+        dirty = true
+        return flushIfDue(now)
+    }
+
+    fun onIdle(now: Long): Boolean = if (dirty) flushIfDue(now) else false
+
+    fun flush(now: Long): Boolean {
+        if (!dirty) return false
+        dirty = false
+        lastEmit = now
+        return true
+    }
+
+    private fun flushIfDue(now: Long): Boolean {
+        if (!dirty || now - lastEmit < intervalMs) return false
+        dirty = false
+        lastEmit = now
+        return true
+    }
+}
+
+/**
+ * One local scan at a time. [cancel] kills the process tree the scan registered with [bind].
+ * [exclusive] waits briefly for a scan that is already stopping, then refuses a second one.
+ */
+class BtScanControl {
+    private val lock = ReentrantLock()
+    private val cancelled = AtomicBoolean(false)
+    private val timedOut = AtomicBoolean(false)
+    @Volatile private var kill: (() -> Unit)? = null
+    @Volatile private var idle: (() -> Unit)? = null
+
+    fun <T> exclusive(block: () -> T): T {
+        if (!lock.tryLock(8, TimeUnit.SECONDS)) error("A Bluetooth scan is already running.")
+        cancelled.set(false)
+        timedOut.set(false)
+        try {
+            return block()
+        } finally {
+            kill = null
+            idle = null
+            lock.unlock()
+        }
+    }
+
+    fun bind(action: () -> Unit) { kill = action }
+    fun onIdle(action: () -> Unit) { idle = action }
+    fun idle() { idle?.invoke() }
+    fun cancel() { cancelled.set(true); kill?.invoke() }
+    fun markTimedOut() { timedOut.set(true) }
+    fun wasCancelled(): Boolean = cancelled.get()
+    fun didTimeOut(): Boolean = timedOut.get()
+}
 
 /** Upper-case colon MAC, or null if [value] is not a 48-bit address in colon, dash or bare-hex form. */
 fun normalizeBtAddress(value: String?): String? {

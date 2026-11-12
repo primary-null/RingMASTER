@@ -23,14 +23,33 @@ import local.ringleader.core.ReadSection
 internal fun readClock(at: Instant?): String =
     at?.atZone(ZoneId.systemDefault())?.format(DateTimeFormatter.ofPattern("HH:mm:ss", Locale.ROOT)) ?: "—"
 
-/** Sizes in binary units, one decimal from MiB up, with a dash for an unknown size. */
-internal fun storageSize(value: Long?): String = when {
-    value == null || value < 0L -> "—"
-    value >= 1L shl 40 -> String.format(Locale.ROOT, "%.2f TiB", value / 1099511627776.0)
-    value >= 1L shl 30 -> String.format(Locale.ROOT, if (value >= 100L shl 30) "%.0f GiB" else "%.1f GiB", value / 1073741824.0)
-    value >= 1L shl 20 -> String.format(Locale.ROOT, if (value >= 100L shl 20) "%.0f MiB" else "%.1f MiB", value / 1048576.0)
-    value >= 1L shl 10 -> String.format(Locale.ROOT, "%.0f KiB", value / 1024.0)
-    else -> "$value B"
+/** Sizes in binary units. A value that rounds to 1024 of a unit is shown in the next unit. Unknown sizes are a dash. */
+internal fun storageSize(value: Long?): String {
+    if (value == null || value < 0L) return "—"
+    if (value < 1024L) return "$value B"
+    val units = arrayOf(
+        1L shl 10 to "KiB",
+        1L shl 20 to "MiB",
+        1L shl 30 to "GiB",
+        1L shl 40 to "TiB",
+        1L shl 50 to "PiB",
+    )
+    var index = units.indexOfLast { value >= it.first }
+    while (true) {
+        val (unit, label) = units[index]
+        val decimals = when (label) {
+            "KiB" -> 0
+            "MiB" -> if (value >= 100L shl 20) 0 else 1
+            "GiB" -> if (value >= 100L shl 30) 0 else 1
+            else -> 2
+        }
+        val text = String.format(Locale.ROOT, "%.${decimals}f", value.toDouble() / unit)
+        if (text.toDouble() >= 1024.0 && index < units.lastIndex) {
+            index++
+            continue
+        }
+        return "$text $label"
+    }
 }
 
 /** "2026-11-07 14:03" in the system zone, or a dash. */

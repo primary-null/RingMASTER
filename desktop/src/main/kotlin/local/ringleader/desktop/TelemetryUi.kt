@@ -21,6 +21,8 @@ import androidx.compose.ui.graphics.*
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.input.key.*
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -58,19 +60,34 @@ internal fun latestCpu(series: Series?, fallback: Double?): Double? =
 internal fun latestMemory(series: Series?, fallback: Long?): Long? =
     (series?.samples?.lastOrNull()?.mem ?: fallback)?.takeIf { it >= 0L }
 
+/**
+ * How far above 1 a CPU fraction may read before it is not trusted. Proxmox reports CPU as a fraction of capacity, and
+ * accounting jitter can put a busy node a little over 1. Up to this it reads as 100%.
+ */
+internal const val CPU_OVERSHOOT = 1.05
+
+/** A CPU fraction for display: 0..1, a slight overshoot shown as 1, anything else (or beyond [CPU_OVERSHOOT]) null. The node gauge and fact line both use it. */
+internal fun cpuShare(value: Double?): Double? =
+    value?.takeIf { it.isFinite() && it >= 0.0 }?.let { if (it <= 1.0) it else if (it <= CPU_OVERSHOOT) 1.0 else null }
+
 /** Null when either side is missing, negative, or the capacity is zero. */
 internal fun memoryFraction(used: Long?, capacity: Long?): Double? {
     if (used == null || capacity == null || used < 0L || capacity <= 0L) return null
     return used.toDouble() / capacity
 }
 
-/** Running and stopped counts exclude templates, matching [fleetTotals]. Search includes tags. */
+/** A guest that is neither running, stopped nor a template: paused, suspended, or unknown while its node is offline. */
+internal fun guestOtherStatus(guest: Guest) =
+    !guest.template && !guest.status.equals("running", true) && !guest.status.equals("stopped", true)
+
+/** Running and stopped counts exclude templates, matching [fleetTotals]; Other holds every remaining state. Search includes tags. */
 internal fun guestVisible(guest: Guest, filter: String, search: String): Boolean {
     val statusOk = when (filter) {
         "All" -> true
         "Templates" -> guest.template
         "Running" -> !guest.template && guest.status.equals("running", true)
         "Stopped" -> !guest.template && guest.status.equals("stopped", true)
+        "Other" -> guestOtherStatus(guest)
         else -> guest.status.equals(filter, true)
     }
     if (!statusOk) return false
@@ -85,19 +102,8 @@ internal fun guestVisible(guest: Guest, filter: String, search: String): Boolean
  * put the busiest guest first and missing values last. Stopped guests and templates display a dash, so they sort as missing.
  */
 internal fun guestComparator(sort: String, history: FleetHistory = FleetHistory()): Comparator<Guest> = when (sort) {
-    "CPU" -> compareBy { guest ->
-        if (guest.template || !guest.status.equals("running", true)) -1.0
-        else latestCpu(history.guests[guest.resource], guest.metrics?.cpuFraction) ?: -1.0
-    }
-    "Memory" -> compareBy { guest ->
-        if (guest.template || !guest.status.equals("running", true)) -1L
-        else latestMemory(history.guests[guest.resource], guest.metrics?.memoryBytes) ?: -1L
-    }
+    in steadySorts -> compareBy { guest -> steadySortScore(sort, guest, history.guests[guest.resource]) }
     "ID" -> compareBy { it.id }
-    "Net" -> compareBy { guest ->
-        if (guest.template || !guest.status.equals("running", true)) -1.0
-        else history.guests[guest.resource]?.samples?.lastOrNull()?.let { (it.netInRate ?: 0.0) + (it.netOutRate ?: 0.0) } ?: -1.0
-    }
     "Uptime" -> compareBy { guest ->
         if (guest.template || !guest.status.equals("running", true)) -1L
         else guest.metrics?.uptimeSeconds?.takeIf { it >= 0L } ?: -1L
@@ -155,9 +161,13 @@ internal fun sparkPoints(values: List<Double?>, held: List<Boolean>?): List<Int>
  * its new value (the scale used to snap, so a new peak made the whole line jump). [stamp] identifies the newest sample
  * (its time); with it every recorded sample slides, also one whose value equals the last. [held] marks samples that
  * repeat the one before because the server had not refreshed; the line runs straight through them.
+ *
+ * [ease] eases the scale; it defaults to [pulse], so table rows (pulse = false) apply a new scale at once. The scale is
+ * read where the paths are built, and an eased scale rebuilds them on every frame of the settle (no per-frame allocation for rows): a table
+ * row rebuilds its paths once per new sample. The strip and the inspector pass ease = true.
  */
 @Composable fun Sparkline(values: List<Double?>, modifier: Modifier = Modifier, color: Color? = null, floor: Double = .05, ceiling: Double = 1.0, grid: Boolean = true, pulse: Boolean = true,
-    held: List<Boolean>? = null, stamp: Any? = null) {
+    held: List<Boolean>? = null, stamp: Any? = null, ease: Boolean = pulse) {
     val last = values.lastOrNull { it != null }
     val tint = color ?: ramp(last ?: 0.0)
     val reduce = LocalReduceMotion.current
@@ -168,7 +178,10 @@ internal fun sparkPoints(values: List<Double?>, held: List<Boolean>?): List<Int>
     LaunchedEffect(count, stamp ?: values.lastOrNull()) { if (!reduce && count > 2) { shift.snapTo(1f); shift.animateTo(0f, tween(SPARK_SETTLE_MS, easing = LinearOutSlowInEasing)) } else shift.snapTo(0f) }
     // The eased quantity is the gain (height per unit), not the ceiling: a point's height is proportional to the gain, so
     // the line moves evenly. Easing the ceiling made most of the movement happen in the first few frames.
-    val gain by animateFloatAsState((1.0 / sparkTop(values, floor, ceiling)).toFloat(), if (reduce) snap() else tween(SPARK_SETTLE_MS, easing = FastOutSlowInEasing))
+    val targetGain = (1.0 / sparkTop(values, floor, ceiling)).toFloat()
+    val eased by animateFloatAsState(targetGain, if (reduce || !ease) snap() else tween(SPARK_SETTLE_MS, easing = FastOutSlowInEasing))
+    // Without the ease the animated value is not read at all, so its one-frame snap cannot rebuild the paths a second time.
+    val gain = if (reduce || !ease) targetGain else eased
     // The value that just left a full buffer: drawn one step off the left edge so the slide has no gap there.
     val rolled = remember { object { var seen: List<Double?> = emptyList(); var lead: Double? = null } }
     if (rolled.seen != values) { rolled.lead = sparkLead(rolled.seen, values); rolled.seen = values }
@@ -215,20 +228,20 @@ internal fun sparkPoints(values: List<Double?>, held: List<Boolean>?): List<Int>
         }
     })
 }
-@Composable fun Sparkline(series: Series, modifier: Modifier = Modifier, pulse: Boolean = true, grid: Boolean = true, floor: Double = .05, metric: (Sample) -> Double? = { it.cpu }) =
-    Sparkline(series.samples.map(metric), modifier, floor = floor, grid = grid, pulse = pulse, held = series.samples.map { it.held }, stamp = series.samples.lastOrNull()?.at)
+@Composable fun Sparkline(series: Series, modifier: Modifier = Modifier, pulse: Boolean = true, grid: Boolean = true, floor: Double = .05, ease: Boolean = pulse, metric: (Sample) -> Double? = { it.cpu }) =
+    Sparkline(series.samples.map(metric), modifier, floor = floor, grid = grid, pulse = pulse, held = series.samples.map { it.held }, stamp = series.samples.lastOrNull()?.at, ease = ease)
 
 /**
  * Inbound (green) and outbound (amber) rates on one shared scale, at least 1 KiB/s tall. The two lines are drawn in
  * bytes per second against the same eased ceiling, so a burst rescales both together and smoothly.
  */
-@Composable fun NetSparkline(series: Series, modifier: Modifier = Modifier, pulse: Boolean = true) {
+@Composable fun NetSparkline(series: Series, modifier: Modifier = Modifier, pulse: Boolean = true, ease: Boolean = pulse) {
     val ins = series.samples.map { it.netInRate }; val outs = series.samples.map { it.netOutRate }
     val top = sparkTop(ins + outs, floor = 1024.0, ceiling = Double.MAX_VALUE)
     val held = series.samples.map { it.held }; val stamp = series.samples.lastOrNull()?.at
     Box(modifier) {
-        Sparkline(ins, Modifier.matchParentSize(), color = Tech.Green, floor = top, ceiling = top, pulse = pulse, held = held, stamp = stamp)
-        Sparkline(outs, Modifier.matchParentSize(), color = Tech.Amber, floor = top, ceiling = top, grid = false, pulse = pulse, held = held, stamp = stamp)
+        Sparkline(ins, Modifier.matchParentSize(), color = Tech.Green, floor = top, ceiling = top, pulse = pulse, held = held, stamp = stamp, ease = ease)
+        Sparkline(outs, Modifier.matchParentSize(), color = Tech.Amber, floor = top, ceiling = top, grid = false, pulse = pulse, held = held, stamp = stamp, ease = ease)
     }
 }
 
@@ -263,6 +276,47 @@ internal class SteadyRanking<K>(private val margin: Double = .15, private val fl
         }
         order = ranked
         return ranked
+    }
+}
+
+/** Sorts on a live value. They rank by the last minute and hold still, like the top-five lists ([SteadyGuestOrder]). */
+internal val steadySorts = setOf("CPU", "Memory", "Net")
+
+/**
+ * A guest's score for a live sort: the mean of its newest refreshed samples ([steadyValue]). A stopped guest or a
+ * template shows a dash and scores -1, so it sorts as missing. Memory is in bytes and net is inbound plus outbound.
+ */
+internal fun steadySortScore(sort: String, guest: Guest, series: Series?): Double {
+    if (guest.template || !guest.status.equals("running", true)) return -1.0
+    return when (sort) {
+        "CPU" -> steadyValue(series, guest.metrics?.cpuFraction) { it.cpu }
+        "Memory" -> steadyValue(series, guest.metrics?.memoryBytes?.toDouble()) { it.mem?.toDouble() }
+        "Net" -> steadyValue(series, null) { s -> if (s.netInRate == null && s.netOutRate == null) null else (s.netInRate ?: 0.0) + (s.netOutRate ?: 0.0) }
+        else -> null
+    } ?: -1.0
+}
+
+/** The lead a row needs, beyond the 15 % margin, before it passes the row above: one CPU point, 64 MiB, 1 KiB/s. */
+private fun steadySortFloor(sort: String) = when (sort) { "Memory" -> 64.0 * 1048576; "Net" -> 1024.0; else -> .01 }
+
+/**
+ * Table order for a sort. ID, name and uptime are plain comparators. CPU, memory and net use one [SteadyRanking] per
+ * group (node or remote): a row passes the one above only when it clearly leads, so two guests trading a few percent
+ * stop swapping rows on every tick. Ascending is the descending order reversed. Changing the sort starts fresh.
+ */
+internal class SteadyGuestOrder {
+    private var sort: String? = null
+    private val rankings = HashMap<Any, SteadyRanking<ResourceId>>()
+    fun order(group: Any, sort: String, descending: Boolean, guests: List<Guest>, history: FleetHistory): List<Guest> {
+        if (sort !in steadySorts) return guests.sortedWith(guestComparator(sort, history).let { if (descending) it.reversed() else it })
+        if (sort != this.sort) { rankings.clear(); this.sort = sort }
+        val ranking = rankings.getOrPut(group) { SteadyRanking(floor = steadySortFloor(sort)) }
+        // Entries with equal scores enter in ID order.
+        val scores = LinkedHashMap<ResourceId, Double>()
+        guests.sortedBy { it.id }.forEach { scores[it.resource] = steadySortScore(sort, it, history.guests[it.resource]) }
+        val byResource = guests.associateBy { it.resource }
+        val ranked = ranking.rank(scores).mapNotNull(byResource::get)
+        return if (descending) ranked else ranked.asReversed()
     }
 }
 
@@ -313,8 +367,8 @@ internal fun shortRate(value: Double?): String = when {
     }
 }
 
-/** Animated proportional bar; colours follow running / stopped / template. */
-@Composable fun SplitBar(values: List<Int>, modifier: Modifier = Modifier, colors: List<Color> = listOf(Tech.Green, Tech.Muted.copy(alpha = .55f), Tech.Amber)) {
+/** Animated proportional bar; colours follow running / stopped / template / other. */
+@Composable fun SplitBar(values: List<Int>, modifier: Modifier = Modifier, colors: List<Color> = listOf(Tech.Green, Tech.Muted.copy(alpha = .55f), Tech.Amber, Tech.Ink.copy(alpha = .7f))) {
     Row(modifier.height(4.dp).background(Tech.Edge.copy(alpha = .4f)), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
         values.forEachIndexed { i, n ->
             val w by animateFloatAsState(n.toFloat(), tween(if (LocalReduceMotion.current) 0 else 350))
@@ -330,10 +384,11 @@ internal fun shortRate(value: Double?): String = when {
     Box(modifier.height(4.dp).background(Tech.Edge.copy(alpha = .5f))) { if (fraction != null) Box(Modifier.fillMaxHeight().fillMaxWidth(f).background(tint.copy(alpha = .85f))) }
 }
 
-@Composable fun CompactSearchField(value: String, onValue: (String) -> Unit, placeholder: String = "Search name · node · ID · tag") {
+@Composable fun CompactSearchField(value: String, onValue: (String) -> Unit, placeholder: String = "Search name · node · ID · tag", label: String = "Search guests") {
     val focus = LocalSearchFocus.current
     BasicTextField(value, onValue, singleLine = true, textStyle = TextStyle(color = Tech.Ink, fontSize = 13.sp), cursorBrush = SolidColor(Tech.Amber),
-        modifier = Modifier.focusRequester(focus).onPreviewKeyEvent { if (it.type == KeyEventType.KeyDown && it.key == Key.Escape) { onValue(""); true } else false }
+        // The placeholder is drawn text, not a label: a screen reader gets the field's name from here.
+        modifier = Modifier.semantics { contentDescription = label }.focusRequester(focus).onPreviewKeyEvent { if (it.type == KeyEventType.KeyDown && it.key == Key.Escape) { onValue(""); true } else false }
             .fillMaxWidth().height(30.dp).border(1.dp, Tech.Edge, Tech.Control).background(Tech.Black.copy(alpha = .4f)),
         decorationBox = { inner ->
             Row(Modifier.fillMaxSize().padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -403,6 +458,13 @@ internal fun shortRate(value: Double?): String = when {
     }
 }
 
+/** Guests that are not running, stopped or a template (paused, suspended, unknown): the rest of the total. */
+internal fun otherGuests(total: FleetTotals) = (total.guests - total.running - total.stopped - total.templates).coerceAtLeast(0)
+
+/** The strip's split under the guest count. It adds up to the count: "other" appears when a guest is in none of the three. */
+internal fun guestSplitText(total: FleetTotals): String =
+    "${total.running} run · ${total.stopped} stop · ${total.templates} tpl" + otherGuests(total).let { if (it > 0) " · $it other" else "" }
+
 internal fun syncedAgo(updatedAt: java.time.Instant?, now: java.time.Instant): String =
     updatedAt?.let { "synced ${java.time.Duration.between(it, now).seconds.coerceAtLeast(0)}s ago" } ?: "awaiting data"
 
@@ -464,10 +526,10 @@ internal fun syncedAgo(updatedAt: java.time.Instant?, now: java.time.Instant): S
             StripCell("GUESTS", Modifier.width(textWidth(230.dp, 1.12f))) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     AnimatedCount(total.guests)
-                    Text("${total.running} run · ${total.stopped} stop · ${total.templates} tpl", fontSize = 10.sp, color = Tech.Muted, fontFamily = Tech.Mono,
+                    Text(guestSplitText(total), fontSize = 10.sp, color = Tech.Muted, fontFamily = Tech.Mono,
                         modifier = Modifier.weight(1f).padding(bottom = 3.dp), maxLines = 1, overflow = TextOverflow.Ellipsis, softWrap = false)
                 }
-                SplitBar(listOf(total.running, total.stopped, total.templates), Modifier.fillMaxWidth())
+                SplitBar(listOf(total.running, total.stopped, total.templates, otherGuests(total)), Modifier.fillMaxWidth())
             }
         }
     }
@@ -508,7 +570,7 @@ internal fun syncedAgo(updatedAt: java.time.Instant?, now: java.time.Instant): S
                         Text(hot.name.ifBlank { "Guest ${hot.id}" }, Modifier.weight(1f).identity(), fontSize = 13.sp, fontFamily = Tech.Mono, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, softWrap = false)
                         if (cpu != null) AnimatedNumber(cpu, Modifier.width(textWidth(44.dp, 1.5f)), fontSize = 13.sp)
                     }
-                    Sparkline(series ?: Series(), Modifier.fillMaxWidth().height(10.dp), grid = false, pulse = false)
+                    Sparkline(series ?: Series(), Modifier.fillMaxWidth().height(10.dp), grid = false, pulse = false, ease = true)
                 }
             }
             StripDivider()

@@ -118,17 +118,86 @@ class PermissionsTest {
 
     @Test fun anEmptyPathTheServerOmitsIsAnsweredFromItsParent_knownLimit() {
         // A NoAccess role on /vms/100 leaves the identity with nothing, and the server drops paths with no privileges from the
-        // dump. The resolver cannot see it and answers from /vms. GET /access/permissions?path=/vms/100 would answer exactly.
+        // dump. Guests in the inventory already have VM.Audit, so this guest case still answers from /vms.
+        // A node path is different: see anOnlineNodeWithNoUsageDoesNotInheritAParentRole.
         val omitted = parsePermissions("""{"data":{"/vms":{"VM.PowerMgmt":1}}}""")
         assertEquals(setOf("VM.PowerMgmt"), effectivePrivileges(omitted, "/vms/100").privileges)
+    }
+
+    @Test fun aNonPropagatingEntryDoesNotBlockWhatAParentPropagated() {
+        // PVEAuditor on / with Propagate, and a role on /vms with Propagate unchecked. roles() keeps the auditor set on /vms/101.
+        val dump = parsePermissions("""{"data":{
+            "/":{"Sys.Audit":1,"VM.Audit":1,"Datastore.Audit":1},
+            "/vms":{"VM.PowerMgmt":0,"VM.Console":0}
+        }}""")
+        val child = effectivePrivileges(dump, "/vms/101")
+        assertEquals("/", child.source)
+        assertEquals(setOf("Sys.Audit", "VM.Audit", "Datastore.Audit"), child.privileges)
+        assertEquals(setOf("VM.PowerMgmt", "VM.Console"), child.blocked)
+        assertEquals("/vms", child.blockedFrom)
+        val r = evaluateFeatures(dump, targets).associateBy { it.requirement.id }
+        assertEquals(FeatureStatus.Allowed, r.getValue("fleet-guests").status)
+        val power = r.getValue("power")
+        assertEquals(FeatureStatus.Missing, power.status)
+        assertTrue(power.summary.contains("VM.PowerMgmt is set on /vms without Propagate"), power.summary)
+        // Nothing propagating anywhere still explains the closer entry, and grants nothing from it.
+        val onlyBlocked = effectivePrivileges(parsePermissions("""{"data":{"/vms":{"VM.PowerMgmt":0}}}"""), "/vms/101")
+        assertTrue(onlyBlocked.privileges.isEmpty())
+        assertNull(onlyBlocked.source)
+        assertEquals("/vms", onlyBlocked.blockedFrom)
+    }
+
+    @Test fun anOnlineNodeWithNoUsageDoesNotInheritAParentRole() {
+        val audited = PermissionTargets(
+            nodes = listOf("pve1", "pve4"),
+            nodeAudit = mapOf(
+                "pve1" to NodeAuditSignal(online = true, showsUsage = true),
+                "pve4" to NodeAuditSignal(online = true, showsUsage = false),
+            ),
+        )
+        val dump = parsePermissions("""{"data":{"/":{"Sys.Audit":1,"Sys.Console":1,"Sys.Syslog":1,"Sys.Modify":1}}}""")
+        val r = evaluateFeatures(dump, audited).associateBy { it.requirement.id }
+        for (id in listOf("fleet-nodes", "services", "node-shell", "syslog", "updates")) {
+            assertEquals(FeatureStatus.Partial, r.getValue(id).status, id)
+            assertTrue(r.getValue(id).summary.contains("/nodes/pve4"), r.getValue(id).summary)
+            assertTrue(r.getValue(id).summary.contains("no CPU, memory or uptime"), r.getValue(id).summary)
+        }
+        // The same dump with no inventory signal still inherits. The signal is what blocks the false Allowed.
+        assertEquals(FeatureStatus.Allowed, checks("""{"data":{"/":{"Sys.Audit":1,"Sys.Console":1}}}""").getValue("node-shell").status)
+    }
+
+    @Test fun usageOnAnOnlineNodeDisagreesWithADumpThatDeniesSysAudit() {
+        val audited = PermissionTargets(
+            nodes = listOf("pve1"),
+            nodeAudit = mapOf("pve1" to NodeAuditSignal(online = true, showsUsage = true)),
+        )
+        val r = evaluateFeatures(parsePermissions("""{"data":{"/nodes":{"Sys.Console":1}}}"""), audited).associateBy { it.requirement.id }
+        assertEquals(FeatureStatus.Unknown, r.getValue("fleet-nodes").status)
+        assertTrue(r.getValue("fleet-nodes").summary.contains("disagree"), r.getValue("fleet-nodes").summary)
+        assertEquals(FeatureStatus.Allowed, r.getValue("node-shell").status)
+    }
+
+    @Test fun aGuestListPastTheCapSaysHowManyThisIdentityCanSee() {
+        val guests = (100..2200).map { it to "VM" }
+        val wide = PermissionTargets(guests = guests)
+        val fleet = evaluateFeatures(parsePermissions("""{"data":{"/vms":{"VM.Audit":1}}}"""), wide)
+            .single { it.requirement.id == "fleet-guests" }
+        assertEquals(FeatureStatus.Unknown, fleet.status)
+        assertEquals(PATH_CHECK_LIMIT, 2_000)
+        assertTrue(fleet.summary.contains("2000 of 2101 guests this identity can see"), fleet.summary)
+        assertTrue(fleet.summary.contains("101 more were not checked"), fleet.summary)
     }
 
     // ---- the table of requirements ----
 
     @Test fun everyRequirementUsesARealPrivilegeAndAValidAclPath() {
-        val all = FEATURE_REQUIREMENTS.flatMap { it.needs + it.alsoNeeds.flatten() }
+        val all = FEATURE_REQUIREMENTS.flatMap { it.needs + it.alsoNeeds.flatten() + it.alsoRequires }
         assertTrue(all.isNotEmpty())
         for (need in all) {
+            if (need.open) {
+                assertTrue(need.privileges.isEmpty())
+                continue
+            }
             assertTrue(need.privileges.isNotEmpty())
             for (name in need.privileges) assertTrue(name in PVE_PRIVILEGES, "$name is not a Proxmox VE privilege")
             for (name in need.legacy) assertTrue(name in LEGACY_PRIVILEGES && name !in PVE_PRIVILEGES, "$name is not a legacy privilege")
@@ -150,6 +219,12 @@ class PermissionsTest {
         fun need(id: String) = FEATURE_REQUIREMENTS.single { it.id == id }.needs
         assertEquals(listOf(PrivilegeNeed(PermissionScope.Node, listOf("Sys.Syslog"))), need("syslog"))
         assertEquals(listOf(PrivilegeNeed(PermissionScope.Node, listOf("Sys.Audit"))), need("services"))
+        val network = FEATURE_REQUIREMENTS.single { it.id == "node-network" }
+        assertTrue(network.needs.single().open)
+        assertEquals(listOf("SDN.Audit", "SDN.Use"), network.alsoNeeds.single().single().privileges)
+        assertTrue(network.note!!.contains("Sys.Audit"))
+        assertTrue(network.alsoNote!!.contains("bridge"))
+        assertEquals(listOf("VM.Config.Disk"), FEATURE_REQUIREMENTS.single { it.id == "storage" }.alsoRequires.single().privileges)
         assertEquals(listOf(PrivilegeNeed(PermissionScope.Node, listOf("Sys.Modify"))), need("updates"))
         assertEquals(listOf(PrivilegeNeed(PermissionScope.Root, listOf("Sys.Modify"))), need("usb"), "USB is checked on /, not on the node")
         assertEquals(listOf(PrivilegeNeed(PermissionScope.Node, listOf("Sys.Console"))), need("node-shell"))
@@ -170,7 +245,7 @@ class PermissionsTest {
 
     @Test fun anAuditorSeesTheReadFeaturesAndMissesTheRest() {
         val r = checks(auditorTree)
-        for (id in listOf("fleet-guests", "fleet-nodes", "activity", "agent-addresses", "services", "pci", "notifications")) {
+        for (id in listOf("fleet-guests", "fleet-nodes", "activity", "agent-addresses", "services", "node-network", "pci", "notifications")) {
             assertEquals(FeatureStatus.Allowed, r.getValue(id).status, id)
         }
         for (id in listOf("power", "snapshots", "rollback", "console", "node-shell", "bluetooth", "syslog", "updates", "backup-now", "usb")) {
@@ -186,7 +261,7 @@ class PermissionsTest {
         val r = checks(auditorTree)
         val power = r.getValue("power")
         assertEquals(listOf("VM.PowerMgmt @ /vms/{vmid}"), power.needs)
-        assertEquals("Missing on all 3 guests. /vms/100 inherits from /vms, whose roles do not include VM.PowerMgmt.", power.summary)
+        assertEquals("Missing on all 3 guests this identity can see. /vms/100 inherits from /vms, whose roles do not include VM.PowerMgmt.", power.summary)
         assertFalse(power.summary.contains('\n'))
         assertEquals("Missing on all 2 nodes. /nodes/pve1 inherits from /nodes, whose roles do not include Sys.Syslog.", r.getValue("syslog").summary)
         assertTrue(r.getValue("rollback").summary.contains("VM.Snapshot or VM.Snapshot.Rollback"))
@@ -198,7 +273,7 @@ class PermissionsTest {
         val r = checks("""{"data":{"/vms":{"VM.Audit":1,"VM.PowerMgmt":1},"/vms/101":{"VM.Audit":0}}}""")
         val power = r.getValue("power")
         assertEquals(FeatureStatus.Partial, power.status)
-        assertEquals("Missing on 1 of 3 guests. The roles on /vms/101 do not include VM.PowerMgmt.", power.summary)
+        assertEquals("Missing on 1 of 3 guests this identity can see. The roles on /vms/101 do not include VM.PowerMgmt.", power.summary)
         assertEquals(FeatureStatus.Allowed, r.getValue("fleet-guests").status)
     }
 
@@ -206,7 +281,7 @@ class PermissionsTest {
         val r = checks("""{"data":{"/vms":{"VM.Audit":1,"VM.PowerMgmt":0}}}""")
         val power = r.getValue("power")
         assertEquals(FeatureStatus.Missing, power.status)
-        assertEquals("Missing on all 3 guests. VM.PowerMgmt is set on /vms without Propagate, so /vms/100 does not inherit it.", power.summary)
+        assertEquals("Missing on all 3 guests this identity can see. VM.PowerMgmt is set on /vms without Propagate, so /vms/100 does not inherit it.", power.summary)
     }
 
     @Test fun aRoleOnTheExactPathCountsWhateverItsFlag() {
@@ -248,7 +323,7 @@ class PermissionsTest {
         // Only the container lacks the privilege, and it is not checked.
         val r = checks("""{"data":{"/vms":{"VM.GuestAgent.Audit":1},"/vms/101":{"VM.Audit":0}}}""")
         assertEquals(FeatureStatus.Allowed, r.getValue("agent-addresses").status)
-        assertEquals("Allowed on all 2 guests.", r.getValue("agent-addresses").summary)
+        assertEquals("Allowed on all 2 guests this identity can see.", r.getValue("agent-addresses").summary)
     }
 
     @Test fun withoutAnInventoryTheCollectionPathIsChecked() {
@@ -261,8 +336,35 @@ class PermissionsTest {
 
     @Test fun anEmptyDumpIsMissingEverywhereAndSaysNoRoleApplies() {
         val r = checks("""{"data":{}}""")
-        assertTrue(r.values.all { it.status == FeatureStatus.Missing })
-        assertEquals("Missing on all 3 guests. No role applies on /vms/100 or its parents, so VM.PowerMgmt is not granted.", r.getValue("power").summary)
+        assertEquals("Missing on all 3 guests this identity can see. No role applies on /vms/100 or its parents, so VM.PowerMgmt is not granted.", r.getValue("power").summary)
+        // The network list is open to any signed-in identity. Bridges still need an SDN privilege, so the row is partial.
+        assertEquals(FeatureStatus.Partial, r.getValue("node-network").status)
+        assertTrue(r.filterKeys { it != "node-network" }.values.all { it.status == FeatureStatus.Missing })
+    }
+
+    @Test fun storageStaysPartialUntilDiskImagesAreAllowed() {
+        val backupsOnly = checks("""{"data":{"/storage":{"Datastore.Audit":1,"Datastore.AllocateSpace":1},"/vms":{"VM.Backup":1}}}""")
+        val partial = backupsOnly.getValue("storage")
+        assertEquals(FeatureStatus.Partial, partial.status)
+        assertTrue(partial.summary.contains("VM.Config.Disk"), partial.summary)
+        val full = checks("""{"data":{"/storage":{"Datastore.Audit":1,"Datastore.Allocate":1},"/vms":{"VM.Config.Disk":1}}}""")
+        assertEquals(FeatureStatus.Allowed, full.getValue("storage").status)
+    }
+
+    @Test fun theGuestAgentPrivilegeFollowsTheServerRelease() {
+        val monitor = """{"data":{"/vms":{"VM.Audit":1,"VM.Monitor":1}}}"""
+        fun at(release: String?) = evaluateFeatures(parsePermissions(monitor).copy(release = release), targets).associateBy { it.requirement.id }
+        assertEquals(FeatureStatus.Allowed, at("8.4").getValue("agent-addresses").status)
+        assertEquals(FeatureStatus.Allowed, at("8.4").getValue("bluetooth").status)
+        val nine = at("9.0")
+        assertEquals(FeatureStatus.Missing, nine.getValue("agent-addresses").status)
+        assertTrue(nine.getValue("bluetooth").summary.contains("Proxmox VE 9 does not accept"), nine.getValue("bluetooth").summary)
+        assertEquals(FeatureStatus.Unknown, at(null).getValue("bluetooth").status)
+        assertNull(parsePveRelease("""{"data":{"repoid":"abc"}}"""))
+        assertEquals("8.4", parsePveRelease("""{"data":{"release":"8.4","repoid":"deadbeef"}}"""))
+        assertEquals("9.0", parsePveRelease("""{"data":{"version":"9.0.11"}}"""))
+        assertFalse(releaseBeforeNine("9.1")!!)
+        assertTrue(releaseBeforeNine("8.4")!!)
     }
 
     @Test fun anUnreadDumpOrANonDirectConnectionIsUnknown() {
@@ -277,7 +379,7 @@ class PermissionsTest {
         val result = evaluateFeatures(parsePermissions(auditorTree), targets)
         val counts = featureStatusCounts(result)
         assertEquals(result.size, counts.values.sum())
-        assertEquals(7, counts.getValue(FeatureStatus.Allowed))
+        assertEquals(8, counts.getValue(FeatureStatus.Allowed))
         assertEquals(1, counts.getValue(FeatureStatus.Partial))
         assertEquals(10, counts.getValue(FeatureStatus.Missing))
     }
@@ -289,6 +391,8 @@ class PermissionsTest {
         assertEquals(listOf("demo-node-a", "demo-node-b"), demo.nodes)
         assertEquals(listOf(120 to "VM", 121 to "Container", 130 to "VM"), demo.guests)
         assertEquals(listOf("local-lvm", "shared-data"), demo.storages)
+        assertEquals(true, demo.nodeAudit.getValue("demo-node-a").showsUsage)
+        assertEquals(true, demo.nodeAudit.getValue("demo-node-b").showsUsage)
         assertEquals(PermissionTargets(), permissionTargets(null))
         val pdm = Overview(0, listOf(Guest("https://pdm.example.test:8443", 100, "g", "n", "VM", "running", scope = "remote-a")))
         assertTrue(permissionTargets(pdm).guests.isEmpty())
@@ -296,11 +400,11 @@ class PermissionsTest {
 
     @Test fun theDemoSampleShowsEveryKindOfOutcome() {
         val r = evaluateFeatures(demoPermissions, permissionTargets(demoOverview)).associateBy { it.requirement.id }
-        assertEquals(setOf("fleet-guests", "fleet-nodes", "activity", "agent-addresses", "services", "pci", "notifications"),
+        assertEquals(setOf("fleet-guests", "fleet-nodes", "activity", "agent-addresses", "services", "node-network", "pci", "notifications"),
             r.filterValues { it.status == FeatureStatus.Allowed }.keys)
         assertEquals(setOf("power", "console", "node-shell", "storage", "syslog", "backup-now"), r.filterValues { it.status == FeatureStatus.Partial }.keys)
         assertEquals(setOf("snapshots", "rollback", "bluetooth", "updates", "usb"), r.filterValues { it.status == FeatureStatus.Missing }.keys)
-        assertEquals("Missing on 1 of 3 guests. The roles on /vms/130 do not include VM.PowerMgmt.", r.getValue("power").summary)
+        assertEquals("Missing on 1 of 3 guests this identity can see. The roles on /vms/130 do not include VM.PowerMgmt.", r.getValue("power").summary)
         assertEquals("Missing on 1 of 2 nodes. /nodes/demo-node-b inherits from /nodes, whose roles do not include Sys.Console.", r.getValue("node-shell").summary)
     }
 

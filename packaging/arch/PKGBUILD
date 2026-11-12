@@ -1,4 +1,4 @@
-# Maintainer: RingMASTER
+# Maintainer: RingMASTER <285952344+primary-null@users.noreply.github.com>
 pkgname=ringmaster
 pkgver=${RINGMASTER_VERSION:?set RINGMASTER_VERSION}
 pkgrel=1

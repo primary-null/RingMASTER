@@ -9,26 +9,43 @@ import kotlin.test.assertTrue
 class GuestMarksTest {
     @Test fun startedOnARunningGuestIsTheGreenHaChip() {
         val plan = guestChipPlan(guest(status = "running", haState = "started", tags = listOf("web", "lab")), 2)
-        assertEquals(listOf("HA"), plan.marks.map { it.label })
+        assertEquals(listOf("HA · started"), plan.marks.map { it.label })
         assertEquals(GuestMarkTone.Healthy, plan.marks.single().tone)
         assertEquals(listOf("web"), plan.userTags)
         assertEquals(listOf("lab"), plan.hiddenTags)
     }
 
-    @Test fun errorAndFenceAreRedAndOtherHaStatesAreAmber() {
+    // The chip used to show the bare state ("stopped") in amber next to the "stopped" status tag, and "HA" only in the
+    // tooltip. It now names HA, and a normal state is neutral: only error-like states warn.
+    @Test fun errorAndFenceAreRedRecoveryIsAmberAndOtherHaStatesAreNeutral() {
         val error = guestPriorityMarks(guest(status = "running", haState = "error")).single()
         val fence = guestPriorityMarks(guest(status = "stopped", haState = "fence")).single()
+        val recovery = guestPriorityMarks(guest(status = "stopped", haState = "recovery")).single()
         val migrate = guestPriorityMarks(guest(status = "running", haState = "migrate")).single()
         val startedStopped = guestPriorityMarks(guest(status = "stopped", haState = "started")).single()
         assertEquals(GuestMarkTone.Problem, error.tone)
-        assertEquals("error", error.label)
+        assertEquals("HA · error", error.label)
         assertEquals(GuestMarkTone.Problem, fence.tone)
-        assertEquals("fence", fence.label)
-        assertEquals(GuestMarkTone.Attention, migrate.tone)
-        assertEquals("migrate", migrate.label)
-        assertEquals(GuestMarkTone.Attention, startedStopped.tone)
-        assertEquals("started", startedStopped.label)
-        assertTrue(error.help.isNotBlank() && migrate.help.isNotBlank())
+        assertEquals("HA · fence", fence.label)
+        assertEquals(GuestMarkTone.Attention, recovery.tone)
+        assertEquals("HA · recovery", recovery.label)
+        assertEquals(GuestMarkTone.Neutral, migrate.tone)
+        assertEquals("HA · migrate", migrate.label)
+        assertEquals(GuestMarkTone.Neutral, startedStopped.tone)
+        assertEquals("HA · started", startedStopped.label)
+        assertTrue(error.help.isNotBlank() && migrate.help.isNotBlank() && recovery.help.isNotBlank())
+    }
+
+    @Test fun stoppedDisabledAndIgnoredHaAreNeutralAndStillShown() {
+        listOf("stopped", "disabled", "ignored", "Stopped").forEach { state ->
+            val mark = guestPriorityMarks(guest(status = "stopped", haState = state)).single()
+            assertEquals(GuestMarkTone.Neutral, mark.tone, state)
+            assertEquals("HA · ${state.lowercase()}", mark.label)
+        }
+        // A neutral HA chip still ranks after a lock and keeps its slot ahead of user tags.
+        val plan = guestChipPlan(guest(status = "stopped", haState = "disabled", lock = "backup", tags = listOf("web")), 2)
+        assertEquals(listOf("LOCK · backup", "HA · disabled"), plan.marks.map { it.label })
+        assertEquals(listOf("web"), plan.hiddenTags)
     }
 
     @Test fun aLockOrHaProblemTakesTheSlotAheadOfAUserTag() {
@@ -37,10 +54,10 @@ class GuestMarksTest {
         assertEquals(GuestMarkTone.Attention, locked.marks.single().tone)
         assertEquals(listOf("web"), locked.userTags)
         val both = guestChipPlan(guest(status = "running", haState = "fence", lock = "migrate", tags = listOf("web")), 2)
-        assertEquals(listOf("fence", "LOCK · migrate"), both.marks.map { it.label })
+        assertEquals(listOf("HA · fence", "LOCK · migrate"), both.marks.map { it.label })
         assertEquals(emptyList(), both.userTags)
         val template = guestChipPlan(guest(template = true, lock = "snapshot", haState = "error", tags = listOf("web")), 2)
-        assertEquals(listOf("Template", "error"), template.marks.map { it.label })
+        assertEquals(listOf("Template", "HA · error"), template.marks.map { it.label })
         assertEquals(emptyList(), template.userTags)
     }
 

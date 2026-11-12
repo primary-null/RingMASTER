@@ -8,6 +8,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -31,6 +32,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableLongState
 import androidx.compose.runtime.getValue
@@ -39,10 +41,13 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.BlurredEdgeTreatment
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
@@ -61,8 +66,14 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
+import androidx.compose.ui.text.input.OffsetMapping
+import androidx.compose.ui.text.input.TransformedText
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
@@ -73,7 +84,6 @@ import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import kotlin.math.PI
 import kotlin.math.cos
-import kotlin.math.exp
 import kotlin.math.hypot
 import kotlin.math.sin
 import kotlinx.coroutines.CancellationException
@@ -81,6 +91,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import local.ringleader.core.BT_ADAPTER_OFF
+import local.ringleader.core.BT_SCAN_ENDED_EARLY
 import local.ringleader.core.BT_SCAN_SECONDS_DEFAULT
 import local.ringleader.core.BluetoothScanner
 import local.ringleader.core.BtAdapter
@@ -108,8 +120,8 @@ private fun btCols(width: Dp) = when {
 
 /**
  * This computer's Bluetooth page. [scanner] is null where no backend exists.
- * One scan runs at a time on [Dispatchers.IO]; partial results stream in while it listens. Leaving the page cancels
- * the coroutine (the helper process ends at its own timeout). The page lists what a scan hears; it never pairs or connects.
+ * One scan runs at a time on [Dispatchers.IO]. Stop, leaving the page, or closing the app kills the helper
+ * or bluetoothctl process tree. The page lists what a scan hears; it never pairs or connects.
  */
 @Composable fun BluetoothScreen(scanner: BluetoothScanner?) {
     val scope = rememberCoroutineScope()
@@ -118,6 +130,15 @@ private fun btCols(width: Dp) = when {
     var scan by remember { mutableStateOf<BtScan?>(null) }
     var receivedAt by remember { mutableLongStateOf(0L) }
     var error by remember { mutableStateOf<String?>(null) }
+    DisposableEffect(scanner) {
+        if (scanner == null) return@DisposableEffect onDispose {}
+        val hook = Thread({ scanner.cancel() }, "bt-scan-shutdown")
+        runCatching { Runtime.getRuntime().addShutdownHook(hook) }
+        onDispose {
+            scanner.cancel()
+            runCatching { Runtime.getRuntime().removeShutdownHook(hook) }
+        }
+    }
     fun start() {
         val backend = scanner ?: return
         if (scanning) return
@@ -134,14 +155,15 @@ private fun btCols(width: Dp) = when {
             } catch (e: Exception) {
                 if (isActive) error = e.message?.takeIf { it.isNotBlank() } ?: e.javaClass.simpleName
             } finally {
-                if (isActive) scanning = false
+                scanning = false
             }
         }
     }
+    fun stop() { scanner?.cancel() }
     Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(Tech.Space8)) {
         // One fixed-height toolbar: the status lives here, so nothing is inserted above the list while a scan runs.
         Row(Modifier.fillMaxWidth().height(32.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            MiniAction(if (scanning) "Listening" else "Scan", primary = scanner != null, enabled = scanner != null && !scanning, onClick = ::start)
+            MiniAction(if (scanning) "Stop" else "Scan", primary = scanner != null, enabled = scanner != null, onClick = { if (scanning) stop() else start() })
             listOf(5, 10, 20).forEach { n ->
                 MiniAction("${n}s", primary = scanner != null && seconds == n, enabled = scanner != null && !scanning) { seconds = n }
             }
@@ -160,6 +182,8 @@ private fun scanStatus(scan: BtScan?, scanning: Boolean): String {
     return when {
         scanning -> "LISTENING · $heard HEARD · $readings READINGS"
         scan == null -> ""
+        scan.note == BT_SCAN_ENDED_EARLY -> "$heard HEARD" + (if (readings > 0) " · $readings READINGS" else "") +
+            " · ${scan.elapsedMs?.let { it / 1000 } ?: 0} S · ENDED EARLY"
         else -> "$heard HEARD" + (if (readings > 0) " · $readings READINGS" else "") + (scan.windowMs?.let { " · ${it / 1000} S" } ?: "")
     }
 }
@@ -176,9 +200,10 @@ private fun scanStatus(scan: BtScan?, scanning: Boolean): String {
     val clock = rememberScanClock(scan, receivedAt, scanning)
     Column(modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(Tech.Space8)) {
         Text(if (scan == null) " " else listOfNotNull(scan.source.label, platform?.takeIf { it.isNotBlank() }, btScanTime.format(scan.at)).joinToString("  ·  ").uppercase(),
+            modifier = Modifier.fillMaxWidth().identity(),
             fontFamily = Tech.Mono, fontSize = 10.sp, letterSpacing = 1.sp, color = Tech.Muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        if (note != null && devices.isEmpty()) { NoteBanner(note, Modifier.widthIn(max = 720.dp).fillMaxWidth()); return@Column }
-        if (note != null) NoteBanner(note, Modifier.fillMaxWidth())
+        if (note != null && devices.isEmpty()) { NoteBanner(note, Modifier.widthIn(max = 720.dp).fillMaxWidth(), platform); return@Column }
+        if (note != null) NoteBanner(note, Modifier.fillMaxWidth(), platform)
         BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
             val tall = maxHeight >= 560.dp
             val field: @Composable (Modifier) -> Unit = { m -> SignalField(devices, scan, clock, scanning, focus, selected, { focus = it }, { selected = if (selected == it) null else it }, m) }
@@ -216,30 +241,27 @@ private fun scanStatus(scan: BtScan?, scanning: Boolean): String {
  * and timeline move continuously; otherwise it is the last reported position. Read it only inside draw blocks.
  */
 @Composable private fun rememberScanClock(scan: BtScan?, receivedAt: Long, live: Boolean): MutableLongState {
-    val clock = remember { mutableLongStateOf(0L) }
+    val clock = remember { mutableLongStateOf(scan?.elapsedMs ?: scan?.windowMs ?: 0L) }
     val reduce = LocalReduceMotion.current
-    val base = scan?.elapsedMs ?: scan?.windowMs ?: 0L
-    val window = scan?.windowMs ?: Long.MAX_VALUE
-    clock.longValue = base
-    LaunchedEffect(scan, receivedAt, live, reduce) {
-        if (!live || reduce || scan == null) return@LaunchedEffect
-        while (isActive) withFrameNanos { frame -> clock.longValue = (base + (frame - receivedAt).coerceAtLeast(0L) / 1_000_000L).coerceAtMost(window) }
+    val base = rememberUpdatedState(scan?.elapsedMs ?: scan?.windowMs ?: 0L)
+    val window = rememberUpdatedState(scan?.windowMs ?: Long.MAX_VALUE)
+    val received = rememberUpdatedState(receivedAt)
+    val running = rememberUpdatedState(live && !reduce && scan != null)
+    LaunchedEffect(Unit) {
+        while (isActive) {
+            if (!running.value) {
+                clock.longValue = base.value
+                kotlinx.coroutines.delay(100)
+            } else withFrameNanos { frame ->
+                clock.longValue = (base.value + (frame - received.value).coerceAtLeast(0L) / 1_000_000L).coerceAtMost(window.value)
+            }
+        }
     }
     return clock
 }
 
-/** Signal as a smoothed value at [now]: each reading pulls the value toward it, so a dot glides instead of jumping. */
-private fun BtDevice.smoothedRssi(now: Long): Float? {
-    if (samples.isEmpty()) return rssi?.toFloat()
-    var value = samples.first().rssi.toFloat()
-    var at = samples.first().ms
-    for (s in samples) {
-        if (s.ms > now) break
-        value += (s.rssi - value) * (1f - exp(-(s.ms - at).coerceAtLeast(0L) / 700f).coerceAtLeast(.35f))
-        at = s.ms
-    }
-    return value
-}
+/** Smoothed signal stored when the sample arrived, or the raw reading for a one-shot result. */
+private fun BtDevice.fieldRssi(): Float? = smoothedRssi ?: rssi?.takeIf { it < 0 }?.toFloat()
 
 /** Radius share for a signal: about -35 dBm sits near the centre, -100 dBm on the edge. */
 private fun fieldRadius(rssi: Float) = ((-rssi - 33f) / 67f).coerceIn(.1f, 1f)
@@ -267,8 +289,8 @@ private fun deviceTint(d: BtDevice) = when {
     val label = TextStyle(fontFamily = Tech.Mono, fontSize = 9.sp, color = Tech.Muted)
     val strong = TextStyle(fontFamily = Tech.Mono, fontSize = 10.sp, color = Tech.Ink, fontWeight = FontWeight.Bold)
     val showcase = Appearance.showcase
-    fun position(d: BtDevice, w: Float, h: Float, now: Long): Offset? {
-        val r = d.smoothedRssi(now) ?: return null
+    fun position(d: BtDevice, w: Float, h: Float): Offset? {
+        val r = d.fieldRssi() ?: return null
         val radius = minOf(w, h) / 2f - 14f
         val a = fieldAngle(d.address)
         return Offset(w / 2f + (cos(a) * fieldRadius(r) * radius).toFloat(), h / 2f + (sin(a) * fieldRadius(r) * radius).toFloat())
@@ -278,8 +300,7 @@ private fun deviceTint(d: BtDevice) = when {
             while (true) {
                 val e = awaitPointerEvent()
                 val p = e.changes.firstOrNull()?.position ?: continue
-                val now = clock.longValue
-                val hit = plotted.mapNotNull { d -> position(d, size.width.toFloat(), size.height.toFloat(), now)?.let { d to hypot(it.x - p.x, it.y - p.y) } }
+                val hit = plotted.mapNotNull { d -> position(d, size.width.toFloat(), size.height.toFloat())?.let { d to hypot(it.x - p.x, it.y - p.y) } }
                     .filter { it.second < 12.dp.toPx() }.minByOrNull { it.second }?.first?.address
                 when (e.type) {
                     PointerEventType.Exit -> onFocus(null)
@@ -318,7 +339,7 @@ private fun deviceTint(d: BtDevice) = when {
         // Devices: quiet ones first so active ones draw on top.
         val ordered = plotted.sortedBy { it.lastSeenMs ?: 0L }
         ordered.forEach { d ->
-            val p = position(d, size.width, size.height, now) ?: return@forEach
+            val p = position(d, size.width, size.height) ?: return@forEach
             val tint = deviceTint(d)
             val quiet = d.lastSeenMs?.let { (now - it).coerceAtLeast(0L) } ?: 0L
             val alpha = if (d.lastSeenMs == null) .8f else (1f - (quiet - 2500f).coerceAtLeast(0f) / 9000f).coerceIn(.28f, 1f)
@@ -334,7 +355,7 @@ private fun deviceTint(d: BtDevice) = when {
             if (d.address == focus || d.address == selected) {
                 drawCircle(Tech.Amber, r + 4.dp.toPx(), p, style = Stroke(1.5.dp.toPx()))
                 val name = if (showcase) null else d.name?.takeIf { it.isNotBlank() }
-                val text = measurer.measure(listOfNotNull(name, d.smoothedRssi(now)?.let { "${it.toInt()} dBm" }).joinToString("  "), strong)
+                val text = measurer.measure(listOfNotNull(name, d.fieldRssi()?.let { "${it.toInt()} dBm" }).joinToString("  "), strong)
                 val x = (p.x + 10f).coerceAtMost(size.width - text.size.width - 2f).coerceAtLeast(2f)
                 val y = (p.y - text.size.height - 6f).coerceAtLeast(2f)
                 drawRoundRect(Tech.Panel.copy(alpha = .92f), Offset(x - 4f, y - 2f), Size(text.size.width + 8f, text.size.height + 4f), CornerRadius(3f))
@@ -429,8 +450,17 @@ private fun deviceTint(d: BtDevice) = when {
     }
 }
 
-@Composable private fun NoteBanner(note: String, modifier: Modifier = Modifier) {
-    TechPanel(modifier, rail = Tech.Amber) { Text(note, color = Tech.Amber, fontFamily = Tech.Mono, fontSize = 12.sp, lineHeight = 16.sp) }
+@Composable private fun NoteBanner(note: String, modifier: Modifier = Modifier, platform: String? = null) {
+    val windowsSettings = note == BT_ADAPTER_OFF && platform?.startsWith("Windows") == true && bluetoothSettingsCommand() != null
+    val linuxRadio = note == BT_ADAPTER_OFF && platform?.startsWith("Linux") == true
+    TechPanel(modifier, rail = Tech.Amber) {
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(note, color = Tech.Amber, fontFamily = Tech.Mono, fontSize = 12.sp, lineHeight = 16.sp)
+            if (windowsSettings) MiniAction("Open Bluetooth settings") { openBluetoothSettings() }
+            if (linuxRadio) Text("This app will not turn the radio on. Use the system settings, rfkill, or bluetoothctl.",
+                color = Tech.Muted, fontFamily = Tech.Mono, fontSize = 11.sp, lineHeight = 15.sp)
+        }
+    }
 }
 
 /** "heard", "signal", "name". */
@@ -451,7 +481,9 @@ private fun sortDevices(devices: List<BtDevice>, sort: String, descending: Boole
     var filter by remember { mutableStateOf("All") }
     var sort by remember { mutableStateOf("heard") }
     var descending by remember { mutableStateOf(false) }
-    val shown = sortDevices(devices.filter { matches(it, filter, query) }, sort, descending)
+    val shown = remember(devices, filter, query, sort, descending) {
+        sortDevices(devices.filter { matches(it, filter, query) }, sort, descending)
+    }
     BoxWithConstraints(modifier) {
         val cols = btCols(maxWidth)
         Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -491,10 +523,17 @@ private fun sortDevices(devices: List<BtDevice>, sort: String, descending: Boole
 }
 
 @Composable private fun BtSearch(value: String, onValue: (String) -> Unit) {
-    BasicTextField(value, onValue, singleLine = true,
+    val interaction = remember { MutableInteractionSource() }
+    val focused by interaction.collectIsFocusedAsState()
+    val concealed = identityFieldConcealed(Appearance.showcase, focused, value)
+    BasicTextField(value, onValue, singleLine = true, interactionSource = interaction,
         textStyle = TextStyle(color = Tech.Ink, fontSize = 12.sp, fontFamily = Tech.Mono), cursorBrush = SolidColor(Tech.Amber),
+        visualTransformation = if (concealed) VisualTransformation { text ->
+            TransformedText(AnnotatedString(identityMask(text.text)), OffsetMapping.Identity)
+        } else VisualTransformation.None,
         modifier = Modifier.onPreviewKeyEvent { if (it.type == KeyEventType.KeyDown && it.key == Key.Escape) { onValue(""); true } else false }
-            .fillMaxWidth().height(30.dp).border(1.dp, Tech.Edge, Tech.Control).background(Tech.Black.copy(alpha = .4f)),
+            .fillMaxWidth().height(30.dp).border(1.dp, Tech.Edge, Tech.Control).background(Tech.Black.copy(alpha = .4f))
+            .then(if (concealed) Modifier.blur(3.dp, BlurredEdgeTreatment.Unbounded).semantics { contentDescription = "Hidden" } else Modifier),
         decorationBox = { inner ->
             Row(Modifier.fillMaxSize().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.weight(1f)) {

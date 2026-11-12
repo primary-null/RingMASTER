@@ -8,7 +8,8 @@ internal fun JsonObject.va(k: String): List<JsonElement> = when(val v = get(k)) 
 private fun JsonObject.strings(k: String) = va(k).mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
 fun parseTailscaleStatus(json: String): TailscaleStatus {
     val r = Json.parseToJsonElement(json).jsonObject
-    fun peer(p: JsonObject) = TailscalePeer(p.vs("ID").orEmpty(), p.vs("HostName").orEmpty(), p.vs("DNSName")?.trimEnd('.'), p.vs("OS"), p.vs("Online") == "true", p.strings("TailscaleIPs").sortedBy { ':' in it }, p.vs("ExitNodeOption") == "true", p.vs("ExitNode") == "true", p.vs("Relay"), p.vs("CurAddr"), p.vs("LastSeen")?.takeUnless { it.startsWith("0001-") }?.let { runCatching { Instant.parse(it) }.getOrNull() }, p.vs("RxBytes")?.toLongOrNull(), p.vs("TxBytes")?.toLongOrNull(), p.strings("Tags"))
+    fun instant(value: String?) = value?.takeUnless { it.startsWith("0001-") }?.let { runCatching { Instant.parse(it) }.getOrNull() }
+    fun peer(p: JsonObject) = TailscalePeer(p.vs("ID").orEmpty(), p.vs("HostName").orEmpty(), p.vs("DNSName")?.trimEnd('.'), p.vs("OS"), p.vs("Online") == "true", p.strings("TailscaleIPs").sortedBy { ':' in it }, p.vs("ExitNodeOption") == "true", p.vs("ExitNode") == "true", p.vs("Relay"), p.vs("CurAddr"), instant(p.vs("LastSeen")), p.vs("RxBytes")?.toLongOrNull(), p.vs("TxBytes")?.toLongOrNull(), p.strings("Tags"), instant(p.vs("LastHandshake")))
     val tail = r["CurrentTailnet"] as? JsonObject
     val self = (r["Self"] as? JsonObject)?.let(::peer)?.let { if(it.addresses.isEmpty()) it.copy(addresses = r.strings("TailscaleIPs")) else it }
     return TailscaleStatus(r.vs("BackendState").orEmpty(), r.vs("Version"), tail?.vs("Name"), tail?.vs("MagicDNSSuffix") ?: r.vs("MagicDNSSuffix"), self, (r["Peer"] as? JsonObject)?.values.orEmpty().map { peer(it.jsonObject) }.sortedWith(compareBy({ !it.online }, { it.hostName.lowercase() })), r.vs("AuthURL"), r.strings("Health"))
@@ -31,8 +32,11 @@ fun splitNmFields(line: String): List<String> {
 }
 internal fun vpnKind(name: String) = when { name.contains("openvpn", true) -> VpnKind.OpenVpn; Regex("ipsec|strongswan|l2tp|ikev2|sstp|pptp", RegexOption.IGNORE_CASE).containsMatchIn(name) -> VpnKind.IpSec; else -> VpnKind.Other }
 fun parseNmConnections(text: String): List<VpnTunnel> = text.lines().mapNotNull { line ->
+    if(line.isBlank()) return@mapNotNull null
     val f = splitNmFields(line)
-    if(f.size < 5 || f[2] !in listOf("wireguard", "vpn")) null else VpnTunnel("nm:${f[0]}", if(f[2] == "wireguard") VpnKind.WireGuard else vpnKind(f[1]), f[1], when(f[4]) { "activated" -> VpnState.Up; "activating" -> VpnState.Connecting; else -> VpnState.Down }, f[3].takeUnless { it.isBlank() || it == "--" }, canToggle = true, canRemove = f[2] == "wireguard")
+    // STATE is optional. When it is present only the English words from LC_ALL=C count; a translated word is Down
+    // until the active-connection list says otherwise.
+    if(f.size < 4 || f[2] !in listOf("wireguard", "vpn")) null else VpnTunnel("nm:${f[0]}", if(f[2] == "wireguard") VpnKind.WireGuard else vpnKind(f[1]), f[1], when(f.getOrNull(4)) { "activated" -> VpnState.Up; "activating" -> VpnState.Connecting; else -> VpnState.Down }, f[3].takeUnless { it.isBlank() || it == "--" }, canToggle = true, canRemove = f[2] == "wireguard")
 }
 /** `ip -j addr show type wireguard`. Some iproute2 versions print an empty `{}` for every filtered-out link; those are skipped. */
 fun parseIpWireGuardJson(json: String): List<VpnTunnel> = Json.parseToJsonElement(json).jsonArray.mapNotNull { e ->
@@ -42,13 +46,17 @@ fun parseIpWireGuardJson(json: String): List<VpnTunnel> = Json.parseToJsonElemen
 fun parseWindowsVpnJson(json: String): List<VpnTunnel> {
     val r = Json.parseToJsonElement(json).jsonObject
     fun addresses(alias: String) = r.va("addresses").map { it.jsonObject }.filter { it.vs("InterfaceAlias") == alias }.mapNotNull { a -> a.vs("IPAddress")?.let { "$it/${a.vs("PrefixLength")}" } }
+    fun traffic(alias: String): Pair<Long?, Long?> {
+        val row = r.va("statistics").map { it.jsonObject }.firstOrNull { it.vs("Name") == alias } ?: return null to null
+        return row.vs("ReceivedBytes")?.toLongOrNull() to row.vs("SentBytes")?.toLongOrNull()
+    }
     val adapters = r.va("wireguardAdapters").map { it.jsonObject }
     return r.va("services").map { it.jsonObject }.map { p ->
-        val name = p.vs("Name").orEmpty().substringAfter('$'); val alias = adapters.firstOrNull { it.vs("Name") == name }?.vs("Name") ?: name
-        VpnTunnel("wg:$name", VpnKind.WireGuard, name, if(p.vs("Status") in listOf("Running", "4")) VpnState.Up else VpnState.Down, alias, addresses(alias), canToggle = true, toggleNeedsAdmin = true, canRemove = true)
+        val name = p.vs("Name").orEmpty().substringAfter('$'); val alias = adapters.firstOrNull { it.vs("Name") == name }?.vs("Name") ?: name; val (rx, tx) = traffic(alias)
+        VpnTunnel("wg:$name", VpnKind.WireGuard, name, if(p.vs("Status") in listOf("Running", "4")) VpnState.Up else VpnState.Down, alias, addresses(alias), canToggle = true, toggleNeedsAdmin = true, canRemove = true, rxBytes = rx, txBytes = tx)
     } + r.va("ras").map { it.jsonObject }.distinctBy { it.vs("Name") }.map { p ->
-        val name = p.vs("Name").orEmpty(); VpnTunnel("ras:$name", vpnKind(p.vs("TunnelType").orEmpty()), name, if(p.vs("ConnectionStatus") == "Connected") VpnState.Up else VpnState.Down, name, addresses(name), p.vs("ServerAddress")?.let { "Server $it" }, canToggle = true)
-    } + r.va("adapters").map { it.jsonObject }.map { p -> val name = p.vs("Name").orEmpty(); VpnTunnel("nic:$name", vpnKind(p.vs("InterfaceDescription").orEmpty()), name, if(p.vs("Status") == "Up") VpnState.Up else VpnState.Down, name, addresses(name)) }
+        val name = p.vs("Name").orEmpty(); val (rx, tx) = traffic(name); VpnTunnel("ras:$name", vpnKind(p.vs("TunnelType").orEmpty()), name, if(p.vs("ConnectionStatus") == "Connected") VpnState.Up else VpnState.Down, name, addresses(name), p.vs("ServerAddress")?.let { "Server $it" }, canToggle = true, rxBytes = rx, txBytes = tx)
+    } + r.va("adapters").map { it.jsonObject }.map { p -> val name = p.vs("Name").orEmpty(); val (rx, tx) = traffic(name); VpnTunnel("nic:$name", vpnKind(p.vs("InterfaceDescription").orEmpty()), name, if(p.vs("Status") == "Up") VpnState.Up else VpnState.Down, name, addresses(name), rxBytes = rx, txBytes = tx) }
 }
 fun matchRouteTunnel(alias: String?, address: String?, tunnels: List<VpnTunnel>): VpnTunnel? {
     val ts = tunnels.firstOrNull { it.kind == VpnKind.Tailscale && it.state == VpnState.Up }

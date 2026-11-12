@@ -40,4 +40,59 @@ class TerminalTest {
             assertEquals("\u001b[200~hi\u001b[201~",model.paste("hi"))
         }
     }
+
+    private fun waitFor(what: String, condition: () -> Boolean) {
+        val deadline=System.nanoTime()+5_000_000_000
+        while(!condition()) { check(System.nanoTime()<deadline) { "timed out waiting for $what" }; Thread.sleep(5) }
+    }
+
+    @Test fun textFramesAreUtf8AndSplitSurrogatesAreJoined() {
+        val session=TerminalSession(TerminalModel(40,5),null)
+        try {
+            session.receive("OK".toByteArray())
+            assertTrue(session.ready)
+            session.receiveText("café \uD83D",false)
+            session.receiveText("\uDE00 ok",true)
+            waitFor("text") { session.model.buffer.getLine(0).text.contains("ok") }
+            val line=session.model.buffer.getLine(0).text
+            assertTrue(line.startsWith("café "),line)
+            assertFalse('?' in line || '�' in line,line)
+        } finally { session.close() }
+    }
+
+    @Test fun inputIsQueuedForOneWriterAndNeverBlocksTheCaller() {
+        val session=TerminalSession(TerminalModel(),null)
+        val gate=java.util.concurrent.Semaphore(0)
+        val sent=java.util.Collections.synchronizedList(mutableListOf<String>())
+        try {
+            session.receive("OK".toByteArray())
+            session.startWriter { gate.acquire(); sent+=it }
+            val started=System.nanoTime()
+            session.input("ls"); session.input("\r"); session.resize(100,30)
+            assertTrue((System.nanoTime()-started)/1_000_000<1000,"a stalled socket does not block the UI thread")
+            assertTrue(sent.isEmpty())
+            gate.release(3)
+            waitFor("three frames") { sent.size==3 }
+            assertEquals(listOf("0:2:ls","0:1:\r","1:100:30:"),sent.toList())
+            assertNull(session.reason)
+        } finally { gate.release(100); session.close() }
+    }
+
+    @Test fun aStalledWriterEndsTheSessionInsteadOfQueueingForever() {
+        val session=TerminalSession(TerminalModel(),null)
+        try {
+            session.receive("OK".toByteArray())
+            session.startWriter { Thread.sleep(60_000) }
+            repeat(TERMINAL_OUTBOX_LIMIT+5) { session.input("x") }
+            assertEquals(TERMINAL_LOST,session.reason)
+            assertFalse(session.ready)
+        } finally { session.close() }
+    }
+
+    @Test fun aWrongGreetingIsRefused() {
+        val session=TerminalSession(TerminalModel(),null)
+        session.receive("NO".toByteArray())
+        assertEquals("The terminal refused authentication.",session.reason)
+        assertFalse(session.ready)
+    }
 }

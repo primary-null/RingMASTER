@@ -11,9 +11,42 @@ fun historySuffix(timeframe: String, cf: String): String {
     return "/rrddata?timeframe=$timeframe&cf=$cf"
 }
 fun nearestHistory(points: List<HistoryPoint>, time: Double): HistoryPoint? = points.minByOrNull { kotlin.math.abs(it.time-time) }
+/**
+ * The sample under a pointer [fraction] (0 = left edge, 1 = right edge) of a plot that spans [points]. The crosshair,
+ * the markers and the readout all use this one sample, so they name the same moment.
+ */
+fun historyAt(points: List<HistoryPoint>, fraction: Double): HistoryPoint? {
+    if (points.isEmpty()) return null
+    val f = if (fraction.isFinite()) fraction.coerceIn(0.0, 1.0) else 0.0
+    return nearestHistory(points, points.first().time + (points.last().time - points.first().time) * f)
+}
+/**
+ * Axis time pattern for the visible span in seconds, so a zoomed week or month still shows the time of day.
+ * Up to 2 hours: clock with seconds; up to 8 days: day and time; up to 120 days: day; longer: day and year.
+ */
+fun historyAxisPattern(spanSeconds: Double): String = when {
+    !spanSeconds.isFinite() || spanSeconds <= 2 * 3600.0 -> "HH:mm:ss"
+    spanSeconds <= 8 * 86400.0 -> "dd MMM HH:mm"
+    spanSeconds <= 120 * 86400.0 -> "dd MMM"
+    else -> "dd MMM yy"
+}
+/** Readout time pattern: one sample, so it always carries the time of day; the year only on a long span. */
+fun historyReadoutPattern(spanSeconds: Double): String = when {
+    !spanSeconds.isFinite() || spanSeconds <= 2 * 3600.0 -> "HH:mm:ss"
+    spanSeconds <= 120 * 86400.0 -> "dd MMM HH:mm"
+    else -> "dd MMM yy HH:mm"
+}
 fun historyRange(a: Double, b: Double): ClosedFloatingPointRange<Double>? = if(a.isFinite() && b.isFinite() && a != b) minOf(a,b)..maxOf(a,b) else null
+/** A history time (epoch seconds) as ISO-8601 in UTC, such as "2026-11-11T09:30:00Z". Empty when it is not a usable time. */
+fun historyUtc(time: Double): String =
+    if (!time.isFinite()) "" else runCatching { java.time.Instant.ofEpochMilli(kotlin.math.round(time * 1000).toLong()).toString() }.getOrDefault("")
+/** Epoch seconds as a plain number: Double.toString writes "1.7943894E9" for a real time. */
+internal fun historyEpoch(time: Double): String =
+    if (!time.isFinite()) "" else java.math.BigDecimal.valueOf(time).stripTrailingZeros().toPlainString()
+/** The numeric epoch-seconds column stays first for scripts; the same moment follows as ISO-8601 UTC for people and spreadsheets. */
 fun historyCsv(points: List<HistoryPoint>, keys: List<String>): String =
-    "time," + keys.joinToString(",") { "\"" + it.replace("\"", "\"\"") + "\"" } + "\n" + points.joinToString("\n") { p -> p.time.toString() + "," + keys.joinToString(",") { p.values[it]?.toString().orEmpty() } } + "\n"
+    "time,time_utc," + keys.joinToString(",") { "\"" + it.replace("\"", "\"\"") + "\"" } + "\n" +
+        points.joinToString("\n") { p -> historyEpoch(p.time) + "," + historyUtc(p.time) + "," + keys.joinToString(",") { p.values[it]?.toString().orEmpty() } } + "\n"
 fun demoNodeHistory(timeframe: String, cf: String): List<HistoryPoint> {
     historySuffix(timeframe,cf)
     val now = java.time.Instant.now().epochSecond.toDouble()

@@ -42,6 +42,27 @@ class TraceTest {
         assertFalse("synthetic" in Redact.url("https://example.invalid/#synthetic"))
         assertFalse("synthetic" in Redact.text("GET /api?%74icket=synthetic&port=5900"))
     }
+    @Test fun queryValuesOutsideTheAllowlistAreMasked() {
+        val names=listOf("api_key","access_key","sig","auth","jwt","key","signature","X-Amz-Signature","code","session","vncticket","password","token","secret","ticket","%74icket","unknown-name")
+        names.forEach { name ->
+            val url=Redact.url("https://example.invalid/hook?$name=synthetic-value")
+            assertFalse("synthetic" in url,"url $name")
+            assertTrue(url.startsWith("https://example.invalid/hook?"),"url keeps path for $name")
+            assertFalse("synthetic" in Redact.text("GET /hook?$name=synthetic-value"),"text $name")
+            assertFalse("synthetic" in Redact.text("GET /hook?port=1&$name=synthetic-value"),"text second $name")
+            assertFalse("synthetic" in Redact.details(mapOf("url" to "https://example.invalid/hook?$name=synthetic-value")).toString(),"details $name")
+        }
+        // A bare query part without a name is masked as a whole; known routing names stay readable.
+        assertFalse("synthetic" in Redact.url("https://example.invalid/hook?synthetic-value"))
+        assertEquals("/api2/json/nodes/demo/syslog?start=0&limit=50&service=pveproxy.service", Redact.url("/api2/json/nodes/demo/syslog?start=0&limit=50&service=pveproxy.service"))
+        assertEquals("/api2/json/nodes/demo/storage/local/content?content=backup&vmid=100", Redact.url("/api2/json/nodes/demo/storage/local/content?content=backup&vmid=100"))
+        assertEquals("/api2/json/nodes/demo/rrddata?timeframe=hour&cf=AVERAGE", Redact.url("/api2/json/nodes/demo/rrddata?timeframe=hour&cf=AVERAGE"))
+        assertEquals("GET /api2/json/resources/list?max-age=0", Redact.text("GET /api2/json/resources/list?max-age=0"))
+        // A readable name still cannot carry a ticket.
+        assertFalse("synthetic" in Redact.url("https://example.invalid/x?port=PVEVNC:demo@pve:synthetic"))
+        val trace=Trace.emit(TraceSource.Tools,"test","GET https://example.invalid/hook?api_key=synthetic-value",mapOf("url" to "https://example.invalid/hook?jwt=synthetic-value"))
+        assertFalse("synthetic" in Trace.jsonLine(trace))
+    }
     @Test fun processArgumentsOmitOpaqueScriptsAndCredentials() {
         assertFalse("synthetic-sensitive" in Redact.commandDetails(listOf("powershell.exe","-EncodedCommand","synthetic-sensitive")).toString())
         assertFalse("synthetic-sensitive" in Redact.commandDetails(listOf("iperf3","--password","synthetic-sensitive")).toString())
@@ -105,11 +126,24 @@ class TraceTest {
         assertEquals(2,json["timeline"]!!.jsonArray.size)
         assertNotNull(json["durationMs"])
     }
-    @Test fun clearAndEvictionDoNotResurrectSpans() {
+    @Test fun clearKeepsInFlightRowsAndEvictionDoesNotResurrectSpans() {
         Trace.clear()
-        val span=Trace.begin(TraceSource.Tools,"cleared")
-        Trace.clear(); span.end()
-        assertTrue(Trace.snapshot().isEmpty())
+        val finished=Trace.begin(TraceSource.Tools,"finished before clear"); finished.end()
+        val plain=Trace.emit(TraceSource.App,"test","plain row")
+        val open=Trace.begin(TraceSource.Tools,"open across clear")
+        val removed=Trace.clear()
+        assertTrue(removed>=2)
+        // Completed rows go; the in-flight row stays in the stream and in vitals, so the two views agree.
+        assertFalse(Trace.snapshot().any { it.spanId==finished.id || it.id==plain.id })
+        assertTrue(Trace.snapshot().any { it.spanId==open.id && it.kind=="begin" })
+        assertTrue(Trace.vitals().inFlight.any { it.spanId==open.id })
+        assertTrue(Trace.snapshot().all { row -> Trace.vitals().inFlight.any { it.spanId==row.spanId } })
+        open.end(status=200)
+        val ended=Trace.snapshot().single { it.spanId==open.id }
+        assertEquals("end",ended.kind); assertNotNull(ended.durationMs)
+        // A finished span cleared away is not brought back by a late duplicate end.
+        finished.end()
+        assertFalse(Trace.snapshot().any { it.spanId==finished.id })
         val evicted=Trace.begin(TraceSource.Tools,"evicted")
         repeat(Trace.CAPACITY) { Trace.emit(TraceSource.App,"test","event") }
         evicted.end()

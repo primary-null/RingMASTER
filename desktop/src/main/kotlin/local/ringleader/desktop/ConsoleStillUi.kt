@@ -29,6 +29,32 @@ internal fun stillAge(at: Instant, now: Instant): String {
     return when { s < 60 -> "${s}S AGO"; s < 3600 -> "${s / 60}M AGO"; s < 86_400 -> "${s / 3600}H AGO"; else -> "${s / 86_400}D AGO" }
 }
 
+/**
+ * Guests with a live console open in this app: the in-app VNC view or a SPICE remote-viewer. Counted, because two
+ * views of one guest can overlap for a moment while one replaces the other.
+ */
+object LiveConsoles {
+    private val open = mutableMapOf<ResourceId, Int>()
+    @Synchronized fun open(id: ResourceId) { open[id] = (open[id] ?: 0) + 1 }
+    @Synchronized fun close(id: ResourceId) { val n = (open[id] ?: return) - 1; if (n <= 0) open.remove(id) else open[id] = n }
+    @Synchronized fun isOpen(id: ResourceId): Boolean = id in open
+}
+
+/** Minutes after which opening the guest's Summary captures a fresh still. */
+internal const val STILL_AUTO_CAPTURE_MINUTES = 10L
+
+/**
+ * True when opening the Summary should capture a still: none yet, or the last one is old, and no live console for the
+ * guest is open (that would be one more vncproxy ticket and console task for a screen the user is already watching).
+ */
+internal fun shouldAutoCaptureStill(last: Instant?, now: Instant, liveConsole: Boolean): Boolean =
+    !liveConsole && (last == null || Duration.between(last, now).toMinutes() >= STILL_AUTO_CAPTURE_MINUTES)
+
+/** The Summary page's automatic capture. A manual capture (the ↻ button) is always allowed. */
+fun autoCaptureConsoleStill(state: WorkspaceState, workspace: Workspace, guest: Guest) {
+    if (shouldAutoCaptureStill(state.consoleStills[guest.resource]?.at, Instant.now(), LiveConsoles.isOpen(guest.resource))) workspace.captureConsoleStill(guest)
+}
+
 @Composable internal fun rememberStillBitmap(still: ConsoleStill?): ImageBitmap? = remember(still?.at, still?.png?.size) {
     still?.let { runCatching { org.jetbrains.skia.Image.makeFromEncoded(it.png).toComposeImageBitmap() }.getOrNull() }
 }

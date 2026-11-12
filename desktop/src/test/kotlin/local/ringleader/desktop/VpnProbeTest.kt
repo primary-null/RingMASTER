@@ -30,7 +30,7 @@ class VpnProbeTest {
             override fun snapshot() = snap
             override fun routeTo(host: String, snapshot: VpnSnapshot?) = route ?: VpnRoute(host, host, "Tailscale", "tailscale", "Tailscale")
             override fun setTunnel(tunnel: VpnTunnel, up: Boolean) = error("probe")
-            override fun setExitNode(peer: TailscalePeer?) = error("probe")
+            override fun setExitNode(peer: TailscalePeer?, allowLanAccess: Boolean) = error("probe")
             override fun importWireGuard(config: Path, name: String) = error("probe")
             override fun removeWireGuard(tunnel: VpnTunnel) = error("probe")
         }
@@ -39,7 +39,7 @@ class VpnProbeTest {
             if (light && tag == "vpn-narrow") continue
             Appearance.preview(light)
             val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
-            val session = VpnSession(scope, fake)
+            val session = VpnSession(scope, fake, hostActions = true)
             val scene = ImageComposeScene(w, h, Density(1.25f)) {
                 MaterialTheme(colorScheme = ringColors) { CompositionLocalProvider(LocalReduceMotion provides true) {
                     Surface(Modifier.fillMaxSize()) { VpnScreen(session, "https://${System.getenv("PROBE_HOST") ?: "100.64.0.2"}:8006", emptyList()) {} }

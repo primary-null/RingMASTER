@@ -27,7 +27,8 @@ fun parseWinRtScan(json: String, at: Instant): BtScan {
         val protocol = d.str("protocol").orEmpty().trim('{', '}').lowercase()
         val name = d.str("name")?.trim()?.takeIf { it.isNotEmpty() }
         val category = d.int("major")?.let { btCategoryFromClassOfDevice(it, d.int("minor") ?: 0) } ?: d.int("leCategory")?.let { btCategoryFromLeAppearance(it, name) }
-        Entry(address, name, d.int("rssi")?.takeIf { it < 0 }, d.bool("paired"), d.bool("connected"), protocol == CLASSIC_PROTOCOL, protocol == LE_PROTOCOL, category)
+        val heard = d.bool("present") != false
+        Entry(address, name, d.int("rssi")?.takeIf { heard && it < 0 }, d.bool("paired"), d.bool("connected"), protocol == CLASSIC_PROTOCOL, protocol == LE_PROTOCOL, category)
     }
     val devices = entries.groupBy { it.address }.map { (address, group) ->
         val classic = group.any { it.classic }; val le = group.any { it.le }
@@ -71,12 +72,20 @@ private fun JsonObject.long(key: String) = (this[key] as? JsonPrimitive)?.let { 
  * only the endpoint id and the changed properties, so ids are mapped back to addresses here. Lines that are not JSON
  * (PowerShell progress noise) are ignored.
  */
-class WinRtLiveParser(windowMs: Long, at: Instant = Instant.now()) {
-    private val trace = Trace.emit(TraceSource.Bluetooth, "start", "WinRT scan · PowerShell helper")
+class WinRtLiveParser(windowMs: Long, at: Instant = Instant.now(), label: String = "Windows scan · PowerShell") {
+    private val span = Trace.begin(TraceSource.Bluetooth, label)
+    private var closed = false
     private val live = BtLiveScan(BtSource.Local, windowMs, at)
     private val endpoints = HashMap<String, Pair<String, BtKind>>()
     var done = false; private set
     var lastMs = 0L; private set
+
+    /** Closes the trace span. A failure keeps the row from staying open. Safe to call twice. */
+    fun close(error: Throwable? = null) {
+        if (closed) return
+        closed = true
+        if (error != null) span.end(error = error) else span.end()
+    }
 
     /** True when the snapshot changed. */
     fun accept(line: String): Boolean {
@@ -92,6 +101,7 @@ class WinRtLiveParser(windowMs: Long, at: Instant = Instant.now()) {
                     discovering = o.bool("powered"), usbVendorId = usb?.groupValues?.get(1)?.toInt(16), usbProductId = usb?.groupValues?.get(2)?.toInt(16)))
                 return true
             }
+            "hello" -> return false
             "add" -> {
                 val address = normalizeBtAddress(o.str("address")) ?: return false
                 val protocol = o.str("protocol").orEmpty().trim('{', '}').lowercase()
@@ -99,15 +109,18 @@ class WinRtLiveParser(windowMs: Long, at: Instant = Instant.now()) {
                 o.str("id")?.let { endpoints[it] = address to kind }
                 val name = o.str("name")?.trim()?.takeIf { it.isNotEmpty() }
                 val category = o.int("major")?.let { btCategoryFromClassOfDevice(it, o.int("minor") ?: 0) } ?: o.int("leCategory")?.let { btCategoryFromLeAppearance(it, name) }
-                live.sight(BtDevice(address, name, o.int("rssi"), o.bool("paired"), o.bool("connected"), kind, category, live.adapters.firstOrNull()?.id), ms)
+                // present:false is a cached endpoint, not a device heard in this scan.
+                val rssi = if (o.bool("present") == false) null else o.int("rssi")
+                live.sight(BtDevice(address, name, rssi, o.bool("paired"), o.bool("connected"), kind, category, live.adapters.firstOrNull()?.id), ms)
                 return true
             }
             "upd" -> {
                 val (address, kind) = endpoints[o.str("id") ?: return false] ?: return false
-                live.sight(BtDevice(address, rssi = o.int("SignalStrength"), paired = o.bool("IsPaired"), connected = o.bool("IsConnected"), kind = kind), ms)
+                val rssi = if (o.bool("IsPresent") == false) null else o.int("SignalStrength")
+                live.sight(BtDevice(address, rssi = rssi, paired = o.bool("IsPaired"), connected = o.bool("IsConnected"), kind = kind), ms)
                 return true
             }
-            "done" -> { Trace.emit(TraceSource.Bluetooth, "stop", "WinRT scan completed", correlation=trace.id.toString()); done = true; return true }
+            "done" -> { done = true; return true }
         }
         return false
     }

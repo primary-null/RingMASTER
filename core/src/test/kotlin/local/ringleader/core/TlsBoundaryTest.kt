@@ -58,6 +58,18 @@ class TlsBoundaryTest {
         assertEquals(0, calls.get())
     }
 
+    @Test fun pinnedContextIsReusedPerPinAndStillRefusesAnotherCertificate() = fixture { address, pin, calls ->
+        val spelled = pin.uppercase().chunked(2).joinToString(":")
+        assertSame(pinnedSslContext(pin), pinnedSslContext(spelled))
+        assertNotSame(pinnedSslContext(pin), pinnedSslContext("00".repeat(32)))
+        assertNull(pinnedSslContext(" "))
+        assertFailsWith<IllegalArgumentException> { pinnedSslContext("abc") }
+        assertEquals(1, PveClient().overview(address, "fixture@pve!read", "test-only", pin).nodes)
+        assertFailsWith<SSLException> { PveClient().overview(address, "fixture@pve!read", "test-only", "00".repeat(32)) }
+        assertEquals(1, PveClient().overview(address, "fixture@pve!read", "test-only", spelled).nodes)
+        assertEquals(2, calls.get())
+    }
+
     @Test fun untrustedCertificateWithoutPinRefusesBeforeHttp() = fixture { address, _, calls ->
         assertFailsWith<SSLException> { PveClient().overview(address, "fixture@pve!read", "test-only") }
         assertEquals(0, calls.get())

@@ -30,7 +30,8 @@ class PingPlugin(
         emit(ToolEvent.Status("Pinging $host"))
         var seq = 0
         val code = try {
-            runToolProcess(command) { line ->
+            // Windows ping writes the console code page, not UTF-8.
+            runToolProcess(command, consoleOutputCharset(os)) { line ->
                 lines += line
                 emit(ToolEvent.Line(line))
                 parsePingLatency(line)?.let { ms ->

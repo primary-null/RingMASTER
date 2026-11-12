@@ -4,6 +4,7 @@ import java.net.URLEncoder
 import java.time.Instant
 import java.time.Duration
 import java.security.cert.X509Certificate
+import java.util.concurrent.CountDownLatch
 import javax.net.ssl.HttpsURLConnection
 import kotlinx.serialization.json.*
 
@@ -18,31 +19,84 @@ internal fun validateIdentity(identity: String, kind: String) {
     }
 }
 
+private const val CLOSED = "This connection is closed."
+
 internal fun formEncode(value: String): String = URLEncoder.encode(value, Charsets.UTF_8)
 internal class PveTicket(val ticket: String, val csrf: String, val issued: Instant) {
     val cookie get() = "PVEAuthCookie=${formEncode(ticket)}"
     override fun toString() = "PveTicket(redacted)"
 }
 
-/** Owned by one live connection; no credentials are shared between sessions. */
+/**
+ * Owned by one live connection; no credentials are shared between sessions.
+ *
+ * The lock is never held across the network. Concurrent callers that need a new ticket share one login (single
+ * flight): the first one posts, the others wait for its result. [close] never waits on a login in flight.
+ */
 internal class TicketStore(private val clock: () -> Instant = Instant::now) {
+    private class Flight {
+        private val done = CountDownLatch(1)
+        @Volatile private var result: Result<PveTicket>? = null
+        /** The first result wins; later ones are ignored. */
+        fun complete(value: Result<PveTicket>) {
+            synchronized(this) { if (result != null) return; result = value }
+            done.countDown()
+        }
+        fun await(): PveTicket { done.await(); return result!!.getOrThrow() }
+    }
+    private val lock = Any()
     private val entries = mutableMapOf<Pair<String, String>, PveTicket>()
-    @Synchronized fun clear() = entries.clear()
+    private val flights = mutableMapOf<Pair<String, String>, Flight>()
+    private var closed = false
+
+    /** Drop the cached ticket because the server refused it. A login already in flight carries on. */
+    fun clear() = synchronized(lock) { entries.clear() }
+
+    /** The connection closed: drop the ticket, release callers waiting on a login, and refuse new logins. Never waits on the network. */
+    fun close() {
+        val waiting = synchronized(lock) {
+            closed = true
+            entries.clear()
+            flights.values.toList().also { flights.clear() }
+        }
+        waiting.forEach { it.complete(Result.failure(IllegalStateException(CLOSED))) }
+    }
     override fun toString() = "TicketStore(redacted)"
-    @Synchronized fun get(connection: Connection): PveTicket {
+
+    fun get(connection: Connection): PveTicket {
         val key = connection.address to connection.tokenId
-        val old = entries[key]
-        if (old != null) {
-            val age = Duration.between(old.issued, clock())
-            if (age <= Duration.ofMinutes(60)) return old
-            entries.remove(key)
-            if (age <= Duration.ofMinutes(115)) {
-                try { return request(connection, old.ticket, renewal = true).also { entries[key] = it } }
-                catch (_: Exception) { /* Full login below, with the original password. */ }
+        val mine = Flight()
+        var renew: String? = null
+        val joined = synchronized(lock) {
+            check(!closed) { CLOSED }
+            val old = entries[key]
+            if (old != null) {
+                val age = Duration.between(old.issued, clock())
+                if (age <= Duration.ofMinutes(60)) return old
+                entries.remove(key)
+                if (age <= Duration.ofMinutes(115)) renew = old.ticket
             }
+            flights[key] ?: run { flights[key] = mine; null }
+        }
+        if (joined != null) return joined.await()
+        val result = runCatching { login(connection, renew) }
+        val open = synchronized(lock) {
+            if (flights[key] === mine) flights.remove(key)
+            if (!closed) result.onSuccess { entries[key] = it }
+            !closed
+        }
+        mine.complete(if (open) result else Result.failure(IllegalStateException(CLOSED)))
+        return mine.await()
+    }
+
+    /** Runs outside the lock. Renewal posts the old ticket; when that fails, a full login uses the password and the one-time code. */
+    private fun login(connection: Connection, renew: String?): PveTicket {
+        if (renew != null) {
+            try { return request(connection, renew, renewal = true) }
+            catch (_: Exception) { /* Full login below, with the original password. */ }
         }
         val otp = connection.takeOtp()
-        return connection.withSecret { password -> request(connection, password, otp = otp) }.also { entries[key] = it }
+        return connection.withSecret { password -> request(connection, password, otp = otp) }
     }
     private fun request(c: Connection, password: String, challenge: String? = null, otp: String? = null, renewal: Boolean = false): PveTicket {
         val trace = Trace.begin(TraceSource.Auth, if (renewal) "Renew ticket" else "Ticket login", emptyMap())

@@ -8,6 +8,7 @@ import java.nio.file.attribute.AclEntryPermission
 import java.nio.file.attribute.AclEntryType
 import java.nio.file.attribute.AclFileAttributeView
 import java.nio.file.attribute.GroupPrincipal
+import java.nio.file.attribute.PosixFilePermission
 import java.nio.file.attribute.UserPrincipal
 
 /**
@@ -33,4 +34,35 @@ fun restrictToCurrentUser(file: Path): Boolean {
         .build()
     view.setAcl(listOf(entry))
     return true
+}
+
+/** `rwx------`. Callers apply this to directories they create, never to a parent such as `~/.config`. */
+fun ownerDirectoryPermissions(): Set<PosixFilePermission> = setOf(
+    PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE, PosixFilePermission.OWNER_EXECUTE,
+)
+
+/** `rw-------`. */
+fun ownerFilePermissions(): Set<PosixFilePermission> = setOf(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE)
+
+/**
+ * Makes [path] owner-only. Missing paths and symbolic links are left alone, and a link is not followed.
+ * POSIX gets 0700 for a directory and 0600 for a file. Other stores use [restrictToCurrentUser].
+ */
+fun grantOwnerOnly(path: Path) {
+    if (Files.isSymbolicLink(path) || !Files.exists(path, LinkOption.NOFOLLOW_LINKS)) return
+    if ("posix" in path.fileSystem.supportedFileAttributeViews()) {
+        val perms = if (Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)) ownerDirectoryPermissions() else ownerFilePermissions()
+        Files.setPosixFilePermissions(path, perms)
+    } else restrictToCurrentUser(path)
+}
+
+/**
+ * Creates [directory] if needed and restricts that directory to the current user.
+ * A symbolic link at [directory] is not followed and nothing is created through it.
+ * Parent directories that have to be created keep the process umask; only [directory] itself is tightened.
+ */
+fun createOwnerOnlyDirectories(directory: Path) {
+    if (Files.isSymbolicLink(directory)) return
+    if (!Files.exists(directory, LinkOption.NOFOLLOW_LINKS)) Files.createDirectories(directory)
+    grantOwnerOnly(directory)
 }

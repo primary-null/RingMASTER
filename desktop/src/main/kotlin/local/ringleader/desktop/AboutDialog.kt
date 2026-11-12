@@ -119,7 +119,7 @@ import java.nio.file.Path
         TechAction("Cancel", onClick = onCancel)
     }) {
         AppData.removes.forEach { Text("·  $it", fontSize = 13.sp, color = Tech.Ink) }
-        Text("Kept: your tool plugins folder. Nothing on any server is changed.", fontSize = 12.sp, color = Tech.Muted)
+        Text(AppData.KEPT_NOTE, fontSize = 12.sp, color = Tech.Muted)
         TechField(typed, { typed = it.uppercase().take(5) }, "Type CLEAR to confirm", placeholder = "CLEAR")
         failed?.let { left ->
             Text("Some items could not be removed. Close other RingMASTER windows and try again, or delete them by hand:", color = Tech.Red, fontSize = 12.sp)

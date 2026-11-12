@@ -79,8 +79,10 @@ class VncSessionTest {
         assertContentEquals(byteArrayOf(0, 0, 0, 0, 32, 24, 0, 1, 0, -1, 0, -1, 0, -1, 16, 8, 0, 0, 0, 0), channel.writes[4])
         val encodings = ByteBuffer.wrap(channel.writes[5])
         assertEquals(2, encodings.get().toInt()); encodings.get()
-        assertEquals(5, encodings.short.toInt())
-        assertEquals(listOf(6, 1, 0, -223, -239), List(5) { encodings.int })
+        assertEquals(6, encodings.short.toInt())
+        // QEMU extended key events (-258) are offered; keysyms remain the fallback until the server confirms them.
+        assertEquals(listOf(6, 1, 0, -223, -239, -258), List(6) { encodings.int })
+        assertFalse(session.extendedKeys)
         val request = ByteBuffer.wrap(channel.writes[6])
         assertEquals(3, request.get().toInt()); assertEquals(0, request.get().toInt())
         assertEquals(0, request.short.toInt()); assertEquals(0, request.short.toInt())

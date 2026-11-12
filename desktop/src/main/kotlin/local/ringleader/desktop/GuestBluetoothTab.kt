@@ -42,15 +42,10 @@ import local.ringleader.core.*
         hardware?.pci?.forEach { pci -> AttachmentRow(pci.key, "PCI DEVICE", pci.volume ?: pci.properties["host"] ?: "PCI passthrough", null) }
 
         SectionLabel("Scan inside this VM")
-        val refusal = when {
-            guest.kind != "VM" -> "Guest scans need a QEMU VM with the guest agent."
-            guest.status != "running" || guest.template -> GUEST_BT_NOT_RUNNING
-            state.kind == PDM_KIND || guest.scope.isNotEmpty() -> "Guest scans need a direct Proxmox VE connection."
-            else -> null
-        }
+        val refusal = guestBluetoothRefusal(guest, directPve = state.kind != PDM_KIND && guest.scope.isEmpty(), hardware = hardware)
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             MiniAction(if (scanning) "Scanning…" else "Scan inside VM · ${BT_SCAN_SECONDS_DEFAULT}s", primary = true, enabled = refusal == null && !scanning) { confirm = true }
-            Text(refusal ?: "Uses the VM's own Bluetooth adapter. Nothing is paired or changed.",
+            Text(refusal ?: "Uses the VM's own Bluetooth adapter. Nothing is paired or connected.",
                 fontSize = 10.sp, lineHeight = 14.sp, fontFamily = Tech.Mono, color = Tech.Muted)
         }
         error?.let { Text(it, fontSize = 11.sp, color = Tech.Amber) }
@@ -68,7 +63,7 @@ import local.ringleader.core.*
             }
         }
         TechAction("Cancel") { confirm = false }
-    }) { Text("RingMASTER will listen for Bluetooth devices for ${BT_SCAN_SECONDS_DEFAULT} seconds using the VM's adapter, through the QEMU guest agent. Nothing is paired or changed.", fontSize = 13.sp, lineHeight = 19.sp) }
+    }) { Text("RingMASTER will listen for Bluetooth devices for ${BT_SCAN_SECONDS_DEFAULT} seconds using the VM's adapter, through the QEMU guest agent. Nothing is paired or connected.", fontSize = 13.sp, lineHeight = 19.sp) }
 }
 
 @Composable private fun AttachmentRow(key: String, kind: String, detail: String, extra: String?) {

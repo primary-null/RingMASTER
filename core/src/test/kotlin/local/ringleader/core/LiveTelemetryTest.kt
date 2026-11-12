@@ -233,6 +233,8 @@ class LiveTelemetryTest {
             }
         }
         val workspace = Workspace(this, fake)
+        // The error wait is jittered by up to 15 %; held at 0 here so the sequence steps are exact.
+        workspace.liveJitter = { 0.0 }
         try {
             workspace.connect(connection()); runCurrent()
             assertTrue(workspace.state.value.live)
@@ -268,6 +270,20 @@ class LiveTelemetryTest {
             step(2_000)
             assertNull(workspace.state.value.liveBackoffSeconds)
             assertTrue(workspace.state.value.connected)
+            // At 2 min the backoff never shortens the wait: every failed read is still 2 min after the one before.
+            workspace.setLive(true, 120); runCurrent()
+            var reads = 0
+            fake.inventory = { reads++; throw IOException("down") }
+            step(120_000)
+            assertEquals(1, reads)
+            assertEquals(5, workspace.state.value.liveBackoffSeconds)
+            listOf(10, 20, 40, 60, 60).forEachIndexed { index, expected ->
+                step(119_000)
+                assertEquals(index + 1, reads, "no read before the 2 min interval")
+                step(1_000)
+                assertEquals(index + 2, reads)
+                assertEquals(expected, workspace.state.value.liveBackoffSeconds)
+            }
         } finally { workspace.close() }
     }
 

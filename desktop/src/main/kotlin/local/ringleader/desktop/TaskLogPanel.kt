@@ -54,6 +54,9 @@ import local.ringleader.core.taskLogChip
 import local.ringleader.core.taskLogHasMore
 import local.ringleader.core.taskLogText
 import local.ringleader.core.taskUserLabel
+import local.ringleader.core.taskLogDroppedText
+import local.ringleader.core.taskLogSaveText
+import local.ringleader.core.writeOwnerOnlyText
 
 /** Task log beside the Activity table, or over it when the pane is narrower than 1280dp. Heights stay fixed as lines arrive. */
 @Composable fun TaskLogPanel(state: WorkspaceState, workspace: Workspace, modifier: Modifier = Modifier) {
@@ -86,7 +89,8 @@ import local.ringleader.core.taskUserLabel
         taskEnd != null -> taskEnd
         else -> now
     }
-    val elapsed = started?.let { taskDuration(java.time.Duration.between(it, end).seconds.coerceAtLeast(0)) } ?: "—"
+    // A negative span means this computer's clock is behind the node's; taskDuration says Unavailable then.
+    val elapsed = started?.let { taskDuration(java.time.Duration.between(it, end).seconds) } ?: "—"
     // A percentage the task printed into its log (backup, restore, clone...) is traced along the header outline. When the log
     // says the task just stopped, an OK blooms once (bigger the longer it was watched) and an error nudges the chip once.
     val progress = remember(log.lines) { taskProgress(log.lines) }
@@ -120,9 +124,10 @@ import local.ringleader.core.taskUserLabel
             }
         }
     }
-    LaunchedEffect(log.lines.size, more, following, reduce) {
+    LaunchedEffect(log.lines.size, log.dropped, more, following, reduce) {
         if (!following || log.lines.isEmpty()) return@LaunchedEffect
-        val target = (log.lines.lastIndex + if (more) 1 else 0).coerceAtLeast(0)
+        val notice = if (log.dropped > 0) 1 else 0
+        val target = (log.lines.lastIndex + notice + if (more) 1 else 0).coerceAtLeast(0)
         ownScroll.value = true
         try {
             if (reduce) listState.scrollToItem(target) else listState.animateScrollToItem(target)
@@ -159,6 +164,9 @@ import local.ringleader.core.taskUserLabel
                 )
             } else {
                 LazyColumn(Modifier.fillMaxSize(), state = listState) {
+                    taskLogDroppedText(log.dropped)?.let { notice ->
+                        item(key = "dropped") { Text(notice, Modifier.padding(horizontal = 12.dp, vertical = 4.dp), color = Tech.Amber, fontFamily = FontFamily.Monospace, fontSize = 11.sp) }
+                    }
                     items(log.lines, key = { it.n }) { line -> LogLine(line) }
                     if (more) {
                         item {
@@ -178,7 +186,7 @@ import local.ringleader.core.taskUserLabel
             MiniAction("Copy log", enabled = log.lines.isNotEmpty()) {
                 clipboard.setText(AnnotatedString(taskLogText(log.lines)))
             }
-            if (!LocalAppHost.current.web) MiniAction("Save…", enabled = log.lines.isNotEmpty()) { saveTaskLog(log.lines) }
+            if (!LocalAppHost.current.web) MiniAction("Save…", enabled = log.lines.isNotEmpty()) { saveTaskLog(log.lines, log.dropped) }
             WebUiAction(if (state.demo || state.kind == local.ringleader.core.PDM_KIND) null else local.ringleader.core.PveWebUi.task(state.address, log.task.node, log.task.type, log.task.subjectId))
             Spacer(Modifier.weight(1f))
             if (log.loading) TechBusy()
@@ -210,12 +218,13 @@ private fun taskLogLineColor(text: String): Color {
     return Tech.Ink
 }
 
-private fun saveTaskLog(lines: List<TaskLogLine>) {
+/** Save the lines held, readable only by the current user (POSIX 0600, or an owner-only ACL on Windows). */
+private fun saveTaskLog(lines: List<TaskLogLine>, dropped: Int) {
     val dialog = java.awt.FileDialog(null as java.awt.Frame?, "Save task log", java.awt.FileDialog.SAVE)
     try {
         dialog.file = "task-log.txt"
         dialog.isVisible = true
         val name = dialog.file ?: return
-        java.io.File(dialog.directory, name).writeText(taskLogText(lines))
+        writeOwnerOnlyText(java.io.File(dialog.directory, name).toPath(), taskLogSaveText(lines, dropped))
     } finally { dialog.dispose() }
 }

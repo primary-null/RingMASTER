@@ -3,8 +3,10 @@ package local.ringleader.core
 import kotlinx.serialization.json.*
 
 /**
- * A node's network configuration from `GET /nodes/{node}/network` (needs Sys.Audit on the node): bridges, bonds,
- * VLANs, physical NICs and OVS objects, as Proxmox reports them in /etc/network/interfaces.
+ * A node's network configuration from `GET /nodes/{node}/network`. Any signed-in user may call it. Bridges are left
+ * out of the answer, with no error, unless the caller has SDN.Audit or SDN.Use on that bridge. When
+ * `/etc/network/interfaces.new` exists, the rows are that staged file, not the live one. [NodeNetworkReport.pendingChanges]
+ * is the diff against the live file.
  */
 data class NodeInterface(
     val name: String,
@@ -24,17 +26,41 @@ data class NodeInterface(
     val vlanAware: Boolean,
     val mtu: Int?,
     val comment: String?,
+    /** Address method, for example static, manual, or dhcp. Null when the server omitted it. */
+    val method: String? = null,
+    val method6: String? = null,
+    /** False when the interface is configured but the hardware is absent. Null when the server omitted it. */
+    val exists: Boolean? = null,
 )
+
+/** Interfaces plus the staged diff, when the node has one. */
+data class NodeNetworkReport(val interfaces: List<NodeInterface>, val pendingChanges: String?)
+
+const val NODE_NETWORK_DENIED = "Not permitted to read this node's network."
 
 /** Display order: bridges, bonds, VLANs, physical NICs, the rest; then by name with numbers in numeric order. */
 private val interfaceRank = listOf("bridge", "OVSBridge", "bond", "OVSBond", "vlan", "eth", "OVSPort", "OVSIntPort", "alias")
 
-fun parseNodeNetwork(body: String): List<NodeInterface> {
-    val rows = (Json.parseToJsonElement(body).jsonObject["data"] as? JsonArray).orEmpty()
-    return rows.mapNotNull { e ->
+private const val NETWORK_CHANGES_MAX = 4_000
+
+fun parseNodeNetwork(body: String): List<NodeInterface> = parseNodeNetworkReport(body).interfaces
+
+fun parseNodeNetworkReport(body: String): NodeNetworkReport {
+    val root = Json.parseToJsonElement(body).jsonObject
+    val rows = (root["data"] as? JsonArray).orEmpty()
+    val interfaces = rows.mapNotNull { e ->
         val o = e as? JsonObject ?: return@mapNotNull null
         fun str(k: String) = (o[k] as? JsonPrimitive)?.takeUnless { it is JsonNull }?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() }
         fun flag(k: String) = (o[k] as? JsonPrimitive)?.let { it.intOrNull == 1 || it.booleanOrNull == true || it.contentOrNull == "1" } == true
+        fun tri(k: String): Boolean? {
+            val p = o[k] as? JsonPrimitive ?: return null
+            if (p is JsonNull) return null
+            return when {
+                p.booleanOrNull == true || p.intOrNull == 1 || p.contentOrNull == "1" -> true
+                p.booleanOrNull == false || p.intOrNull == 0 || p.contentOrNull == "0" -> false
+                else -> null
+            }
+        }
         val name = str("iface") ?: return@mapNotNull null
         val type = str("type") ?: "unknown"
         val members = (str("bridge_ports") ?: str("slaves") ?: str("ovs_ports") ?: str("ovs_bonds")).orEmpty()
@@ -43,8 +69,17 @@ fun parseNodeNetwork(body: String): List<NodeInterface> {
         NodeInterface(name, type, flag("active"), flag("autostart"), cidr, str("cidr6") ?: str("address6")?.let { a -> str("netmask6")?.let { "$a/$it" } ?: a },
             str("gateway"), str("gateway6"), members, str("bond_mode"), str("vlan-id")?.toIntOrNull() ?: name.substringAfterLast('.', "").toIntOrNull()?.takeIf { type == "vlan" },
             str("vlan-raw-device") ?: name.substringBeforeLast('.', "").takeIf { type == "vlan" && it.isNotEmpty() }, flag("bridge_vlan_aware"),
-            str("mtu")?.toIntOrNull(), str("comments"))
+            str("mtu")?.toIntOrNull(), str("comments"), str("method"), str("method6"), tri("exists"))
     }.sortedWith(compareBy<NodeInterface>({ interfaceRank.indexOf(it.type).let { r -> if (r < 0) interfaceRank.size else r } }, { naturalKey(it.name) }))
+    val changes = (root["changes"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+    return NodeNetworkReport(interfaces, cleanNetworkChanges(changes))
+}
+
+/** Keep the staged diff printable and bounded. Blank means there is no pending file. */
+internal fun cleanNetworkChanges(raw: String?): String? {
+    val text = raw?.filter { it == '\n' || it == '\t' || !it.isISOControl() }?.trim().orEmpty()
+    if (text.isEmpty()) return null
+    return if (text.length <= NETWORK_CHANGES_MAX) text else text.take(NETWORK_CHANGES_MAX).trimEnd() + "\n… The diff is cut off."
 }
 
 /** "255.255.255.0" -> 24; null when it is not a contiguous IPv4 mask. */
@@ -58,8 +93,8 @@ fun netmaskBits(mask: String): Int? {
 private fun naturalKey(name: String): String = Regex("\\d+").replace(name) { it.value.padStart(6, '0') }
 
 fun nodeNetworkPath(node: String): String {
-    require(node.matches(Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,62}"))) { "Invalid node name." }
-    return "/api2/json/nodes/${encodePathSegment(node)}/network"
+    val name = pveNodeNameOrNull(node) ?: throw IllegalArgumentException("The node name cannot be requested.")
+    return "/api2/json/nodes/${encodePathSegment(name)}/network"
 }
 
 /** Demo data for the network panel. */

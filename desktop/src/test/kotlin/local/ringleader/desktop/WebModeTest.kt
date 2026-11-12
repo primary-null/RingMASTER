@@ -39,7 +39,189 @@ internal fun exploreDemoCentre(screen: java.awt.image.BufferedImage): Pair<Int, 
     return (minX + maxX) / 2 to (minY + maxY) / 2
 }
 
+/** Status code of one plain HTTP/1.1 request with a chosen Host, which java.net.http does not allow setting. */
+internal fun rawStatus(port: Int, path: String, host: String, headers: String = ""): Int =
+    java.net.Socket(java.net.InetAddress.getLoopbackAddress(), port).use { socket ->
+        socket.soTimeout = 15000
+        socket.getOutputStream().write("GET $path HTTP/1.1\r\nHost: $host\r\n${headers}Connection: close\r\n\r\n".toByteArray())
+        socket.getInputStream().bufferedReader().readLine().split(' ')[1].toInt()
+    }
+
 class WebModeTest {
+    /** A fixed operator login phrase for these tests (not a secret). */
+    private val operatorLogin = "operator-fixed-login-of-24-plus-chars"
+    /** The sample handshake nonce from RFC 6455, section 1.3. */
+    private val RFC6455_SAMPLE_NONCE = "dGhlIHNhbXBsZSBub25jZQ=="
+    private val quick = WebLimits(failedLoginDelayMs = 0)
+    private val client = HttpClient.newHttpClient()
+    private fun get(url: String, vararg headers: String): HttpResponse<String> =
+        client.send(HttpRequest.newBuilder(URI(url)).apply { if (headers.isNotEmpty()) headers(*headers) }.GET().build(), HttpResponse.BodyHandlers.ofString())
+    private fun cookieOf(login: HttpResponse<String>) = login.headers().firstValue("set-cookie").get().substringBefore(';')
+    private fun handshakeStatus(server: WebServer, cookie: String?): Int {
+        val builder = client.newWebSocketBuilder().header("Origin", server.origin)
+        if (cookie != null) builder.header("Cookie", cookie)
+        return try { builder.buildAsync(URI(server.origin.replace("http", "ws") + "/session"), object : WebSocket.Listener {}).join().abort(); 101 }
+        catch (e: CompletionException) { (e.cause as WebSocketHandshakeException).response.statusCode() }
+    }
+    /** Opens /session and reports the server's close code and reason. */
+    private fun openSocket(server: WebServer, cookie: String, closed: CompletableFuture<Pair<Int, String>>): WebSocket =
+        client.newWebSocketBuilder().header("Origin", server.origin).header("Cookie", cookie)
+            .buildAsync(URI(server.origin.replace("http", "ws") + "/session"), object : WebSocket.Listener {
+                override fun onOpen(ws: WebSocket) { ws.request(Long.MAX_VALUE) }
+                override fun onClose(ws: WebSocket, statusCode: Int, reason: String): CompletionStage<*>? { closed.complete(statusCode to reason); return null }
+            }).join()
+
+    @Test fun loginLinkWorksOnceAndANewLinkReplacesIt() {
+        WebServer(WebOptions(port=0),operatorLogin,quick).use { server ->
+            server.start()
+            val first=server.loginUrl
+            assertFalse(first.contains("operator-fixed-login"),"the fixed key is never put in a link")
+            assertFalse(server.link.value!!.used)
+            assertEquals(302,get(first).statusCode())
+            assertTrue(server.link.value!!.used)
+            assertEquals(403,get(first).statusCode(),"a used link no longer signs in")
+            val second=server.newLoginLink(); val third=server.newLoginLink()
+            assertNotEquals(second,third)
+            assertEquals(403,get(second).statusCode(),"minting a link cancels the unused one")
+            assertEquals(302,get(third).statusCode())
+            assertEquals(403,get(third).statusCode())
+            // RINGMASTER_WEB_KEY is the operator's reusable key.
+            repeat(2) { assertEquals(302,get("${server.origin}/login?key=$operatorLogin").statusCode()) }
+        }
+        WebServer(WebOptions(port=0),null,quick).use { server ->
+            server.start()
+            assertEquals(302,get(server.loginUrl).statusCode())
+            assertEquals(403,get(server.loginUrl).statusCode())
+        }
+    }
+
+    @Test fun failedLoginsAreDelayedThenLockedOut() {
+        WebServer(WebOptions(port=0),operatorLogin,WebLimits(failedLoginDelayMs=300,failuresBeforeLock=3,lockMs=60_000)).use { server ->
+            server.start()
+            val started=System.nanoTime()
+            assertEquals(403,get("${server.origin}/login?key=x").statusCode())
+            assertTrue(System.nanoTime()-started>=TimeUnit.MILLISECONDS.toNanos(300),"a failed login is answered late")
+            // Any length of guess is compared the same way, including a long one.
+            assertEquals(403,get("${server.origin}/login?key=${"y".repeat(500)}").statusCode())
+            assertEquals(403,get("${server.origin}/login?key=").statusCode())
+            val locked=get(server.loginUrl)
+            assertEquals(429,locked.statusCode())
+            assertTrue(locked.headers().firstValue("retry-after").isPresent)
+            assertContains(locked.body(),"Try again")
+            assertEquals(429,get("${server.origin}/login?key=$operatorLogin").statusCode())
+            assertFalse(server.link.value!!.used,"a refused attempt does not spend the link")
+        }
+        WebServer(WebOptions(port=0),operatorLogin,WebLimits(failedLoginDelayMs=0,failuresBeforeLock=3)).use { server ->
+            server.start()
+            // A success resets the count.
+            repeat(2) { assertEquals(403,get("${server.origin}/login?key=x").statusCode()) }
+            assertEquals(302,get(server.loginUrl).statusCode())
+            repeat(2) { assertEquals(403,get("${server.origin}/login?key=x").statusCode()) }
+            assertEquals(302,get("${server.origin}/login?key=$operatorLogin").statusCode())
+        }
+    }
+
+    @Test fun hostAndOriginAllowlistOnEveryRoute() {
+        WebServer(WebOptions(port=0),operatorLogin,quick).use { server ->
+            server.start()
+            val own="127.0.0.1:${server.port}"
+            val key=server.loginUrl.substringAfter("?")
+            assertEquals(200,rawStatus(server.port,"/",own))
+            val upgrade="Upgrade: websocket\r\nSec-WebSocket-Key: $RFC6455_SAMPLE_NONCE\r\nSec-WebSocket-Version: 13\r\nOrigin: ${server.origin}\r\n"
+            for(host in listOf("rebind.example:${server.port}","localhost:${server.port}","127.0.0.1","127.0.0.1:1")) {
+                assertEquals(403,rawStatus(server.port,"/",host),host)
+                assertEquals(403,rawStatus(server.port,"/login?$key",host),host)
+                assertEquals(403,rawStatus(server.port,"/status",host),host)
+                assertEquals(403,rawStatus(server.port,"/no-such-page",host),host)
+                assertEquals(403,rawStatus(server.port,"/session",host,upgrade),host)
+            }
+            assertFalse(server.link.value!!.used,"a refused host does not spend the link")
+            assertEquals(403,get(server.loginUrl,"Origin","https://foreign.invalid").statusCode())
+            assertEquals(403,get(server.loginUrl,"Origin","null").statusCode())
+            assertEquals(302,get(server.loginUrl).statusCode())
+        }
+    }
+
+    @Test fun documentHeadersAndCookieFlags() {
+        WebServer(WebOptions(port=0),operatorLogin,quick).use { server ->
+            server.start()
+            val login=get(server.loginUrl)
+            val setCookie=login.headers().firstValue("set-cookie").get()
+            assertTrue(setCookie.startsWith("ringmaster="),setCookie)
+            val flags=setCookie.split(';').map { it.trim().lowercase() }
+            assertTrue("httponly" in flags,setCookie); assertTrue("samesite=strict" in flags,setCookie); assertTrue("path=/" in flags,setCookie)
+            assertFalse("secure" in flags,"plain loopback HTTP cannot keep a Secure cookie")
+            assertTrue(flags.any { it.startsWith("max-age=") },setCookie)
+            val page=WebServer::class.java.getResource("/web/index.html")!!.readText()
+            fun hash(tag: String)="'sha256-"+java.util.Base64.getEncoder().encodeToString(java.security.MessageDigest.getInstance("SHA-256").digest(page.substringAfter("<$tag>").substringBefore("</$tag>").toByteArray()))+"'"
+            for(response in listOf(login,get("${server.origin}/"),get("${server.origin}/","Cookie",cookieOf(login)))) {
+                val csp=response.headers().firstValue("content-security-policy").get()
+                assertContains(csp,"frame-ancestors 'none'"); assertContains(csp,"default-src 'none'")
+                assertContains(csp,"script-src ${hash("script")}"); assertContains(csp,"style-src ${hash("style")}")
+                assertFalse(csp.contains("unsafe-inline"))
+                assertEquals("nosniff",response.headers().firstValue("x-content-type-options").get())
+                assertEquals("no-referrer",response.headers().firstValue("referrer-policy").get())
+                assertEquals("no-store",response.headers().firstValue("cache-control").get())
+            }
+            assertContains(get("${server.origin}/","Cookie",cookieOf(login)).body(),"<script>")
+        }
+    }
+
+    @Test fun logoutEndsTheSessionAndItsSockets() {
+        WebServer(WebOptions(port=0),operatorLogin,quick).use { server ->
+            server.start()
+            val cookie=cookieOf(get(server.loginUrl))
+            fun status()=get("${server.origin}/status","Cookie",cookie).statusCode()
+            assertEquals(204,status())
+            val closed=CompletableFuture<Pair<Int,String>>()
+            val ws=openSocket(server,cookie,closed)
+            try {
+                fun logout(vararg headers: String)=client.send(HttpRequest.newBuilder(URI("${server.origin}/logout")).headers("Cookie",cookie,*headers).POST(HttpRequest.BodyPublishers.noBody()).build(),HttpResponse.BodyHandlers.ofString())
+                assertEquals(403,logout().statusCode(),"logout needs this page's Origin")
+                assertEquals(403,logout("Origin","https://foreign.invalid").statusCode())
+                assertEquals(204,status())
+                val out=logout("Origin",server.origin)
+                assertEquals(204,out.statusCode())
+                assertContains(out.headers().firstValue("set-cookie").get().lowercase(),"max-age=0")
+                val (code,reason)=closed.get(20,TimeUnit.SECONDS)
+                assertEquals(4002,code); assertContains(reason,"login link")
+                assertEquals(403,status())
+                assertEquals(403,handshakeStatus(server,cookie))
+                assertContains(get("${server.origin}/","Cookie",cookie).body(),"Open the link")
+            } finally { ws.abort() }
+        }
+    }
+
+    @Test fun openSocketClosesWhenTheSessionReachesItsLifetime() {
+        WebServer(WebOptions(port=0),operatorLogin,WebLimits(failedLoginDelayMs=0,absoluteMs=4_000,recheckMs=100)).use { server ->
+            server.start()
+            val started=System.nanoTime()
+            val cookie=cookieOf(get(server.loginUrl))
+            val closed=CompletableFuture<Pair<Int,String>>()
+            val ws=openSocket(server,cookie,closed)
+            try {
+                // Input keeps the idle clock fresh; it does not extend the absolute lifetime.
+                repeat(5) { ws.sendText("""{"t":"pointer","kind":"move","x":1,"y":1}""",true).join(); Thread.sleep(200) }
+                assertFalse(closed.isDone,"still inside the lifetime")
+                val (code,reason)=closed.get(30,TimeUnit.SECONDS)
+                assertTrue(System.nanoTime()-started>=TimeUnit.MILLISECONDS.toNanos(4_000))
+                assertEquals(4001,code); assertContains(reason,"Open a new login link")
+                assertEquals(403,get("${server.origin}/status","Cookie",cookie).statusCode())
+                assertEquals(403,handshakeStatus(server,cookie))
+            } finally { ws.abort() }
+        }
+        WebServer(WebOptions(port=0),operatorLogin,WebLimits(failedLoginDelayMs=0,idleMs=1_500,recheckMs=100)).use { server ->
+            server.start()
+            val cookie=cookieOf(get(server.loginUrl))
+            val closed=CompletableFuture<Pair<Int,String>>()
+            val ws=openSocket(server,cookie,closed)
+            try {
+                // No input at all: the idle limit closes the socket.
+                val (code,_)=closed.get(30,TimeUnit.SECONDS)
+                assertEquals(4001,code)
+            } finally { ws.abort() }
+        }
+    }
     @Test fun arguments() {
         assertNull(parseWebArgs(emptyList()))
         assertEquals(WEB_DEFAULT_PORT, parseWebArgs(listOf("--web"))!!.port)
@@ -47,7 +229,18 @@ class WebModeTest {
         assertTrue(parseWebArgs(listOf("--web","--port","19000"))!!.portExplicit)
         assertEquals(0, parseWebArgs(listOf("--web","--port","0"))!!.port)
         assertFails { parseWebArgs(listOf("--web","--bind","0.0.0.0")) }
-        assertTrue(parseWebArgs(listOf("--web","--bind","0.0.0.0","--allow-remote"))!!.allowRemote)
+        // A wildcard bind is no origin a browser can send; a network address needs TLS here or at a proxy.
+        for(wildcard in listOf("0.0.0.0","::")) {
+            val refused=assertFails { parseWebArgs(listOf("--web","--bind",wildcard,"--allow-remote")) }
+            assertContains(refused.message.orEmpty(),"--public-origin")
+            assertTrue(parseWebArgs(listOf("--web","--bind",wildcard,"--allow-remote","--public-origin","https://ring.example.com"))!!.allowRemote)
+        }
+        val clear=assertFails { parseWebArgs(listOf("--web","--bind","192.0.2.10","--allow-remote")) }
+        assertContains(clear.message.orEmpty(),"--tls-keystore"); assertContains(clear.message.orEmpty(),"--public-origin")
+        assertEquals("ring.p12",parseWebArgs(listOf("--web","--bind","192.0.2.10","--allow-remote","--tls-keystore","ring.p12"))!!.keystore)
+        assertNotNull(parseWebArgs(listOf("--web","--bind","192.0.2.10","--allow-remote","--public-origin","https://ring.example.com")))
+        assertFails { WebServer(WebOptions(bind="0.0.0.0",allowRemote=true,port=0),"x".repeat(32)).use { it.start() } }
+        assertFails { WebServer(WebOptions(bind="192.0.2.10",allowRemote=true,port=0),"x".repeat(32)).use { it.start() } }
         for(args in listOf(listOf("--web","--port"),listOf("--web","--port","-1"),listOf("--web","--unknown"))) assertFails { parseWebArgs(args) }
         assertFails { WebServer(WebOptions(), "short") }
         // --public-origin
@@ -73,19 +266,19 @@ class WebModeTest {
             override fun snapshot() = local.ringleader.core.VpnSnapshot(java.time.Instant.now(), emptyList(), false, null, true, emptyList(), emptyList())
             override fun routeTo(host: String, snapshot: local.ringleader.core.VpnSnapshot?) = local.ringleader.core.VpnRoute(host, host, null, null, null)
             override fun setTunnel(tunnel: local.ringleader.core.VpnTunnel, up: Boolean) { calls.incrementAndGet() }
-            override fun setExitNode(peer: local.ringleader.core.TailscalePeer?) { calls.incrementAndGet() }
+            override fun setExitNode(peer: local.ringleader.core.TailscalePeer?, allowLanAccess: Boolean) { calls.incrementAndGet() }
             override fun importWireGuard(config: java.nio.file.Path, name: String): String { calls.incrementAndGet(); return "" }
             override fun removeWireGuard(tunnel: local.ringleader.core.VpnTunnel) { calls.incrementAndGet() }
         }
         val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
         try {
-            val session = VpnSession(scope, backend)
-            session.hostActions = false
+            val session = VpnSession(scope, backend, hostActions = false)
             session.act("test", null, "done") { it.setTunnel(local.ringleader.core.VpnTunnel("x", local.ringleader.core.VpnKind.WireGuard, "wg0", local.ringleader.core.VpnState.Down, "wg0"), true) }
             Thread.sleep(150)
             assertEquals(0, calls.get())
             assertNull(session.busy)
-            assertNull(session.message)
+            assertEquals(local.ringleader.core.VPN_HOST_ACTIONS_REASON, session.message)
+            assertTrue(session.failed)
         } finally { scope.cancel() }
     }
     @Test fun busyDefaultPortFallsForwardButANamedPortDoesNot() {
@@ -155,6 +348,11 @@ class WebModeTest {
             assertEquals(302,login.statusCode())
             val setCookie=login.headers().firstValue("set-cookie").get()
             assertTrue(setCookie.lowercase().contains("secure"))
+            assertTrue(setCookie.startsWith("__Host-ringmaster="),setCookie)
+            // The public name is served (a proxy that keeps Host), as is the listener address (a proxy that rewrites it).
+            assertEquals(200,rawStatus(server.port,"/","ring.example.com"))
+            assertEquals(200,rawStatus(server.port,"/","127.0.0.1:${server.port}"))
+            assertEquals(403,rawStatus(server.port,"/","rebind.example:${server.port}"))
             val cookie=setCookie.substringBefore(';')
             val builder=client.newWebSocketBuilder().header("Origin",bindOrigin).header("Cookie",cookie)
             val error=assertFails { builder.buildAsync(URI("ws://127.0.0.1:${server.port}/session"),object: WebSocket.Listener {}).join() }
@@ -177,6 +375,7 @@ class WebModeTest {
             fun get(path: String)=client.send(HttpRequest.newBuilder(URI(server.origin+path)).GET().build(),HttpResponse.BodyHandlers.ofString())
             assertContains(get("/").body(),"Open the link")
             assertEquals(403,get("/login?key=bad").statusCode())
+            assertFalse(get("/login?key=bad").body().contains("test-key"))
             fun rejected(cookie: String?, origin: String) {
                 val builder=client.newWebSocketBuilder().header("Origin",origin)
                 if(cookie!=null)builder.header("Cookie",cookie)
@@ -200,6 +399,10 @@ class WebModeTest {
             }
             val ws=client.newWebSocketBuilder().header("Origin",server.origin).header("Cookie",cookie).buildAsync(URI(server.origin.replace("http","ws")+"/session"),listener).join()
             try {
+                // Malformed messages are dropped one by one; the socket and its Desk stay up.
+                ws.sendText("""{not json""",true).join()
+                ws.sendText("""{"t":"pointer","mods":"not an object"}""",true).join()
+                ws.sendText("""[1,2,3]""",true).join()
                 ws.sendText("""{"t":"resize","w":1440,"h":900,"dpr":1}""",true).join()
                 val screen=java.awt.image.BufferedImage(1440,900,java.awt.image.BufferedImage.TYPE_INT_ARGB)
                 val covered=mutableSetOf<Pair<Int,Int>>()

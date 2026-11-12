@@ -37,10 +37,12 @@ class ScanSession(private val scope: CoroutineScope) {
         running = true; message = ""; progress = null; durationSeconds = 0
         val started = System.nanoTime()
         job = scope.launch {
+            // The elapsed time counts up while the scan runs, not only when it ends.
+            val clock = launch { while (true) { delay(1000); durationSeconds = (System.nanoTime()-started)/1_000_000_000 } }
             try { NetworkScanner().scan(origins = origins).collect { progress = it } }
             catch (e: CancellationException) { message = "Cancelled"; throw e }
             catch (e: Exception) { message = "Scan failed: ${e.javaClass.simpleName}" }
-            finally { durationSeconds = (System.nanoTime()-started)/1_000_000_000; running = false }
+            finally { clock.cancel(); durationSeconds = (System.nanoTime()-started)/1_000_000_000; running = false }
         }
     }
     fun cancel() { job?.cancel() }
@@ -80,6 +82,24 @@ internal val ScanKind.tint get() = when (this) {
 internal fun scanCounts(hits: List<ScanHit>) = listOf(hits.size, hits.count { it.proxmox }, hits.count { !it.proxmox })
 internal fun sortedServices(hits: List<ScanHit>, address: Boolean) = hits.filter { !it.proxmox }.sortedBy { if(address) it.ip.split('.').joinToString(".") { part -> part.padStart(3,'0') } + ":" + it.port.toString().padStart(5,'0') else scanHostname(it).lowercase() }
 
+/** The scan's help text. The port list matches [LAN_SCAN_PORTS]. */
+internal val SCAN_HELP = "Manual discovery: Proxmox ports 8006, 8007 and 8443, web ports 80 and 443, AdGuard Home setup on 3000 and Home Assistant on 8123. " +
+    "Only answers on 8006, 8007 and 8443 are named as Proxmox. No credentials or tokens are sent. Scan certificates are observations, not trust decisions."
+
+/** The line under a scan card's fingerprint: what was observed about the certificate. Nothing here is verified. */
+internal fun certificateNote(hit: ScanHit, now: Long = System.currentTimeMillis()): String {
+    if (hit.fingerprint == null) return "Plain or unreadable TLS"
+    val parts = mutableListOf("Unverified certificate")
+    hit.notAfter?.let { end ->
+        val day = java.time.format.DateTimeFormatter.ISO_LOCAL_DATE.format(java.time.Instant.ofEpochMilli(end).atOffset(java.time.ZoneOffset.UTC))
+        parts += if (end < now) "expired $day" else "expires $day"
+    }
+    hit.issuer?.takeIf { it.isNotBlank() }?.let { issuer ->
+        parts += if (issuer == hit.subject) "self-signed" else "issuer " + (subjectCommonName(issuer) ?: issuer.take(48))
+    }
+    return parts.joinToString(" · ")
+}
+
 @Composable fun ScanScreen(session: ScanSession, origins: List<String>, initialScroll: Int = 0, onUse: (ScanHit) -> Unit) {
     var filter by remember { mutableStateOf(0) }
     var addressSort by remember { mutableStateOf(false) }
@@ -93,9 +113,9 @@ internal fun sortedServices(hits: List<ScanHit>, address: Boolean) = hits.filter
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState(initialScroll)), verticalArrangement = Arrangement.spacedBy(Tech.Space12)) {
         Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
             Text("Discover devices on your private networks", modifier=Modifier.weight(1f),color=Tech.Muted)
-            HelpTip("Manual discovery: ports 8006, 8007, 8443, 80 and 443. No credentials or tokens are sent. Scan certificates are observations, not trust decisions.") { MiniAction(if (info) "Hide trust info" else "Scan & trust info", primary = info) { info = !info } }
+            HelpTip(SCAN_HELP) { MiniAction(if (info) "Hide trust info" else "Scan & trust info", primary = info) { info = !info } }
         }
-        if(info) Text("Manual discovery · ports 8006, 8007, 8443, 80 and 443. No credentials or tokens are sent. Scan certificates are observations, not trust decisions.",color=Tech.Muted)
+        if(info) Text(SCAN_HELP,color=Tech.Muted)
         Row(horizontalArrangement = Arrangement.spacedBy(Tech.Space8)) {
             TechAction("Start scan", enabled = !session.running) { session.start(origins) }
             TechAction("Cancel", enabled = session.running) { session.cancel() }
@@ -215,7 +235,8 @@ internal fun scanConnectable(hit: ScanHit) = hit.kind == ScanKind.PVE || hit.kin
                         fontFamily=androidx.compose.ui.text.font.FontFamily.Monospace, fontSize=Tech.Label, color=Tech.Ink.copy(alpha=.85f),
                         modifier=Modifier.clickable(enabled=fp != null) { expanded = !expanded })
                 }
-                Text(if (hit.fingerprint == null) "Plain or unreadable TLS" else "Unverified certificate", fontSize=11.sp, color=Tech.Muted)
+                Text(certificateNote(hit), fontSize=11.sp, color=if ((hit.notAfter ?: Long.MAX_VALUE) < System.currentTimeMillis()) Tech.Amber else Tech.Muted,
+                    maxLines=2, overflow=androidx.compose.ui.text.style.TextOverflow.Ellipsis)
             }
             MiniAction("Copy", enabled=hit.fingerprint != null, onClick=onCopy)
             // Only Proxmox VE and Datacenter Manager can be connected from the desk; anything else opens in the browser.
@@ -238,14 +259,37 @@ internal fun scanConnectable(hit: ScanHit) = hit.kind == ScanKind.PVE || hit.kin
     }
 }
 
-/** Grid cell of an address, as the 64 x 4 grid lays them out: column and row, in grid units. */
-private fun hitCell(hit: ScanHit): Pair<Int, Int> { val address = hit.ip.substringAfterLast('.').toIntOrNull() ?: 0; return address % 64 to address / 64 }
+/**
+ * Where addresses sit on the discovery grid: one 64 x 4 strip per swept network, in plan order, so two /24s never share dots.
+ * An address outside every swept network falls back to its last octet in the first strip.
+ */
+internal class ScanGridLayout(plan: NetworkPlan) {
+    private val networks: List<LongRange> = plan.networks.mapNotNull { it.cidr }.distinct().mapNotNull { cidr ->
+        val base = ScanRules.ipv4(cidr.substringBefore('/')) ?: return@mapNotNull null
+        val prefix = cidr.substringAfter('/').toIntOrNull()?.takeIf { it in 24..32 } ?: return@mapNotNull null
+        base until base + (1L shl (32 - prefix))
+    }
+    val strips = maxOf(1, networks.size)
+    val rows = strips * 4
+    /** Column (0-63) and row of [ip], in grid units. */
+    fun cell(ip: String): Pair<Int, Int> {
+        val n = ScanRules.ipv4(ip)
+        if (n != null) networks.forEachIndexed { i, range ->
+            if (n in range) { val offset = (n - range.first).toInt().coerceIn(0, 255); return offset % 64 to i * 4 + offset / 64 }
+        }
+        val octet = ip.substringAfterLast('.').toIntOrNull()?.coerceIn(0, 255) ?: 0
+        return octet % 64 to octet / 64
+    }
+    /** Cell numbers (row * 64 + column) in the order the scanner takes the addresses. */
+    val order: IntArray = plan.addresses.map { cell(it).let { (col, row) -> row * 64 + col } }.toIntArray()
+}
+private val SINGLE_GRID = ScanGridLayout(NetworkPlan(emptyList()))
 private const val DOT_FADE_MS = 150L
 
 /** The hit whose dot is within [reach] pixels of [pos] on a grid canvas of [width] x [height], nearest first. */
-internal fun gridHitAt(hits: List<ScanHit>, pos: Offset?, width: Float, height: Float, reach: Float): ScanHit? {
+internal fun gridHitAt(hits: List<ScanHit>, pos: Offset?, width: Float, height: Float, reach: Float, layout: ScanGridLayout = SINGLE_GRID): ScanHit? {
     if (pos == null || width <= 0f || height <= 0f) return null
-    fun distance(hit: ScanHit): Float { val (col, row) = hitCell(hit); return kotlin.math.hypot((col + .5f) * width / 64 - pos.x, (row + .5f) * height / 4 - pos.y) }
+    fun distance(hit: ScanHit): Float { val (col, row) = layout.cell(hit.ip); return kotlin.math.hypot((col + .5f) * width / 64 - pos.x, (row + .5f) * height / layout.rows - pos.y) }
     return hits.minByOrNull(::distance)?.takeIf { distance(it) <= reach }
 }
 
@@ -255,6 +299,7 @@ internal fun gridHitAt(hits: List<ScanHit>, pos: Offset?, width: Float, height: 
     // Radar ping: every new hit fades in and sends out one ring (at most 12 alive, 6 on Lite, none under Reduced, one per 30 ms).
     // Hits already listed when this page opens are not announced again, and the frame loop ends with the last ring.
     val field = remember(motion.ringBudget) { PingField(motion.ringBudget) }
+    val layout = remember(p.plan) { ScanGridLayout(p.plan) }
     val known = remember { HashSet<String>().also { set -> p.hits.forEach { set.add(it.origin) } } }
     val births = remember { HashMap<String, Long>() }
     var frameMs by remember { mutableLongStateOf(0L) }
@@ -266,8 +311,8 @@ internal fun gridHitAt(hits: List<ScanHit>, pos: Offset?, width: Float, height: 
         val first = withFrameNanos { it } / 1_000_000L
         for (hit in fresh) {
             births[hit.origin] = first
-            val (col, row) = hitCell(hit)
-            field.enqueue((col + .5f) / 64f, (row + .5f) / 4f, kinds.indexOf(hit.kind))
+            val (col, row) = layout.cell(hit.ip)
+            field.enqueue((col + .5f) / 64f, (row + .5f) / layout.rows, kinds.indexOf(hit.kind))
         }
         var now = first
         while (isActive && (field.busy || now - first < DOT_FADE_MS)) {
@@ -282,27 +327,34 @@ internal fun gridHitAt(hits: List<ScanHit>, pos: Offset?, width: Float, height: 
         // The readout shares the heading's line and that line is always there: showing a name must never move the page.
         val readout = hovered?.let { origin -> p.hits.firstOrNull { it.origin==origin } }
         Row(Modifier.fillMaxWidth().heightIn(min=18.dp), verticalAlignment=androidx.compose.ui.Alignment.CenterVertically, horizontalArrangement=Arrangement.spacedBy(12.dp)) {
-            SectionLabel("Discovery grid",suffix="PVE / PDM / PBS / WEB")
+            SectionLabel("Discovery grid",suffix=if (layout.strips > 1) "${layout.strips} networks · PVE / PDM / PBS / WEB" else "PVE / PDM / PBS / WEB")
             Text(readout?.let { "${scanHostname(it)} · ${it.ip}:${it.port}" } ?: if (p.hits.isEmpty()) "" else "Hover a dot to name it · click to show it below",
                 Modifier.weight(1f).then(if (readout != null) Modifier.identity() else Modifier), fontFamily=Tech.Mono, fontSize=11.sp, color=if (readout != null) Tech.Ink else Tech.Muted,
                 maxLines=1, overflow=androidx.compose.ui.text.style.TextOverflow.Ellipsis, textAlign=androidx.compose.ui.text.style.TextAlign.End)
         }
         val hits by rememberUpdatedState(p.hits)
-        Canvas(Modifier.fillMaxWidth().height(64.dp).onSizeChanged { canvasWidth=it.width.toFloat();canvasHeight=it.height.toFloat() }
+        val grid by rememberUpdatedState(layout)
+        // One 64 x 4 strip per swept network, each as tall as the single grid was.
+        Canvas(Modifier.fillMaxWidth().height(64.dp * layout.strips).onSizeChanged { canvasWidth=it.width.toFloat();canvasHeight=it.height.toFloat() }
             .pointerHoverIcon(if (readout != null) PointerIcon.Hand else PointerIcon.Default)
-            .onPointerEvent(PointerEventType.Move) { event -> onHover(gridHitAt(hits, event.changes.firstOrNull()?.position, canvasWidth, canvasHeight, 12.dp.toPx())?.origin) }
+            .onPointerEvent(PointerEventType.Move) { event -> onHover(gridHitAt(hits, event.changes.firstOrNull()?.position, canvasWidth, canvasHeight, 12.dp.toPx(), grid)?.origin) }
             .onPointerEvent(PointerEventType.Exit) { onHover(null) }
-            .pointerInput(Unit) { detectTapGestures(onTap = { pos -> gridHitAt(hits, pos, canvasWidth, canvasHeight, 12.dp.toPx())?.let { onPick(it.origin) } }) }) {
-            val cols=64; val rows=4
+            .pointerInput(Unit) { detectTapGestures(onTap = { pos -> gridHitAt(hits, pos, canvasWidth, canvasHeight, 12.dp.toPx(), grid)?.let { onPick(it.origin) } }) }) {
+            val cols=64; val rows=layout.rows
+            // Amber marks the addresses already taken, in the scanner's order.
+            val swept = BooleanArray(cols*rows)
+            val done = (progress * layout.order.size).toInt().coerceIn(0, layout.order.size)
+            for (i in 0 until done) layout.order[i].takeIf { it in swept.indices }?.let { swept[it] = true }
             repeat(cols*rows) { n ->
                 val x=(n%cols+.5f)*size.width/cols; val y=(n/cols+.5f)*size.height/rows
-                drawCircle(if(n < progress*cols*rows) Tech.Amber.copy(alpha=.6f) else Tech.Edge,1.dp.toPx(),Offset(x,y))
+                drawCircle(if(swept[n]) Tech.Amber.copy(alpha=.6f) else Tech.Edge,1.dp.toPx(),Offset(x,y))
             }
+            for (s in 1 until layout.strips) { val y = s*size.height/layout.strips; drawLine(Tech.Edge, Offset(0f,y), Offset(size.width,y), 1.dp.toPx()) }
             val clock = frameMs
             p.hits.forEach { hit ->
-                val address=hit.ip.substringAfterLast('.').toIntOrNull() ?: 0
+                val (col, row) = layout.cell(hit.ip)
                 val color=hit.kind.tint
-                val center=Offset((address%cols+.5f)*size.width/cols,(address/cols+.5f)*size.height/rows)
+                val center=Offset((col+.5f)*size.width/cols,(row+.5f)*size.height/rows)
                 val born = births[hit.origin]
                 val fade = if (born == null) 1f else ((clock - born).toFloat() / DOT_FADE_MS).coerceIn(0f, 1f)
                 // Sizes in dp, so the dots keep their size on high-density displays and at larger interface sizes.
@@ -316,7 +368,12 @@ internal fun gridHitAt(hits: List<ScanHit>, pos: Offset?, width: Float, height: 
                     drawCircle(kinds[kind.coerceIn(0, kinds.lastIndex)].tint, 6.dp.toPx() * pingScale(t), Offset(x * size.width, y * size.height), alpha = pingAlpha(t) * gain, style = Stroke(1.dp.toPx()), blendMode = lightBlend())
                 }
             }
-            if(running) { val x=progress*size.width; drawLine(Tech.Amber,Offset(x,0f),Offset(x,size.height),1.dp.toPx()) }
+            if(running) {
+                val total = progress * layout.strips
+                val strip = total.toInt().coerceIn(0, layout.strips - 1)
+                val x = (total - strip).coerceIn(0f, 1f) * size.width; val top = strip * size.height / layout.strips
+                drawLine(Tech.Amber,Offset(x,top),Offset(x,top + size.height/layout.strips),1.dp.toPx())
+            }
         }
     }
 }

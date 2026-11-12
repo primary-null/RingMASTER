@@ -37,6 +37,36 @@ class GuestBluetoothTest {
         assertEquals("VM 113 · fixture", guestBluetoothSource(vm).label)
     }
 
+    @Test fun qemuAgentOptionAndGuestPreflight() {
+        assertFalse(qemuAgentEnabled(null))
+        assertFalse(qemuAgentEnabled(""))
+        assertFalse(qemuAgentEnabled("0"))
+        assertFalse(qemuAgentEnabled("enabled=0"))
+        assertFalse(qemuAgentEnabled("enabled=0,type=virtio"))
+        assertTrue(qemuAgentEnabled("1"))
+        assertTrue(qemuAgentEnabled("1,fstrim_cloned_disks=1"))
+        assertTrue(qemuAgentEnabled("enabled=1"))
+        assertTrue(qemuAgentEnabled("true"))
+        val parsed = parseHardware("""{"data":{"cores":2,"ostype":"l26","agent":"1"}}""")
+        assertEquals("1", parsed.fields["agent"])
+        assertEquals("l26", parsed.fields["ostype"])
+        fun hw(agent: String?, os: String?) = HardwareSummary(
+            buildMap { if (os != null) put("ostype", os); if (agent != null) put("agent", agent) },
+            emptyList(), emptyList(),
+        )
+        assertEquals("Guest scans need a QEMU VM with the guest agent.", guestBluetoothRefusal(vm.copy(kind = "CT"), true, hw("1", "l26")))
+        assertEquals(GUEST_BT_NOT_RUNNING, guestBluetoothRefusal(vm.copy(status = "stopped"), true, hw("1", "l26")))
+        assertEquals(GUEST_BT_NEED_DIRECT, guestBluetoothRefusal(vm, false, hw("1", "l26")))
+        assertEquals(GUEST_BT_LOADING, guestBluetoothRefusal(vm, true, null))
+        assertEquals(GUEST_BT_WINDOWS, guestBluetoothRefusal(vm, true, hw("1", "win11")))
+        assertEquals(GUEST_BT_WINDOWS, guestBluetoothRefusal(vm, true, hw("1", "Win10")))
+        assertEquals(GUEST_BT_AGENT_OFF, guestBluetoothRefusal(vm, true, hw("0", "l26")))
+        assertEquals(GUEST_BT_AGENT_OFF, guestBluetoothRefusal(vm, true, hw(null, "l26")))
+        assertNull(guestBluetoothRefusal(vm, true, hw("1", "l26")))
+        assertNull(guestBluetoothRefusal(vm, true, hw("1", null)))
+        assertNull(guestBluetoothRefusal(vm, true, hw("enabled=1,type=virtio", "l26")))
+    }
+
     @Test fun workspaceUsesTheLiveGuestAndServesDemoData() = runTest {
         val calls = mutableListOf<Pair<Guest, Int>>()
         val bt = object : GuestBluetoothGateway {

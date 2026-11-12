@@ -1,8 +1,11 @@
 package local.ringleader.core
 
+import java.io.OutputStreamWriter
 import java.net.URI
 import java.net.HttpURLConnection
 import java.nio.ByteBuffer
+import java.nio.channels.Channels
+import java.nio.channels.FileChannel
 import java.nio.charset.CodingErrorAction
 import java.nio.file.*
 import java.security.*
@@ -122,31 +125,64 @@ sealed interface UpdateState {
     data class Skipped(val version: String) : UpdateState
     data class Failed(val reason: String, val releasePage: String? = null) : UpdateState
 }
+private class UpdateHttpStatus(val status: Int) : Exception()
+private class UpdateFetchFailure(message: String) : Exception(message)
+private const val UPDATE_CORRUPT = "updates.properties could not be read and is left untouched."
+private const val UPDATE_NEWER = "updates.properties was written by a newer RingMASTER and is left untouched."
+private const val UPDATE_UNVERIFIED = "The update feed could not be verified."
+private const val UPDATE_UNREACHABLE = "The update feed could not be reached. Check the network and try again."
+private const val UPDATE_INSECURE = "The update feed redirected to an address that is not HTTPS. This can happen on a captive portal."
+
 /** Session latch also protects a newer file if it is replaced or removed after loading. */
 class UpdatePreferences(val file: Path, private val report: (String) -> Unit = {}) {
     private var blocked = false
-    private val props = runCatching { Properties().apply { if (Files.exists(file)) Files.newBufferedReader(file).use { load(it) } } }.getOrDefault(Properties()).let {
-        if ((it.getProperty("schema")?.toIntOrNull() ?: 1) > 1) {
-            blocked = true; report("updates.properties was written by a newer RingMASTER and is left untouched."); Properties()
-        } else it
-    }
+    private val props = readInitial()
     val consent get() = props.getProperty("consent")
     val automatic get() = props.getProperty("automatic", "true") == "true"
     val lastChecked get() = runCatching { Instant.parse(props.getProperty("lastChecked")) }.getOrNull()
     val skippedVersion get() = props.getProperty("skippedVersion")
     val feedPublished get() = runCatching { Instant.parse(props.getProperty("feedPublished")) }.getOrNull()
+    private fun readInitial(): Properties {
+        if (!Files.exists(file)) return Properties()
+        val loaded = runCatching { Properties().apply { Files.newBufferedReader(file).use { load(it) } } }
+        // A throw, an empty file, or a non-empty file with no keys (a truncated or comment-only write) is not a blank consent.
+        if (loaded.isFailure || Files.size(file) == 0L || loaded.getOrNull()?.isEmpty == true) {
+            blocked = true; report(UPDATE_CORRUPT); return Properties()
+        }
+        val it = loaded.getOrThrow()
+        if ((it.getProperty("schema")?.toIntOrNull() ?: 1) > 1) {
+            blocked = true; report(UPDATE_NEWER); return Properties()
+        }
+        return it
+    }
     fun put(key: String, value: String) {
         props.setProperty(key,value)
         if (blocked) return
-        val diskSchema = runCatching { Properties().apply { Files.newBufferedReader(file).use { load(it) } }.getProperty("schema")?.toIntOrNull() ?: 1 }.getOrDefault(1)
-        if (diskSchema > 1) {
-            blocked = true; report("updates.properties was written by a newer RingMASTER and is left untouched."); return
+        if (Files.exists(file)) {
+            val loaded = runCatching { Properties().apply { Files.newBufferedReader(file).use { load(it) } } }
+            if (loaded.isFailure || Files.size(file) == 0L || loaded.getOrNull()?.isEmpty == true) {
+                blocked = true; report(UPDATE_CORRUPT); return
+            }
+            if ((loaded.getOrThrow().getProperty("schema")?.toIntOrNull() ?: 1) > 1) {
+                blocked = true; report(UPDATE_NEWER); return
+            }
         }
         runCatching {
-            props.setProperty("schema","1"); Files.createDirectories(file.parent)
-            val temp = Files.createTempFile(file.parent,"updates-",".tmp")
-            try { Files.newBufferedWriter(temp).use { props.store(it,null) }; Files.move(temp,file,StandardCopyOption.ATOMIC_MOVE,StandardCopyOption.REPLACE_EXISTING) }
-            finally { Files.deleteIfExists(temp) }
+            props.setProperty("schema","1")
+            val parent = file.parent ?: error("updates.properties needs a directory")
+            createOwnerOnlyDirectories(parent)
+            val temp = Files.createTempFile(parent,"updates-",".tmp")
+            try {
+                grantOwnerOnly(temp)
+                FileChannel.open(temp, StandardOpenOption.WRITE).use { channel ->
+                    val writer = OutputStreamWriter(Channels.newOutputStream(channel), Charsets.UTF_8).buffered()
+                    props.store(writer, null)
+                    writer.flush()
+                    channel.force(true)
+                }
+                Files.move(temp, file, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+                grantOwnerOnly(file)
+            } finally { Files.deleteIfExists(temp) }
         }.onFailure { report("Update preferences could not be saved. Changes apply until RingMASTER closes.") }
     }
 }
@@ -154,6 +190,7 @@ class UpdateChecker(val version: String, val preferences: UpdatePreferences, pri
     private val transport: UpdateTransport = HttpsUpdateTransport(), private val clock: Clock = Clock.systemUTC(),
     private val platform: () -> String? = { updatePlatform(System.getProperty("os.name"), runCatching { Files.readString(Path.of("/etc/os-release")) }.getOrDefault("")) },
     private val disabled: Boolean = System.getenv("RINGMASTER_DISABLE_UPDATES") == "1",
+    private val attemptTimeout: Long = 90_000,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO) {
     private fun resting(): UpdateState = when { disabled -> UpdateState.Disabled; keys.isEmpty() -> UpdateState.NotConfigured; preferences.consent == null -> UpdateState.NeedsConsent; else -> UpdateState.Idle(preferences.lastChecked) }
     private val mutableState = MutableStateFlow(resting())
@@ -164,17 +201,24 @@ class UpdateChecker(val version: String, val preferences: UpdatePreferences, pri
     fun skip(version: String) { preferences.put("skippedVersion",version); mutableState.value = UpdateState.Skipped(version) }
     /** Forget the skipped version; the next check offers it again. */
     fun unskip() { preferences.put("skippedVersion",""); mutableState.value = resting() }
+    private fun https(value: String): URI = try { updateHttps(value) } catch (_: IllegalArgumentException) { throw UpdateFetchFailure(UPDATE_INSECURE) }
     private fun fetch(url: String, limit: Int): UpdateResponse {
         var current = url
         repeat(6) {
-            updateHttps(current)
+            https(current)
             val r = transport.get(current,limit,"RingMASTER/$version")
-            require(r.bytes.size <= limit)
+            if (r.bytes.size > limit) throw UpdateFetchFailure(UPDATE_UNVERIFIED)
             if (r.status !in setOf(301,302,303,307,308)) return r
-            current = updateHttps(current).resolve(r.location ?: error("Redirect has no destination")).toString()
-            updateHttps(current)
+            val location = r.location ?: throw UpdateFetchFailure(UPDATE_UNVERIFIED)
+            current = https(current).resolve(location).toString()
+            https(current)
         }
-        error("Too many redirects")
+        throw UpdateFetchFailure(UPDATE_UNVERIFIED)
+    }
+    private fun recordFailure(state: UpdateState.Failed, span: Trace.Span, error: Throwable) {
+        preferences.put("lastChecked", clock.instant().toString())
+        mutableState.value = state
+        span.end(error = error)
     }
     suspend fun check() = mutex.withLock {
         if (disabled || keys.isEmpty() || preferences.consent != "yes") { mutableState.value = resting(); return@withLock }
@@ -182,21 +226,25 @@ class UpdateChecker(val version: String, val preferences: UpdatePreferences, pri
         val span = Trace.begin(TraceSource.App,"Update check",mapOf("url" to UPDATE_FEED))
         try {
             var missingFeed = false
-            val result = withContext(ioDispatcher) {
+            // The deadline runs on ioDispatcher. A virtual clock around it would cancel the fetch before a real request returns.
+            // withTimeout ignores that deadline when the body never suspends, and the feed read blocks, so check the job afterwards.
+            val result = withContext(ioDispatcher) { withTimeout(attemptTimeout) {
+                try {
                 val m = fetch(UPDATE_FEED,MANIFEST_LIMIT)
                 if (m.status == 404) {
                     missingFeed = true
-                    return@withContext UpdateState.Failed(
+                    return@withTimeout UpdateState.Failed(
                         "The update feed was not found. Its address may have changed."
                     )
                 }
-                require(m.status == 200)
+                if (m.status != 200) throw UpdateHttpStatus(m.status)
                 val s = fetch("$UPDATE_FEED.sig",SIGNATURE_LIMIT)
-                require(s.status == 200 && verifyUpdateSignature(m.bytes,s.bytes,keys))
+                if (s.status != 200) throw UpdateHttpStatus(s.status)
+                if (!verifyUpdateSignature(m.bytes,s.bytes,keys)) throw UpdateFetchFailure(UPDATE_UNVERIFIED)
                 val manifest = parseUpdateManifest(m.bytes)
                 val savedPublished = preferences.feedPublished
                 if (savedPublished != null && manifest.published < savedPublished) {
-                    return@withContext UpdateState.Failed("The update feed could not be verified.")
+                    return@withTimeout UpdateState.Failed(UPDATE_UNVERIFIED)
                 }
                 val clampedPublished = minOf(manifest.published, clock.instant())
                 preferences.put("feedPublished", (if (savedPublished != null) maxOf(savedPublished, clampedPublished) else clampedPublished).toString())
@@ -208,15 +256,19 @@ class UpdateChecker(val version: String, val preferences: UpdatePreferences, pri
                     else -> platform()?.let { p -> manifest.assets.find { it.platform == p } }?.let { UpdateState.Available(OfferedUpdate(manifest,it)) }
                         ?: UpdateState.Failed("No build for this system.",RELEASE_PAGE)
                 }
-            }
+                } finally { ensureActive() }
+            } }
             preferences.put("lastChecked",clock.instant().toString()); mutableState.value = result
             // A missing feed is not a successful read. A feed that answered, then had no suitable build, still read successfully.
             if (missingFeed) span.end(error=IllegalStateException("The update feed was not found.")) else span.end(status=200)
             Trace.emit(TraceSource.App,"update-result", result.javaClass.simpleName)
-        } catch (e: CancellationException) { mutableState.value = resting(); span.end(); throw e }
-        // A network failure is not a trust failure: say which one it was.
-        catch (e: java.io.IOException) { mutableState.value = UpdateState.Failed("The update feed could not be reached. Check the network and try again."); span.end(error=e) }
-        catch (_: Exception) { mutableState.value = UpdateState.Failed("The update feed could not be verified."); preferences.put("lastChecked",clock.instant().toString()); span.end(error=IllegalStateException()) }
+        } catch (e: TimeoutCancellationException) { recordFailure(UpdateState.Failed(UPDATE_UNREACHABLE), span, e) }
+        catch (e: CancellationException) { mutableState.value = resting(); span.end(); throw e }
+        // A network failure is not a trust failure: say which one it was, and do not retry every minute.
+        catch (e: java.io.IOException) { recordFailure(UpdateState.Failed(UPDATE_UNREACHABLE), span, e) }
+        catch (e: UpdateHttpStatus) { recordFailure(UpdateState.Failed("The update feed answered with HTTP ${e.status}."), span, e) }
+        catch (e: UpdateFetchFailure) { recordFailure(UpdateState.Failed(e.message ?: UPDATE_UNVERIFIED), span, e) }
+        catch (e: Exception) { recordFailure(UpdateState.Failed(UPDATE_UNVERIFIED), span, e) }
     }
     /** Clock and coroutine delay are independently injectable through Clock and the caller's scope. */
     fun schedule(scope: CoroutineScope): Job = scope.launch {

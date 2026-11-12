@@ -117,6 +117,50 @@ class WorkspaceTest {
         assertFailsWith<IllegalStateException> { connection.withSecret { it } }
     }
 
+    @Test fun twoFactorNeededAgainOnRefreshClosesTheSession() = runTest {
+        val fake = Fake()
+        val workspace = Workspace(this, fake)
+        val connection = connection()
+        workspace.connect(connection); runCurrent()
+        assertNotNull(workspace.state.value.overview)
+        fake.inventory = { throw TwoFactorRequiredException() }
+        workspace.refresh(); runCurrent()
+        assertFalse(workspace.state.value.connected)
+        assertNull(workspace.state.value.overview)
+        assertEquals(TwoFactorRequiredException().message, workspace.state.value.error)
+        assertFailsWith<IllegalStateException> { connection.withSecret { it } }
+        workspace.close()
+    }
+
+    @Test fun twoFactorNeededAgainOnLiveTickClosesTheSession() = runTest {
+        val fake = Fake()
+        val workspace = Workspace(this, fake)
+        val connection = connection()
+        workspace.connect(connection); runCurrent()
+        fake.inventory = { throw TwoFactorRequiredException() }
+        advanceTimeBy(LIVE_INTERVAL_DEFAULT * 1000L + 1); runCurrent()
+        assertFalse(workspace.state.value.connected)
+        assertEquals(TwoFactorRequiredException().message, workspace.state.value.error)
+        assertFailsWith<IllegalStateException> { connection.withSecret { it } }
+        // The loop stopped with the session: no further reads.
+        var reads = 0
+        fake.inventory = { reads++; Overview(0, emptyList()) }
+        advanceTimeBy(60_000); runCurrent()
+        assertEquals(0, reads)
+        workspace.close()
+    }
+
+    @Test fun firstConnectWithoutTheCodeClosesAndIsNotKeptOpen() = runTest {
+        val fake = Fake()
+        fake.inventory = { throw TwoFactorRequiredException() }
+        val workspace = Workspace(this, fake)
+        workspace.connect(connection()); runCurrent()
+        assertFalse(workspace.state.value.connected)
+        assertFalse(sessionOpen(workspace.state.value))
+        assertEquals("This account uses two-factor authentication. Enter the current code.", workspace.state.value.error)
+        workspace.close()
+    }
+
     @Test fun demoDoesNotAccessNetworkOrRetainPreviousSession() = runTest {
         val fake = Fake().apply { inventory = { error("Unexpected network request") }; detail = { _, _ -> error("Unexpected network request") } }
         val workspace = Workspace(this, fake)

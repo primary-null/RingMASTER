@@ -128,9 +128,9 @@ The same command works for every release file.
 *Network tools on Debian 13.*
 
 **The app**
-- Its own dark window frame, light and dark themes, custom backgrounds, an interface size for each display, and Reduce motion (which follows the operating system unless you choose).
+- Its own dark window frame; Light, Dark and Pitch Black themes (Pitch Black is true black for OLED screens), which crossfade when you switch; custom backgrounds, an interface size for each display, and Reduce motion (which follows the operating system unless you choose).
 - Under the Hood: a live trace of every API call, socket, process, refresh and task poll, with latency, counts per source and the slowest and failed operations. Request bodies and secrets are never recorded.
-- Browser mode: started with `--web`, RingMASTER serves itself to a browser on this computer only, unless you allow remote access. Pass `--allow-host-actions` to let the browser run tools that act on the server host (JSON plug-ins, iperf's server and custom-path modes, VPN changes); without it the browser stays read-only for those. Pass `--public-origin` with an `https://` address when a reverse proxy or tunnel terminates TLS in front of the server.
+- Browser mode: started with `--web`, RingMASTER serves itself to a browser on this computer only, unless you allow remote access. Pass `--allow-host-actions` to let the browser run tools that act on the server host (JSON plug-ins, iperf's server and custom-path modes, VPN changes); without it the browser stays read-only for those. Pass `--public-origin` with an `https://` address when a reverse proxy or tunnel terminates TLS in front of the server. A network address needs `--allow-remote` and TLS: either `--tls-keystore` or `--public-origin`. `--bind 0.0.0.0` and `--bind ::` are accepted only with `--public-origin`. Each login link works once; press Enter in the terminal (or New link in Settings) for another. A fixed `RINGMASTER_WEB_KEY` of 24 or more characters can be reused and is never printed. Sessions end after 30 minutes idle or 12 hours, and the page has a Sign out button.
 - Showcase blur for screenshots (Ctrl+Shift+B; hold Alt to peek).
 - Keyboard: Ctrl 1-9 for pages, Ctrl , for settings, Ctrl B for the sidebar, Ctrl F to search, F5 to refresh.
 
@@ -144,8 +144,12 @@ The same command works for every release file.
 - No telemetry, no analytics and no account.
 - RingMASTER connects only to the servers you add, the networks you scan and the hosts you test.
 - Update checks are optional and it asks before the first one. A check downloads `ringmaster-update.json` and its signature from this repository's latest release: two HTTPS requests with `User-Agent: RingMASTER/<version>` and nothing about you or your servers. It offers only releases signed with the project's key, never offers a downgrade, and opens the download page rather than installing anything. Set `RINGMASTER_DISABLE_UPDATES=1` to turn checks off entirely.
-- The VNC console uses an embedded Chromium engine (JCEF), which is downloaded into your user cache the first time you open a console.
-- Settings live in `~/.config/ringmaster` (Windows: `%USERPROFILE%\.config\ringmaster`) and the cache in `~/.cache/ring-leader`. Settings > About > Clear everything removes them. The settings folder is backed up whenever the version changes (three copies kept).
+- The console does not download a browser engine. The VNC console is a client in the app. An older Chromium engine download, if one is still in the cache, is left alone.
+- Settings live in `~/.config/ringmaster` (Windows: `%USERPROFILE%\.config\ringmaster`) and the cache in `~/.cache/ring-leader` (Windows: `%USERPROFILE%\.cache\ring-leader`). Settings > About > Clear everything removes saved connections, appearance, window and update preferences, configuration backups, and a leftover console browser profile if one is present. It keeps your tool plugins folder and the rest of the cache, including an older Chromium engine download. Nothing on any server is changed. The settings folder is backed up whenever the version changes (three copies kept).
+
+## Removing RingMASTER
+
+Uninstalling the app leaves the settings and cache folders in place. Remove `~/.config/ringmaster` and `~/.cache/ring-leader` yourself if you want them gone (on Windows, `%USERPROFILE%\.config\ringmaster` and `%USERPROFILE%\.cache\ring-leader`).
 
 ## Building from source
 

@@ -1,6 +1,7 @@
 package local.ringleader.desktop
 
 import androidx.compose.foundation.*
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.material3.Surface
@@ -23,9 +24,12 @@ internal enum class SettingsSection(val label: String) {
 @Composable internal fun SettingsDialog(state: WorkspaceState, workspace: Workspace, section: SettingsSection,
     onSection: (SettingsSection) -> Unit, onClose: () -> Unit, onWiped: () -> Unit) {
     Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-        BoxWithConstraints(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            SettingsSheet(state, workspace, section, onSection, onClose, onWiped,
-                Modifier.size(minOf(900.dp, maxWidth * .92f), minOf(640.dp, maxHeight * .92f)))
+        // The dialog draws over the window, so it keeps its own picture for a theme change and fades with it.
+        ThemeCrossfade(Modifier.fillMaxSize()) {
+            BoxWithConstraints(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                SettingsSheet(state, workspace, section, onSection, onClose, onWiped,
+                    Modifier.size(minOf(900.dp, maxWidth * .92f), minOf(640.dp, maxHeight * .92f)))
+            }
         }
     }
 }
@@ -48,9 +52,12 @@ internal enum class SettingsSection(val label: String) {
                 Column(Modifier.width(204.dp).fillMaxHeight().background(Tech.Black).verticalScroll(rememberScrollState()).padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     SettingsSection.entries.filter { !web || it != SettingsSection.Browser }.forEach { item ->
                         val active = selected == item
-                        Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min).border(1.dp, if (active) Tech.Amber else Tech.Edge, Tech.Control)
+                        val interaction = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
+                        val focused by interaction.collectIsFocusedAsState()
+                        // Keyboard focus draws a ring 2dp outside the row, so it shows on the amber active row too.
+                        Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min).focusRing(focused, Tech.Control, gap = 2.dp).border(1.dp, if (active) Tech.Amber else Tech.Edge, Tech.Control)
                             .background(if (active) Tech.AmberWash else Tech.Panel, Tech.Control)
-                            .selectable(active, role = Role.Tab, onClick = { onSection(item) }).heightIn(min = 52.dp)) {
+                            .selectable(active, interactionSource = interaction, indication = androidx.compose.foundation.LocalIndication.current, role = Role.Tab, onClick = { onSection(item) }).heightIn(min = 52.dp)) {
                             Box(Modifier.width(3.dp).fillMaxHeight().background(if (active) Tech.Amber else Tech.Edge))
                             Text(item.label.uppercase(), Modifier.padding(12.dp), fontSize = 11.sp, fontFamily = Tech.Mono,
                                 color = if (active) Tech.Amber else Tech.Ink, fontWeight = FontWeight.Medium)

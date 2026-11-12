@@ -199,10 +199,87 @@ class UpdatesTest {
         val public=capture.toString().trim()
         assertFalse(public.contains("PRIVATE")); assertEquals(1,public.lines().size)
         assertFailsWith<FileAlreadyExistsException> { local.ringleader.core.tools.main(arrayOf("generate",key.toString())) }
-        local.ringleader.core.tools.main(arrayOf("sign",key.toString(),manifest.toString()))
-        local.ringleader.core.tools.main(arrayOf("verify",public,manifest.toString()))
+        val signOut=java.io.ByteArrayOutputStream()
+        try { System.setOut(java.io.PrintStream(signOut)); local.ringleader.core.tools.main(arrayOf("sign",key.toString(),manifest.toString())) }
+        finally { System.setOut(original) }
+        assertFalse(signOut.toString().contains("PRIVATE"))
+        assertTrue(signOut.toString().isBlank())
+        val verifyOut=java.io.ByteArrayOutputStream()
+        try { System.setOut(java.io.PrintStream(verifyOut)); local.ringleader.core.tools.main(arrayOf("verify",public,manifest.toString())) }
+        finally { System.setOut(original) }
+        val printed=verifyOut.toString()
+        assertTrue(printed.contains("version 0.22.0"), printed)
+        assertTrue(printed.contains("published 2026-11-10T00:00:00Z"), printed)
+        assertTrue(printed.contains("platforms windows-x64-msi"), printed)
+        assertFalse(printed.contains("PRIVATE"))
+        val bad=root.resolve("bad.json"); Files.writeString(bad,"""{"schema":2}""")
+        local.ringleader.core.tools.main(arrayOf("sign",key.toString(),bad.toString()))
+        assertFails { local.ringleader.core.tools.main(arrayOf("verify",public,bad.toString())) }
         Files.writeString(manifest,json+" ")
         assertFails { local.ringleader.core.tools.main(arrayOf("verify",public,manifest.toString())) }
+    }
+    @Test fun networkFailureRecordsLastCheckedAndWaitsADay() = runTest {
+        val start=Instant.parse("2026-11-10T00:00:00Z")
+        val clock=object: Clock() { override fun getZone()=ZoneOffset.UTC; override fun withZone(zone: ZoneId)=this; override fun instant()=start.plusMillis(testScheduler.currentTime) }
+        var calls=0; val p=prefs(); p.put("consent","yes")
+        val c=UpdateChecker("0.21.6",p,listOf(publicKey(pair())),UpdateTransport { _,_,_ -> calls++; throw java.io.IOException("down") },clock,ioDispatcher=StandardTestDispatcher(testScheduler))
+        val job=c.schedule(this)
+        advanceTimeBy(30_000); runCurrent(); runCurrent()
+        assertEquals(1,calls); assertNotNull(p.lastChecked)
+        advanceTimeBy(24*60*60*1000L-1); runCurrent(); assertEquals(1,calls)
+        advanceTimeBy(60_001); runCurrent(); runCurrent(); assertEquals(2,calls); job.cancel()
+    }
+    @Test fun checkGivesUpAfterNinetySeconds() = runTest {
+        val start=Instant.parse("2026-11-10T00:00:00Z")
+        val clock=Clock.fixed(start, ZoneOffset.UTC)
+        val p=prefs(); p.put("consent","yes")
+        // The fetch outlives the deadline, so the 404 body must not be reported. 90_000 is the production default.
+        val c=UpdateChecker("0.21.6",p,listOf(publicKey(pair())),UpdateTransport { _,_,_ ->
+            Thread.sleep(1_000); UpdateResponse(404)
+        },clock,attemptTimeout=200,ioDispatcher=Dispatchers.IO)
+        c.check()
+        val failed=assertIs<UpdateState.Failed>(c.state.value)
+        assertEquals("The update feed could not be reached. Check the network and try again.", failed.reason)
+        assertEquals(start, p.lastChecked)
+    }
+    @Test fun httpStatusAndInsecureRedirectAreDistinct() = runTest {
+        val key=pair(); val p=prefs(); p.put("consent","yes")
+        suspend fun run(t: UpdateTransport): UpdateState { val c=UpdateChecker("0.21.6",p,listOf(publicKey(key)),t); c.check(); return c.state.value }
+        val http=assertIs<UpdateState.Failed>(run(UpdateTransport { _,_,_ -> UpdateResponse(503) }))
+        assertEquals("The update feed answered with HTTP 503.", http.reason)
+        assertNotNull(p.lastChecked)
+        val portal=assertIs<UpdateState.Failed>(run(UpdateTransport { _,_,_ -> UpdateResponse(302, location="http://example.com") }))
+        assertEquals("The update feed redirected to an address that is not HTTPS. This can happen on a captive portal.", portal.reason)
+        val bad=assertIs<UpdateState.Failed>(run(UpdateTransport { u,_,_ -> UpdateResponse(200, if (u.endsWith(".sig")) signature(json.toByteArray(), pair()) else json.toByteArray()) }))
+        assertEquals("The update feed could not be verified.", bad.reason)
+    }
+    @Test fun corruptPreferencesAreLeftUntouched() {
+        val dir=Files.createTempDirectory("updates-corrupt")
+        for (text in listOf("", "# only a comment\n", "consent=\\uXXXX\n")) {
+            val file=dir.resolve("case-${text.length}.properties")
+            Files.writeString(file, text)
+            val before=Files.readAllBytes(file)
+            var messages=0
+            val stored=UpdatePreferences(file) { messages++ }
+            assertNull(stored.consent); assertNull(stored.feedPublished)
+            stored.put("consent","yes"); stored.put("feedPublished","2026-11-11T00:00:00Z")
+            assertTrue(Files.readAllBytes(file).contentEquals(before), text)
+            assertTrue(messages >= 1)
+        }
+    }
+    @Test fun preferencesRoundTripAfterForcedWrite() {
+        val file=Files.createTempDirectory("updates-force").resolve("updates.properties")
+        val stored=UpdatePreferences(file)
+        stored.put("consent","yes"); stored.put("feedPublished","2026-11-11T00:00:00Z")
+        val again=UpdatePreferences(file)
+        assertEquals("yes", again.consent)
+        assertEquals(Instant.parse("2026-11-11T00:00:00Z"), again.feedPublished)
+    }
+    @Test fun preferencesFileIsOwnerOnlyWhenPosix() {
+        val file=Files.createTempDirectory("updates-mode").resolve("updates.properties")
+        if (!file.fileSystem.supportedFileAttributeViews().contains("posix")) return
+        UpdatePreferences(file).put("consent","yes")
+        assertEquals(setOf(java.nio.file.attribute.PosixFilePermission.OWNER_READ, java.nio.file.attribute.PosixFilePermission.OWNER_WRITE), Files.getPosixFilePermissions(file))
     }
 
     @Test fun profileNewerVersionLoadsDefaultsAndBlocksSave() {

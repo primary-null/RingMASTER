@@ -24,14 +24,66 @@ class NetworkScanTest {
             assertTrue(p.addresses.isEmpty()); assertNotNull(p.networks.single().reason)
         }
     }
+    @Test fun virtualBridgesAreNotSwept() {
+        for (name in listOf("virbr0 virbr0", "lxcbr0 lxcbr0", "lxdbr0 lxdbr0", "cni0 cni0", "podman0 podman0", "br-1a2b3c4d5e6f br-1a2b3c4d5e6f", "docker0 docker0")) {
+            val p = ScanRules.plan(listOf(ScanInterface(name, "172.18.0.1", 16)))
+            assertTrue(p.addresses.isEmpty(), name); assertEquals("Virtual-switch adapter", p.networks.single().reason, name)
+        }
+        for (name in listOf("eth0 eth0", "br0 br0", "vmbr0 vmbr0", "enp3s0 enp3s0", "Wi-Fi Intel(R) Wi-Fi 6E AX211 160MHz")) {
+            assertEquals(254, ScanRules.plan(listOf(ScanInterface(name, "192.168.1.8", 24))).addresses.size, name)
+        }
+    }
     @Test fun products() {
+        // Proxmox product names count on the products' own ports.
         for ((text, kind) in listOf("Proxmox Virtual Environment" to ScanKind.PVE, "Proxmox Backup Server" to ScanKind.PBS,
-            "Proxmox Datacenter Manager" to ScanKind.PDM, "Pi-hole" to ScanKind.PIHOLE, "AdGuard Home" to ScanKind.ADGUARD,
+            "Proxmox Datacenter Manager" to ScanKind.PDM)) {
+            for (port in PROXMOX_PORTS) assertEquals(kind, ScanRules.classify("10.0.0.1", port, true, ScanPeek(200, "<title>$text</title>"))!!.kind)
+        }
+        for ((text, kind) in listOf("Pi-hole" to ScanKind.PIHOLE, "AdGuard Home" to ScanKind.ADGUARD,
             "Home Assistant" to ScanKind.HOME_ASSISTANT, "Welcome" to ScanKind.WEB)) {
             assertEquals(kind, ScanRules.classify("10.0.0.1", 443, true, ScanPeek(200, "<title>$text</title>"))!!.kind)
         }
+        assertEquals(ScanKind.HOME_ASSISTANT, ScanRules.classify("10.0.0.1", 8123, false, ScanPeek(200, "<title>Home Assistant</title>"))!!.kind)
+        assertEquals(ScanKind.ADGUARD, ScanRules.classify("10.0.0.1", 3000, false, ScanPeek(200, "<title>Setup AdGuard Home</title>"))!!.kind)
+        assertEquals(ScanKind.WEB, ScanRules.classify("10.0.0.1", 3000, false, ScanPeek(200, "<title>Grafana</title>"))!!.kind)
         assertEquals(ScanKind.PVE, ScanRules.classify("10.0.0.1",8006,true,ScanPeek(401,"",subject="OU=PVE Cluster Node,CN=pve-b.local"))!!.kind)
         assertNull(ScanRules.classify("10.0.0.1",8006,true,ScanPeek(500,"Proxmox Virtual Environment")))
+    }
+    @Test fun productNamesOnOtherPortsStayWebPages() {
+        // A wiki, a docs container or a proxy error page that names a product is not that product.
+        for (port in listOf(80, 443, 3000, 8123)) for (text in listOf("Proxmox Virtual Environment", "Proxmox Backup Server", "Proxmox Datacenter Manager")) {
+            val hit = ScanRules.classify("10.0.0.1", port, port == 443, ScanPeek(200, "<title>Docs</title> $text"))!!
+            assertEquals(ScanKind.WEB, hit.kind, "$text on $port"); assertFalse(hit.proxmox)
+        }
+        assertEquals(ScanKind.WEB, ScanRules.classify("10.0.0.1",443,true,ScanPeek(401,"",subject="OU=PVE Cluster Node,CN=pve-b.local"))!!.kind)
+        // The product's own Server header is identity on any port, for example behind a port forward.
+        assertEquals(ScanKind.PVE, ScanRules.classify("10.0.0.1",443,true,ScanPeek(401,"",server="pve-api-daemon/3.0"))!!.kind)
+        assertEquals(ScanKind.PBS, ScanRules.classify("10.0.0.1",443,true,ScanPeek(200,"",server="pbs-api"))!!.kind)
+        assertEquals(ScanKind.PDM, ScanRules.classify("10.0.0.1",443,true,ScanPeek(200,"",server="pdm-api"))!!.kind)
+        // A body that only quotes the header name is not the header.
+        assertEquals(ScanKind.WEB, ScanRules.classify("10.0.0.1",443,true,ScanPeek(200,"Server: pve-api-daemon"))!!.kind)
+    }
+    @Test fun certificateDetailsReachTheHit() {
+        val hit = ScanRules.classify("10.0.0.1",8006,true,ScanPeek(200,"Proxmox Virtual Environment", fingerprint="AB:CD", subject="CN=pve",
+            issuer="CN=Proxmox Virtual Environment,OU=PVE Cluster Manager CA", notAfter=1_900_000_000_000L))!!
+        assertEquals("CN=Proxmox Virtual Environment,OU=PVE Cluster Manager CA", hit.issuer); assertEquals(1_900_000_000_000L, hit.notAfter)
+        assertEquals("AB:CD", hit.fingerprint)
+    }
+    @Test fun lanSweepProbesWebPortsAndTheTailnetOnlyProxmox() = runBlocking {
+        assertEquals(listOf(8006, 8007, 8443, 80, 443, 3000, 8123), LAN_SCAN_PORTS)
+        val lan = mutableListOf<Int>()
+        NetworkScanner { _, port -> synchronized(lan) { lan += port }; emptyList() }.scan(ScanRules.plan(listOf(ScanInterface("Ethernet","10.0.0.9",30))), concurrency=1).toList()
+        assertEquals(LAN_SCAN_PORTS + LAN_SCAN_PORTS, lan)
+        assertEquals(LAN_CONNECT_TIMEOUT_MS, NetworkScanner().connectTimeoutMs)
+        assertTrue(tailnetScanner().connectTimeoutMs > LAN_CONNECT_TIMEOUT_MS)
+        assertEquals(TAILNET_CONNECT_TIMEOUT_MS, tailnetScanner().connectTimeoutMs)
+        val peer = TailscalePeer("1", "pve", null, "linux", true, listOf("100.64.0.2", "fd7a:115c:a1e0::2"), false, false, "dfw", null, null, null, null)
+        val status = TailscaleStatus("Running", null, null, null, null, listOf(peer, peer.copy(id="2", online=false, addresses=listOf("100.64.0.3"))), null, emptyList())
+        val seen = mutableListOf<Pair<String, Int>>()
+        val scanner = NetworkScanner(TAILNET_CONNECT_TIMEOUT_MS) { ip, port -> synchronized(seen) { seen += ip to port }; if (port == 8006) listOf(ScanHit(ip, port, true, ScanKind.PVE)) else emptyList() }
+        val found = findTailnetProxmox(status, scanner).toList().last()
+        assertEquals(listOf("100.64.0.2" to 8006, "100.64.0.2" to 8007, "100.64.0.2" to 8443), seen)
+        assertEquals("pve", found.single().peer.hostName)
     }
     @Test fun redirects() {
         assertNull(ScanRules.classify("10.0.0.1",80,false,ScanPeek(302,"",location="https://10.0.0.1/")))

@@ -1,6 +1,9 @@
 # RingMASTER Bluetooth discovery (read-only): WinRT DeviceWatcher over Bluetooth Classic + LE association endpoints.
 # Never pairs, connects or changes the radio. Streams one compact JSON object per line on stdout as devices are heard:
 #   {"t":"adapter",...}  {"t":"note","note":"NO_ADAPTER"}  {"t":"add","ms":..,"id":..,...}  {"t":"upd","ms":..,"id":..,...}  {"t":"done","ms":..}
+# UTF-8 without a BOM, so names survive the pipe. The app reads this stream as UTF-8.
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
+$OutputEncoding = [Console]::OutputEncoding
 $Seconds = __SECONDS__
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Runtime.WindowsRuntime

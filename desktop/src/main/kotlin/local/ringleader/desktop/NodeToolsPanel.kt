@@ -42,10 +42,15 @@ private fun requirementLabel(id: String): String = FEATURE_REQUIREMENTS.single {
             !state.demo && member?.status != "online" -> Text(NODE_TOOLS_NODE_NOT_ONLINE, fontSize = 11.sp, lineHeight = 15.sp, color = Tech.Muted)
             else -> {
                 TechTabs(NODE_TOOL_TABS, tab, { tab = it })
-                Text("Needs " + requirementLabel(when (tab) { "Log" -> "syslog"; "Updates" -> "updates"; else -> "services" }),
+                val denied = when (tab) {
+                    "Log" -> state.nodeSyslog.denied
+                    "Updates" -> state.nodeUpdates.denied
+                    else -> state.nodeServices.denied
+                }
+                if (denied) Text("Needs " + requirementLabel(when (tab) { "Log" -> "syslog"; "Updates" -> "updates"; else -> "services" }),
                     fontFamily = Tech.Mono, fontSize = 9.5.sp, color = Tech.Muted)
                 when (tab) {
-                    "Log" -> NodeSyslogPanel(state, workspace, node, logUnit, height = logHeight)
+                    "Log" -> NodeSyslogPanel(state, workspace, node, logUnit, height = logHeight, onClearService = logUnit?.let { { logUnit = null } })
                     "Updates" -> NodeUpdatesPanel(state, workspace, node)
                     else -> NodeServicesPanel(state, workspace, node, onShowLog = { unit -> logUnit = unit; tab = "Log" })
                 }

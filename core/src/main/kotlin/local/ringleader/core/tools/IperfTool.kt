@@ -23,10 +23,16 @@ class Iperf3Plugin(private val which: (String) -> String? = ::findExecutable) : 
 
     /** Resolved iperf3 path the user has approved for this session; remains null until the UI records one. */
     @Volatile var approvedExecutable: String? = null
+    /**
+     * Server mode opens a listening port, so it needs the user to confirm the exact argument list each time.
+     * [run] uses this approval once and clears it.
+     */
+    @Volatile var approvedServerCommand: List<String>? = null
 
     override fun available(): ToolAvailability = availableFor(emptyMap())
 
     fun availableFor(values: Map<String, String>): ToolAvailability {
+        if (isBatchFile(values["executable"].orEmpty().trim())) return ToolAvailability(false, BATCH_FILE_REFUSED)
         val exe = resolveIperf(values["executable"].orEmpty(), which)
         return if (exe != null) ToolAvailability(true) else ToolAvailability(false, IPERF_MISSING)
     }
@@ -49,11 +55,13 @@ class Iperf3Plugin(private val which: (String) -> String? = ::findExecutable) : 
 
     override suspend fun run(values: Map<String, String>, emit: (ToolEvent) -> Unit): ToolResult {
         val clean = try { validateToolValues(inputs, values) } catch (e: ToolInputException) { return ToolResult(false, e.message ?: "Check the inputs.") }
+        callerRefusal(this, clean)?.let { return ToolResult(false, it) }
         val server = clean["server"] == "true"
         val host = clean["host"].orEmpty()
         if (!server && host.isEmpty()) return ToolResult(false, "Enter a host.")
         if (!server && !isHostToken(host)) return ToolResult(false, "Host must be a hostname or an IP address.")
         val raw = clean["executable"].orEmpty()
+        if (isBatchFile(raw)) return ToolResult(false, BATCH_FILE_REFUSED)
         val exe = resolveIperf(raw, which) ?: return ToolResult(false, IPERF_MISSING)
         if (raw.isNotBlank() && approvedExecutable != exe) return ToolResult(false, "Confirm this command before running it.")
         val command = iperfCommand(
@@ -61,6 +69,9 @@ class Iperf3Plugin(private val which: (String) -> String? = ::findExecutable) : 
             clean.getValue("parallel").toInt(), clean["reverse"] == "true", clean["udp"] == "true",
         )
         if (server) {
+            val approved = approvedServerCommand
+            approvedServerCommand = null
+            if (approved != command) return ToolResult(false, "Confirm this command before running it.")
             emit(ToolEvent.Status("Listening on port ${clean.getValue("port")}"))
             emit(ToolEvent.Line("This opens a listening port on this computer. It accepts one test, then exits."))
             emit(ToolEvent.Line("This computer: ${localAddresses().joinToString(" ")}"))
@@ -105,6 +116,8 @@ internal fun resolveIperf(configured: String, which: (String) -> String?): Strin
     if (path.isEmpty()) return which("iperf3")
     if (path.any { it.isISOControl() || it in "\"';|&$`<>" }) return null
     val file = runCatching { Path.of(path) }.getOrNull() ?: return null
+    // Windows runs .bat and .cmd files through cmd.exe, which parses the arguments again.
+    if (isBatchFile(path)) return null
     if (!file.isAbsolute || !Files.isRegularFile(file)) return null
     return file.toString()
 }

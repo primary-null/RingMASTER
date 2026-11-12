@@ -111,11 +111,14 @@ internal fun captureRfbFrame(channel: RfbChannel, password: String): RfbFrame {
     return RfbFrame(width, height, pixels)
 }
 
+/**
+ * Encodes one frame as a scaled PNG. [ConsoleStill.blank] means the screen is dark (every sample near black: a blanked
+ * or powered-down display). A uniform screen of any other colour, such as a flat login screen, is a real picture.
+ */
 internal fun frameStill(frame: RfbFrame): ConsoleStill {
     val samples = (0 until minOf(100, frame.pixels.size)).map { frame.pixels[it * (frame.pixels.size - 1) / (minOf(100, frame.pixels.size) - 1).coerceAtLeast(1)] }
     fun channels(p: Int) = listOf((p ushr 16) and 255, (p ushr 8) and 255, p and 255)
-    val first = channels(samples.first())
-    val blank = samples.all { channels(it).all { c -> c <= 16 } } || samples.all { channels(it).zip(first).all { (a, b) -> kotlin.math.abs(a - b) <= 8 } }
+    val blank = samples.all { channels(it).all { c -> c <= 16 } }
     val source = BufferedImage(frame.width, frame.height, BufferedImage.TYPE_INT_RGB)
     source.setRGB(0, 0, frame.width, frame.height, frame.pixels, 0, frame.width)
     val scale = minOf(1.0, 960.0 / maxOf(frame.width, frame.height))
@@ -141,14 +144,17 @@ private class WebSocketRfb(private val deadline: Long) : RfbChannel, WebSocket.L
         if (bytes.isNotEmpty() && !queue.offer(bytes)) { close(); queue.clear(); queue.offer(ByteArray(0)) }
         webSocket.request(1); return null
     }
+    /** The console is binary; a text frame ends the capture at once instead of waiting for the timeout. */
+    override fun onText(webSocket: WebSocket, data: CharSequence, last: Boolean): CompletionStage<*>? { text = true; queue.clear(); queue.offer(ByteArray(0)); return null }
     override fun onClose(webSocket: WebSocket, statusCode: Int, reason: String): CompletionStage<*>? { queue.offer(ByteArray(0)); return null }
     override fun onError(webSocket: WebSocket, error: Throwable) { queue.offer(ByteArray(0)) }
+    @Volatile private var text = false
     override fun read(n: Int): ByteArray {
         val result = ByteArray(n); var written = 0
         while (written < n) {
             if (offset == pending.size) {
                 pending = queue.poll(remaining(), TimeUnit.NANOSECONDS) ?: error("The console capture timed out."); offset = 0
-                check(pending.isNotEmpty()) { "The console channel closed before a frame arrived." }
+                check(pending.isNotEmpty()) { if (text) VNC_TEXT_FRAME else "The console channel closed before a frame arrived." }
             }
             val count = minOf(n - written, pending.size - offset)
             pending.copyInto(result, written, offset, offset + count); offset += count; written += count

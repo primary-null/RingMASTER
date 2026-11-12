@@ -105,33 +105,85 @@ class TerminalModel(cols: Int = 80, rows: Int = 24) : AutoCloseable {
     override fun close() { output.close(); input.close(); worker.interrupt() }
 }
 
-class TerminalSession internal constructor(val model: TerminalModel, private val http: HttpClient) : AutoCloseable, WebSocket.Listener {
+/** Frames waiting for the terminal writer. A full queue means the socket has stalled; the session then ends. */
+internal const val TERMINAL_OUTBOX_LIMIT = 1024
+const val TERMINAL_LOST = "The terminal connection was lost."
+
+/**
+ * Host output is fed to the emulator on the websocket thread, without holding any lock, so a full emulator pipe only
+ * slows the socket. Input from the UI and from the emulator (answers to host queries) is queued for one writer
+ * thread: callers never wait on the network. Frames are sent in order and never resent.
+ */
+class TerminalSession internal constructor(val model: TerminalModel, private val http: HttpClient?) : AutoCloseable, WebSocket.Listener {
     private val trace = Trace.begin(TraceSource.Terminal, "Terminal websocket", session=true)
     @Volatile var ready = false
     @Volatile var reason: String? = null
-    private var socket: WebSocket? = null
+    @Volatile private var socket: WebSocket? = null
+    private val closed = java.util.concurrent.atomic.AtomicBoolean(false)
+    // Touched only by the websocket listener, whose callbacks never overlap.
     private val pending = java.io.ByteArrayOutputStream()
+    private var textTail: Char? = null
+    private val outbox = java.util.concurrent.LinkedBlockingQueue<String>(TERMINAL_OUTBOX_LIMIT)
     private val timer = java.util.concurrent.Executors.newSingleThreadScheduledExecutor { r -> Thread(r,"terminal-ping").apply { isDaemon=true } }
+    @Volatile private var writer: Thread? = null
     override fun onOpen(ws: WebSocket) { socket = ws; ws.request(1) }
-    @Synchronized private fun receive(bytes: ByteArray) {
+    internal fun receive(bytes: ByteArray) {
+        if (closed.get()) return
         trace.bytes(bytesIn=bytes.size.toLong())
-        if (ready) { model.feed(bytes); return }
-        pending.write(bytes)
-        if (pending.size() < 2) return
-        val all = pending.toByteArray(); pending.reset()
-        if (all[0] != 79.toByte() || all[1] != 75.toByte()) { reason = "The terminal refused authentication."; close(); return }
-        ready = true
-        model.feed(all.copyOfRange(2, all.size))
+        val output = if (ready) bytes else {
+            pending.write(bytes)
+            if (pending.size() < 2) return
+            val all = pending.toByteArray(); pending.reset()
+            if (all[0] != 79.toByte() || all[1] != 75.toByte()) { reason = "The terminal refused authentication."; close(); return }
+            ready = true
+            all.copyOfRange(2, all.size)
+        }
+        if (output.isEmpty()) return
+        try { model.feed(output) } catch (e: java.io.IOException) { if (!closed.get()) { reason = TERMINAL_LOST; close() } }
+    }
+    /** Text frames are UTF-8 on the wire; a surrogate pair split across partial frames is joined before encoding. */
+    internal fun receiveText(data: CharSequence, last: Boolean) {
+        val text = StringBuilder()
+        textTail?.let { text.append(it) }; textTail = null
+        text.append(data)
+        if (!last && text.isNotEmpty() && text.last().isHighSurrogate()) { textTail = text.last(); text.setLength(text.length - 1) }
+        if (text.isNotEmpty()) receive(text.toString().toByteArray(Charsets.UTF_8))
     }
     override fun onBinary(ws: WebSocket, data: ByteBuffer, last: Boolean): java.util.concurrent.CompletionStage<*>? { val b=ByteArray(data.remaining()); data.get(b); receive(b); ws.request(1); return null }
-    override fun onText(ws: WebSocket, data: CharSequence, last: Boolean): java.util.concurrent.CompletionStage<*>? { receive(data.toString().toByteArray()); ws.request(1); return null }
-    override fun onClose(ws: WebSocket, code: Int, message: String): java.util.concurrent.CompletionStage<*>? { reason="The terminal connection closed."; close(); return null }
-    override fun onError(ws: WebSocket, error: Throwable) { trace.end(error=error); reason="The terminal connection was lost."; close() }
-    fun start(ws: WebSocket, proxy: TermProxy) { socket=ws; ws.sendText(terminalAuth(proxy),true).get(20,TimeUnit.SECONDS); model.onInput = ::input; timer.schedule({ if (!ready) { reason="The terminal timed out."; close() } },20,TimeUnit.SECONDS); timer.scheduleAtFixedRate({ if (ready) { Trace.emit(TraceSource.Terminal,"heartbeat","Terminal keepalive",spanId=trace.id); send(terminalFrame()) } },30,30,TimeUnit.SECONDS) }
-    @Synchronized private fun send(value: String) { trace.bytes(bytesOut=value.toByteArray().size.toLong()); try { socket?.sendText(value,true)?.get(20,TimeUnit.SECONDS) } catch (_: Exception) { reason="The terminal connection was lost."; close() } }
+    override fun onText(ws: WebSocket, data: CharSequence, last: Boolean): java.util.concurrent.CompletionStage<*>? { receiveText(data, last); ws.request(1); return null }
+    override fun onClose(ws: WebSocket, code: Int, message: String): java.util.concurrent.CompletionStage<*>? { if (reason == null) reason="The terminal connection closed."; close(); return null }
+    override fun onError(ws: WebSocket, error: Throwable) { trace.end(error=error); if (reason == null) reason=TERMINAL_LOST; close() }
+    fun start(ws: WebSocket, proxy: TermProxy) {
+        socket=ws
+        ws.sendText(terminalAuth(proxy),true).get(20,TimeUnit.SECONDS)
+        startWriter { value -> ws.sendText(value,true).get(20,TimeUnit.SECONDS) }
+        model.onInput = ::input
+        timer.schedule({ if (!ready) { reason="The terminal timed out."; close() } },20,TimeUnit.SECONDS)
+        timer.scheduleAtFixedRate({ if (ready) { Trace.emit(TraceSource.Terminal,"heartbeat","Terminal keepalive",spanId=trace.id); send(terminalFrame()) } },30,30,TimeUnit.SECONDS)
+    }
+    /** Starts the single writer. [write] blocks until one frame is handed to the socket. */
+    internal fun startWriter(write: (String) -> Unit) {
+        writer = Thread({
+            try { while (!closed.get()) write(outbox.take()) }
+            catch (_: InterruptedException) { }
+            catch (_: Exception) { if (!closed.get()) { reason=TERMINAL_LOST; close() } }
+        }, "terminal-writer").apply { isDaemon = true; start() }
+    }
+    /** Queues one frame; never blocks. */
+    private fun send(value: String) {
+        if (closed.get()) return
+        trace.bytes(bytesOut=value.toByteArray(Charsets.UTF_8).size.toLong())
+        if (!outbox.offer(value)) { reason=TERMINAL_LOST; close() }
+    }
     fun input(text: String) { if (ready) send(terminalFrame(data=text)) }
     fun resize(cols: Int, rows: Int) { model.resize(cols,rows); if (ready) send(terminalFrame(cols=cols,rows=rows)) }
-    override fun close() { trace.end(); ready=false; timer.shutdownNow(); socket?.abort(); model.close(); http.shutdownNow() }
+    override fun close() {
+        if (!closed.compareAndSet(false, true)) return
+        trace.end(); ready=false; timer.shutdownNow()
+        writer?.let { if (it != Thread.currentThread()) it.interrupt() }
+        outbox.clear()
+        socket?.abort(); model.close(); http?.shutdownNow()
+    }
 }
 internal fun openTerminalSession(connection: Connection, target: TerminalTarget, proxy: () -> String): TerminalSession = connection.withSecret { secret ->
     val info = parseTermProxy(Trace.call(TraceSource.Terminal, "POST termproxy") { proxy() })

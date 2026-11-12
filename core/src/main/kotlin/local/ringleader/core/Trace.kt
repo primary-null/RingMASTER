@@ -34,7 +34,16 @@ object Trace {
     val changes: StateFlow<Long> = revision.asStateFlow()
     val liveLoop = MutableStateFlow(TraceLiveLoop())
     fun snapshot(): List<TraceEvent> = synchronized(lock) { events.values.toList() }
-    fun clear() = synchronized(lock) { events.clear(); revision.value++ }
+    /**
+     * Drops every row except the begin rows of operations still in flight. Those keep their row, so the stream and the
+     * in-flight count agree and the end still records a duration. Returns the number of rows removed.
+     */
+    fun clear(): Int = synchronized(lock) {
+        val before = events.size
+        events.keys.retainAll(active.keys)
+        revision.value++
+        before - events.size
+    }
     fun emit(source: TraceSource, kind: String, summary: String, detail: Map<String,String> = emptyMap(),
         durationMs: Long? = null, bytesIn: Long? = null, bytesOut: Long? = null, status: Int? = null,
         outcome: TraceOutcome = TraceOutcome.Info, spanId: Long? = null, correlation: String? = null): TraceEvent = synchronized(lock) {

@@ -15,11 +15,12 @@ class LivePermissionsGateway(private val client: PveClient = PveClient()) : Perm
     }
 }
 
-/** Read-only node calls: services, system log pages and the cached package update list. Direct Proxmox VE only. */
+/** Read-only node calls: services, system log pages, the cached package update list, and the network list. Direct Proxmox VE only. */
 interface NodeToolsGateway {
     suspend fun services(connection: Connection, node: String): List<NodeService>
     suspend fun syslog(connection: Connection, node: String, start: Int, limit: Int, service: String?): SyslogPage
     suspend fun updates(connection: Connection, node: String): List<PackageUpdate>
+    suspend fun network(connection: Connection, node: String): NodeNetworkReport
 }
 
 class LiveNodeToolsGateway(private val client: PveClient = PveClient()) : NodeToolsGateway {
@@ -36,6 +37,11 @@ class LiveNodeToolsGateway(private val client: PveClient = PveClient()) : NodeTo
     override suspend fun updates(connection: Connection, node: String): List<PackageUpdate> {
         requireDirectRequest(connection)
         return runInterruptible(Dispatchers.IO) { client.nodeUpdates(connection, node) }
+    }
+
+    override suspend fun network(connection: Connection, node: String): NodeNetworkReport {
+        requireDirectRequest(connection)
+        return runInterruptible(Dispatchers.IO) { client.nodeNetwork(connection, node) }
     }
 }
 

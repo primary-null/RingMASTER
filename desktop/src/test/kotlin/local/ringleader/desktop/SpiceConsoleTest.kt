@@ -68,6 +68,15 @@ class SpiceConsoleTest {
         assertEquals(before, spiceDirs(), "no ticket file or directory is left behind")
     }
 
+    @Test fun viewerOutputThatHoldsASecretIsNeverShown() {
+        val body = """{"data":{"type":"spice","proxy":"http://192.0.2.10:3128","host":"pvespiceproxy:x","password":"one-time","tls-port":61002,"title":"VM 113"}}"""
+        val ticket = parseSpiceTicket(body, "192.0.2.10")
+        assertEquals("remote-viewer exited (1): cannot open display", SpiceViewer.viewerExitMessage(1, "starting\ncannot open display\n\n", ticket))
+        assertEquals("remote-viewer exited (1).", SpiceViewer.viewerExitMessage(1, "bad password one-time\n", ticket))
+        assertEquals("remote-viewer exited (2).", SpiceViewer.viewerExitMessage(2, "password=hunter2\n", ticket), "anything the redactor would mask is left out")
+        assertEquals("remote-viewer exited (3).", SpiceViewer.viewerExitMessage(3, "", ticket))
+    }
+
     private fun deleteTree(directory: Path) {
         if (!Files.exists(directory)) return
         Files.walk(directory).use { stream -> stream.sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) } }

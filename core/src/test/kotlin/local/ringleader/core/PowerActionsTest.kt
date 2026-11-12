@@ -278,8 +278,10 @@ class PowerWorkspaceTest {
         }
         val workspace = Workspace(this, inventory, tasks, power)
         workspace.exploreDemo(); runCurrent()
-        workspace.select(demoOverview.guests.single { it.id == 130 }); runCurrent()
-        val confirmation = workspace.capturePower(PowerAction.Start, "Demonstration")!!
+        // Demo guest 130 carries the backup lock, so Start on it is refused; the running VM 120 is used instead.
+        assertTrue(demoOverview.guests.single { it.id == 130 }.lock == "backup")
+        workspace.select(demoOverview.guests.single { it.id == 120 }); runCurrent()
+        val confirmation = workspace.capturePower(PowerAction.Shutdown, "Demonstration")!!
         assertEquals("Demonstration", confirmation.origin)
         assertTrue(workspace.submitPower(confirmation)); runCurrent()
         val simulated = workspace.state.value.submissions.single()

@@ -40,6 +40,47 @@ class ProfileDeskTest {
         } finally { desk.close(); workspace.close(); deleteParent(file) }
     }
 
+    @Test fun saveRefusesAPasswordOrTokenChoiceThatDisagreesWithTheId() = runTest {
+        val (desk, file, workspace) = open(FakeGateway())
+        try {
+            desk.beginCreate()
+            desk.updateDraft("Lab", origin, token, "")
+            assertFalse(desk.saveDraft(passwordLogin = true))
+            assertEquals("Password is selected, but this is an API token ID. Enter a user such as root@pam, or choose API token.", desk.state.value.formError)
+            assertTrue(desk.state.value.profiles.isEmpty())
+            desk.updateDraft("Lab", origin, "root@pam", "")
+            assertFalse(desk.saveDraft(passwordLogin = false))
+            assertEquals("API token is selected, but this is a user. Enter a token ID such as root@pam!monitor, or choose Password.", desk.state.value.formError)
+            assertTrue(desk.state.value.profiles.isEmpty())
+            assertTrue(desk.saveDraft(passwordLogin = true))
+            assertEquals("root@pam", desk.state.value.profiles.single().tokenId)
+            val id = desk.state.value.profiles.single().id
+            desk.beginEdit(id)
+            desk.updateDraft("Lab", origin, " $token ", "")
+            assertTrue(desk.saveDraft(passwordLogin = false))
+            assertEquals(token, desk.state.value.profiles.single().tokenId)
+        } finally { desk.close(); workspace.close(); deleteParent(file) }
+    }
+
+    @Test fun authChoiceOnlyAppliesToDirectPve() {
+        assertNull(authChoiceMismatch(false, "root@pam!t", DIRECT_PVE_KIND))
+        assertNull(authChoiceMismatch(true, "root@pam", DIRECT_PVE_KIND))
+        assertNull(authChoiceMismatch(true, "", DIRECT_PVE_KIND))
+        assertNull(authChoiceMismatch(false, "root@pam", PDM_KIND))
+        assertTrue(authChoiceMismatch(true, " root@pam!t ", DIRECT_PVE_KIND) != null)
+    }
+
+    @Test fun manualConnectRefusesAPasswordOrTokenChoiceThatDisagreesWithTheId() = runTest {
+        val (desk, file, workspace) = open(FakeGateway())
+        try {
+            desk.setManualSecret(secret)
+            assertFalse(desk.connectManual(origin, token, "", passwordLogin = true))
+            assertEquals("Password is selected, but this is an API token ID. Enter a user such as root@pam, or choose API token.", desk.state.value.formError)
+            assertFalse(workspace.state.value.connected)
+            assertTrue(desk.hasManualSecret())
+        } finally { desk.close(); workspace.close(); deleteParent(file) }
+    }
+
     @Test fun profileIdStaysStableWhenEdited() = runTest {
         val (desk, file, workspace) = open(FakeGateway())
         try {

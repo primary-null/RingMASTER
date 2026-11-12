@@ -110,12 +110,14 @@ class ToolsSession(private val scope: CoroutineScope) {
         val ready = badge(plugin)
         if (!ready.ready) { status = ready.reason ?: "This tool is not available."; statusBad = true; return }
         try {
-            validateToolValues(plugin.inputs, values)
+            val clean = validateToolValues(plugin.inputs, values)
             if (plugin is UserToolPlugin) {
-                val argv = plugin.commandFor(values)
-                val a = plugin.approval
-                if (a == null || a.command != plugin.manifestCommand || a.argv != argv) {
-                    confirmCommand = argv
+                // The dialog shows the file that will run, so a bare name is shown as the program PATH finds.
+                val wanted = plugin.approvalFor(values) ?: run {
+                    status = "${plugin.manifestCommand.first()} was not found. Use a full path or install it on PATH."; statusBad = true; return
+                }
+                if (plugin.approval != wanted) {
+                    confirmCommand = listOf(wanted.program) + wanted.argv.drop(1)
                     confirmId = plugin.id
                     confirmValues = values
                     confirmManifestCommand = plugin.manifestCommand
@@ -123,16 +125,16 @@ class ToolsSession(private val scope: CoroutineScope) {
                 }
             }
             if (plugin is Iperf3Plugin) {
-                val raw = values["executable"].orEmpty()
-                if (raw.isNotBlank()) {
-                    val argv = plugin.previewCommand(values)
-                    if (argv != null && plugin.approvedExecutable != argv.first()) {
-                        confirmCommand = argv
-                        confirmId = plugin.id
-                        confirmValues = values
-                        confirmManifestCommand = null
-                        return
-                    }
+                val argv = plugin.previewCommand(values)
+                val custom = values["executable"].orEmpty().isNotBlank()
+                // Server mode opens a listening port: every server run asks first, with the exact arguments.
+                val server = clean["server"] == "true"
+                if (argv != null && (server || (custom && plugin.approvedExecutable != argv.first()))) {
+                    confirmCommand = argv
+                    confirmId = plugin.id
+                    confirmValues = values
+                    confirmManifestCommand = null
+                    return
                 }
             }
         } catch (e: ToolInputException) {
@@ -155,21 +157,27 @@ class ToolsSession(private val scope: CoroutineScope) {
         when (plugin) {
             is UserToolPlugin -> {
                 val savedCommand = confirmManifestCommand ?: return
-                if (plugin.manifestCommand != savedCommand) {
+                val approval = runCatching { plugin.approvalFor(savedValues) }.getOrNull()
+                if (plugin.manifestCommand != savedCommand || approval == null || listOf(approval.program) + approval.argv.drop(1) != argv) {
                     status = "The plug-in changed. Please try again."
                     statusBad = true
                     confirmCommand = null; confirmId = null; confirmValues = null; confirmManifestCommand = null
                     return
                 }
-                val approval = PluginApproval(savedCommand, argv)
                 plugin.approval = approval
                 approvals[plugin.id] = approval
                 confirmCommand = null; confirmId = null; confirmValues = null; confirmManifestCommand = null
                 start(plugin, savedValues)
             }
             is Iperf3Plugin -> {
-                plugin.approvedExecutable = argv.first()
                 confirmCommand = null; confirmId = null; confirmValues = null; confirmManifestCommand = null
+                if (plugin.previewCommand(savedValues) != argv) {
+                    status = "The command changed. Please try again."
+                    statusBad = true
+                    return
+                }
+                if (savedValues["executable"].orEmpty().isNotBlank()) plugin.approvedExecutable = argv.first()
+                if (runCatching { validateToolValues(plugin.inputs, savedValues)["server"] == "true" }.getOrDefault(false)) plugin.approvedServerCommand = argv
                 start(plugin, savedValues)
             }
             else -> {
@@ -190,7 +198,8 @@ class ToolsSession(private val scope: CoroutineScope) {
         statusBad = false
         status = "Running…"
         val events = Channel<ToolEvent>(Channel.UNLIMITED)
-        job = scope.launch {
+        // The plug-ins check the caller too, so a browser session without --allow-host-actions is refused inside run.
+        job = scope.launch(ToolCaller(hostActions)) {
             val pump = launch {
                 for (event in events) apply(event)
             }
@@ -249,7 +258,7 @@ class ToolsSession(private val scope: CoroutineScope) {
     val command = session.confirmCommand
     val confirming = plugin
     if (command != null && confirming != null) {
-        TechDialog("Run ${confirming.name}?", { session.dismissCommand() }, subtitle = "RingMASTER does not use a shell. Each line is one argument.", actions = {
+        TechDialog("Run ${confirming.name}?", { session.dismissCommand() }, subtitle = "RingMASTER does not use a shell. Each line is one argument. Line 1 is the program file that will run.", actions = {
             TechAction("Run", active = true) { session.acceptCommand() }
             TechAction("Cancel") { session.dismissCommand() }
         }) {

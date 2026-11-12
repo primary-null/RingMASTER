@@ -81,7 +81,8 @@ class LiveSmoothnessTest {
         var values by mutableStateOf(List(30) { .10 })
         val scene = ImageComposeScene(300, 100, Density(1f)) {
             CompositionLocalProvider(LocalReduceMotion provides false) {
-                Sparkline(values, Modifier.fillMaxSize().background(Color.Black), color = Color.White, grid = false, pulse = false, stamp = values.hashCode())
+                // The strip and the inspector ease (ease = true); a table row does not (see the next test).
+                Sparkline(values, Modifier.fillMaxSize().background(Color.Black), color = Color.White, grid = false, pulse = false, stamp = values.hashCode(), ease = true)
             }
         }
         try {
@@ -97,6 +98,29 @@ class LiveSmoothnessTest {
             assertTrue(biggestStep < (after - before) * .5, "the line moved ${biggestStep}px of ${after - before}px in one frame: the scale snapped")
             assertTrue(rows.toSet().size >= 5, "the scale should pass through in-between positions, saw ${rows.toSet()}")
             assertEquals(after, frame(), "and then it rests")
+        } finally { scene.close() }
+    }
+
+    /** No per-frame allocation: a table row builds its paths once per sample, so its scale must not ease frame by frame. */
+    @Test fun aTableRowAppliesANewScaleWithTheSample() {
+        var values by mutableStateOf(List(30) { .10 })
+        val scene = ImageComposeScene(300, 100, Density(1f)) {
+            CompositionLocalProvider(LocalReduceMotion provides false) {
+                Sparkline(values, Modifier.fillMaxSize().background(Color.Black), color = Color.White, grid = false, pulse = false, stamp = values.hashCode())
+            }
+        }
+        try {
+            var time = 0L
+            fun frame() = run { time += 16_000_000L; lineRow(scene, time, 30) }
+            repeat(4) { frame() }
+            val before = frame()
+            values = values.drop(1) + .80
+            // Column 30 also slides one step while the new sample comes in; the scale itself does not ease.
+            val first = frame()
+            val rows = List(40) { frame() }
+            assertTrue(first - before > 40, "the new scale should apply on the first frame (was $before, then $first)")
+            assertEquals(rows.last(), frame(), "and then it rests")
+            assertTrue(rows.all { abs(it - first) <= 2 }, "the vertical scale should not move after the first frame: $first then ${rows.toSet()}")
         } finally { scene.close() }
     }
 

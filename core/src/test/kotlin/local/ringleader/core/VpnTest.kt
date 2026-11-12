@@ -16,14 +16,22 @@ class VpnTest {
     @Test fun routeMatching() { val ts = VpnTunnel("tailscale",VpnKind.Tailscale,"Tailnet",VpnState.Up); val wg = VpnTunnel("wg:x",VpnKind.WireGuard,"x",VpnState.Up,"wg0"); assertEquals(ts,matchRouteTunnel(null,"100.127.255.254",listOf(ts,wg))); assertEquals(ts,matchRouteTunnel(null,"fd7a:115c:a1e0::1",listOf(ts))); assertEquals(wg,matchRouteTunnel("wg0",null,listOf(ts,wg))); assertNull(matchRouteTunnel(null,"100.128.0.1",listOf(ts))) }
     @Test fun linuxCommands() {
         val calls = mutableListOf<List<String>>()
-        val backend = LocalVpnBackend("Linux", { c,_ -> calls += c; when(c.drop(1)) { listOf("status","--json") -> ts; listOf("-j","addr","show","type","wireguard") -> "[]"; listOf("show","all","dump") -> ""; listOf("-t","-f","UUID,NAME,TYPE,DEVICE,STATE","connection","show") -> "uuid:home:wireguard:wg0:activated"; else -> "" } }, { it })
-        val s = backend.snapshot(); assertTrue(s.notes.isEmpty()); backend.setTunnel(s.tunnels.first { it.id == "tailscale" },false); backend.setExitNode(s.tailscale!!.exitNode); backend.setExitNode(null); val nm = s.tunnels.first { it.id == "nm:uuid" }; backend.setTunnel(nm,true); backend.removeWireGuard(nm)
-        assertTrue(listOf("tailscale","down") in calls); assertTrue(listOf("tailscale","set","--exit-node=100.64.0.2") in calls); assertTrue(listOf("tailscale","set","--exit-node=") in calls); assertTrue(listOf("nmcli","connection","up","uuid","uuid") in calls); assertTrue(listOf("nmcli","connection","delete","uuid","uuid") in calls)
+        val backend = LocalVpnBackend("Linux", { c,_ -> calls += c; when(c.drop(1)) {
+            listOf("status","--json") -> ts
+            listOf("-j","addr","show","type","wireguard") -> "[]"
+            listOf("show","all","dump") -> ""
+            listOf("-t","--escape","yes","-f","UUID,NAME,TYPE,DEVICE","connection","show") -> "uuid:home:wireguard:wg0:aktiviert"
+            listOf("-t","--escape","yes","-f","UUID","connection","show","--active") -> "uuid"
+            else -> ""
+        } }, { it }, hostActions = true)
+        val s = backend.snapshot(); assertTrue(s.notes.isEmpty()); assertEquals(VpnState.Up, s.tunnels.first { it.id == "nm:uuid" }.state)
+        backend.setTunnel(s.tunnels.first { it.id == "tailscale" },false); backend.setExitNode(s.tailscale!!.exitNode); backend.setExitNode(s.tailscale!!.exitNode, allowLanAccess = false); backend.setExitNode(null); val nm = s.tunnels.first { it.id == "nm:uuid" }; backend.setTunnel(nm,true); backend.removeWireGuard(nm)
+        assertTrue(listOf("tailscale","down") in calls); assertTrue(listOf("tailscale","set","--exit-node=100.64.0.2","--exit-node-allow-lan-access=true") in calls); assertTrue(listOf("tailscale","set","--exit-node=100.64.0.2","--exit-node-allow-lan-access=false") in calls); assertTrue(listOf("tailscale","set","--exit-node=") in calls); assertTrue(listOf("nmcli","connection","up","uuid","uuid") in calls); assertTrue(listOf("nmcli","connection","delete","uuid","uuid") in calls)
     }
-    @Test fun refusalAndNotes() { val b = LocalVpnBackend("Linux", { _,_ -> error("access denied") }, { if(it == "tailscale" || it == "wg") it else null }); assertEquals(3,b.snapshot().notes.size); assertTrue(assertFailsWith<IllegalStateException> { b.setExitNode(null) }.message!!.contains("operator=${'$'}USER")); assertFailsWith<IllegalArgumentException> { b.setTunnel(VpnTunnel("nic:a",VpnKind.Other,"a",VpnState.Up),false) }; assertFailsWith<IllegalArgumentException> { b.importWireGuard(java.nio.file.Path.of("missing"),"../bad") } }
+    @Test fun refusalAndNotes() { val b = LocalVpnBackend("Linux", { _,_ -> error("access denied") }, { if(it == "tailscale" || it == "wg") it else null }, hostActions = true); val notes = b.snapshot().notes; assertEquals(3, notes.size); assertTrue(notes.any { it.contains("access denied") }); assertTrue(assertFailsWith<IllegalStateException> { b.setExitNode(null) }.message!!.contains("operator=${'$'}USER")); assertFailsWith<IllegalArgumentException> { b.setTunnel(VpnTunnel("nic:a",VpnKind.Other,"a",VpnState.Up),false) }; assertFailsWith<IllegalArgumentException> { b.importWireGuard(java.nio.file.Path.of("missing"),"../bad") } }
     @Test fun importAndCleanup() { val f = Files.createTempFile("vpn-test", ".conf"); Files.writeString(f,"[Interface]\nPrivateKey = SECRET"); var copied: java.nio.file.Path? = null
         val after = mutableListOf<List<String>>()
-        try { val b = LocalVpnBackend("Linux", { c,_ -> if(c.getOrNull(2) != "import") { after += c.drop(1); if(c.getOrNull(2) == "down") error("not active"); "" } else { assertEquals(listOf("nmcli","connection","import","type","wireguard","file"),c.take(6)); copied = java.nio.file.Path.of(c.last()); assertEquals("home.conf",copied!!.fileName.toString()); "Connection 'home' (12345678-1234-1234-1234-123456789abc) successfully added." } }, { it }); assertEquals("nm:12345678-1234-1234-1234-123456789abc",b.importWireGuard(f,"home")); assertFalse(Files.exists(copied));
+        try { val b = LocalVpnBackend("Linux", { c,_ -> if(c.getOrNull(2) != "import") { after += c.drop(1); if(c.getOrNull(2) == "down") error("not active"); "" } else { assertEquals(listOf("nmcli","connection","import","type","wireguard","file"),c.take(6)); copied = java.nio.file.Path.of(c.last()); assertEquals("home.conf",copied!!.fileName.toString()); "Connection 'home' (12345678-1234-1234-1234-123456789abc) successfully added." } }, { it }, hostActions = true); assertEquals("nm:12345678-1234-1234-1234-123456789abc",b.importWireGuard(f,"home")); assertFalse(Files.exists(copied));
             // Importing must not leave the tunnel up or set to connect by itself; a failing "down" (never active) is fine.
             assertEquals(listOf(listOf("connection","modify","uuid","12345678-1234-1234-1234-123456789abc","connection.autoconnect","no"), listOf("connection","down","uuid","12345678-1234-1234-1234-123456789abc")), after); Files.writeString(f,"wrong"); assertFailsWith<IllegalArgumentException> { b.importWireGuard(f,"home") } } finally { Files.deleteIfExists(f) }
     }
@@ -32,9 +40,9 @@ class VpnTest {
     private fun inner(call: List<String>) = String(Base64.getDecoder().decode(Regex("-EncodedCommand ([A-Za-z0-9+/=]+)").find(decode(call))!!.groupValues[1]),Charsets.UTF_16LE)
     private val wgExe = "C:\\Program Files\\WireGuard\\wireguard.exe"
     private fun windowsBackend(calls: MutableList<List<String>>, record: java.nio.file.Path) =
-        LocalVpnBackend("Windows", { c,_ -> calls += c; "{}" }, { if(it == wgExe) it else null }, WireGuardImports(record))
+        LocalVpnBackend("Windows", { c,_ -> calls += c; "{}" }, { if(it == wgExe) it else null }, WireGuardImports(record), hostActions = true)
 
-    @Test fun windowsCommands() { val calls = mutableListOf<List<String>>(); val record = Files.createTempDirectory("wg-rec").resolve("imports.json"); val b = windowsBackend(calls, record); b.snapshot(); assertEquals(1,calls.size); val script = decode(calls[0]); assertTrue(script.contains("Get-VpnConnection -AllUserConnection")); b.setTunnel(VpnTunnel("ras:a'b",VpnKind.Other,"a'b",VpnState.Down,canToggle=true),true); assertEquals(listOf("rasdial","a'b"),calls.last()); b.setTunnel(VpnTunnel("wg:home",VpnKind.WireGuard,"home",VpnState.Down,canToggle=true),true); val outer = decode(calls.last()); assertTrue(outer.contains("-Verb RunAs")); assertEquals("'a''b'",psQuote("a'b")) }
+    @Test fun windowsCommands() { val calls = mutableListOf<List<String>>(); val record = Files.createTempDirectory("wg-rec").resolve("imports.json"); val b = windowsBackend(calls, record); b.snapshot(); assertEquals(1,calls.size); val script = decode(calls[0]); assertTrue(script.contains("Get-VpnConnection -AllUserConnection")); b.setTunnel(VpnTunnel("ras:a'b",VpnKind.Other,"a'b",VpnState.Down,canToggle=true),true); assertEquals(listOf(windowsRasdial(),"a'b"),calls.last()); b.setTunnel(VpnTunnel("wg:home",VpnKind.WireGuard,"home",VpnState.Down,canToggle=true),true); val outer = decode(calls.last()); assertTrue(outer.contains("-Verb RunAs")); assertTrue(outer.contains(psQuote(windowsPowerShell()))); assertEquals(windowsPowerShell(), calls[0][0]); assertTrue(decode(calls[0]).startsWith("[Console]::OutputEncoding")); assertEquals("'a''b'",psQuote("a'b")) }
 
     @Test fun windowsImportGoesStraightIntoWireGuardsStoreAndIsRemembered() {
         val dir = Files.createTempDirectory("wg-import"); val conf = dir.resolve("office.conf"); Files.writeString(conf,"[Interface]\nPrivateKey = SECRET")
@@ -127,5 +135,144 @@ class VpnTest {
     @Test fun emptyLinkObjectsFromIpAreSkipped() {
         assertEquals(emptyList(), parseIpWireGuardJson("[{},{}]"))
         assertEquals(listOf("wg0"), parseIpWireGuardJson("""[{},{"ifname":"wg0","flags":["UP"],"addr_info":[{"local":"10.8.0.2","prefixlen":24}]}]""").map { it.name })
+    }
+
+    @Test fun translatedNmStateIsNotUpUntilTheActiveListSaysSo() {
+        val down = parseNmConnections("u1:home:wireguard:wg0:aktiviert").single()
+        assertEquals(VpnState.Down, down.state)
+        assertEquals("Deletes this NetworkManager profile and its key. RingMASTER keeps no copy of the key.", vpnRemoveBody("Linux", down))
+    }
+
+    @Test fun windowsParserKeepsNonAsciiNamesAndAdapterCounters() {
+        val t = parseWindowsVpnJson("""{"services":[{"Name":"WireGuardTunnel${'$'}B\u00fcro","Status":"Running"}],"wireguardAdapters":[{"Name":"B\u00fcro"}],"ras":[],"adapters":[],"addresses":[],"statistics":[{"Name":"B\u00fcro","ReceivedBytes":40,"SentBytes":9}]}""")
+        assertEquals("B\u00fcro", t.single().name)
+        assertEquals(40L, t.single().rxBytes)
+        assertEquals(9L, t.single().txBytes)
+        assertTrue(windowsVpnReadScript().contains("Get-NetAdapterStatistics"))
+        assertTrue(windowsRouteScript("10.0.0.1").contains("[Console]::OutputEncoding"))
+        assertEquals("C", vpnCommandEnvironment(listOf("nmcli", "connection", "show"))["LC_ALL"])
+        assertEquals("C", vpnCommandEnvironment(listOf("/usr/sbin/ip", "-j", "route"))["LANG"])
+        assertTrue(vpnCommandEnvironment(listOf(windowsPowerShell(), "-NoProfile")).isEmpty())
+        val builder = ProcessBuilder(listOf("wg", "show"))
+        applyVpnCommandEnvironment(builder, builder.command())
+        assertEquals("C", builder.environment()["LC_ALL"])
+    }
+
+    @Test fun mutationsFailClosedUnlessHostActionsAreAllowed() {
+        var calls = 0
+        val blocked = LocalVpnBackend("Linux", { _, _ -> calls++; "" }, { it })
+        val tunnel = VpnTunnel("nm:u", VpnKind.WireGuard, "home", VpnState.Down, canToggle = true, canRemove = true)
+        assertTrue(assertFailsWith<IllegalStateException> { blocked.setTunnel(tunnel, true) }.message!!.contains("--allow-host-actions"))
+        assertFailsWith<IllegalStateException> { blocked.setExitNode(null) }
+        assertFailsWith<IllegalStateException> { blocked.removeWireGuard(tunnel) }
+        assertFailsWith<IllegalStateException> { blocked.importWireGuard(java.nio.file.Path.of("missing.conf"), "home") }
+        assertEquals(0, calls)
+    }
+
+    @Test fun linuxImportReportsAFailedSafetyStepAndStagesUnderTheGivenRoot() {
+        val root = Files.createTempDirectory("xdg-stage")
+        val f = Files.createTempFile("vpn-stage", ".conf")
+        Files.writeString(f, "[Interface]\nPrivateKey = SECRET")
+        var copied: java.nio.file.Path? = null
+        val b = LocalVpnBackend("Linux", { c, _ ->
+            when (c.getOrNull(2)) {
+                "import" -> { copied = java.nio.file.Path.of(c.last()); "Connection 'home' (12345678-1234-1234-1234-123456789abc) successfully added." }
+                "modify" -> error("permission denied")
+                "down" -> error("device busy")
+                else -> ""
+            }
+        }, { it }, hostActions = true, stagingRoot = root)
+        val failure = assertFailsWith<IllegalStateException> { b.importWireGuard(f, "home") }
+        assertTrue(failure.message!!.contains("was imported"), failure.message)
+        assertTrue(failure.message!!.contains("Auto-connect could not be turned off"), failure.message)
+        assertTrue(failure.message!!.contains("could not be brought down"), failure.message)
+        assertTrue(copied!!.startsWith(root))
+        assertFalse(Files.exists(copied))
+        assertEquals(0, Files.list(root).use { it.count() })
+        assertEquals(java.nio.file.Path.of("/run/user/1"), linuxKeyStagingParent(mapOf("XDG_RUNTIME_DIR" to "/run/user/1")) { true })
+        assertEquals(java.nio.file.Path.of("/dev/shm"), linuxKeyStagingParent(emptyMap()) { it == java.nio.file.Path.of("/dev/shm") })
+        assertNull(linuxKeyStagingParent(emptyMap()) { false })
+    }
+
+    @Test fun windowsForeignTunnelDoesNotClaimToDeleteTheConfiguration() {
+        val record = Files.createTempDirectory("wg-foreign-text").resolve("imports.json")
+        val json = """{"services":[{"Name":"WireGuardTunnel${'$'}site","Status":"Running"}],"wireguardAdapters":[{"Name":"site"}],"ras":[],"adapters":[],"addresses":[],"statistics":[{"Name":"site","ReceivedBytes":10,"SentBytes":4}]}"""
+        val b = LocalVpnBackend("Windows", { _, _ -> json }, { null }, WireGuardImports(record), hostActions = true)
+        val tunnel = b.snapshot().tunnels.single { it.id == "wg:site" }
+        assertFalse(tunnel.removeDeletesConfig)
+        assertEquals(10L, tunnel.rxBytes)
+        assertEquals(4L, tunnel.txBytes)
+        assertEquals("Stops and uninstalls the WireGuard service. The configuration stays in WireGuard.", vpnRemoveBody("Windows", tunnel))
+        val timeouts = mutableListOf<Long>()
+        val calls = mutableListOf<List<String>>()
+        val elevated = LocalVpnBackend("Windows", { c, t -> calls += c; timeouts += t; "{}" }, { if (it == wgExe) it else null }, WireGuardImports(record), hostActions = true)
+        elevated.snapshot()
+        assertEquals(30L, timeouts.single())
+        elevated.setTunnel(tunnel.copy(canToggle = true), true)
+        assertEquals(180L, timeouts.last())
+    }
+
+    @Test fun tailscaleCardUsesPeerBytesAndHandshake() {
+        val json = """{"BackendState":"Running","Self":{"ID":"s","TailscaleIPs":["100.64.0.1"]},"Peer":{"a":{"ID":"a","HostName":"a","Online":true,"TailscaleIPs":["100.64.0.2"],"RxBytes":10,"TxBytes":4,"LastHandshake":"2026-01-01T00:00:00Z"},"b":{"ID":"b","HostName":"b","Online":false,"TailscaleIPs":["100.64.0.3"],"LastHandshake":"0001-01-01T00:00:00Z"}}}"""
+        val parsed = parseTailscaleStatus(json)
+        assertEquals(java.time.Instant.parse("2026-01-01T00:00:00Z"), parsed.peers.first().lastHandshake)
+        assertNull(parsed.peers.last().lastHandshake)
+        val b = LocalVpnBackend("Linux", { c, _ -> if (c.last() == "--json") json else "[]" }, { if (it == "tailscale") it else null }, hostActions = true)
+        val tunnel = b.snapshot().tunnels.single { it.id == "tailscale" }
+        assertEquals(10L, tunnel.rxBytes)
+        assertEquals(4L, tunnel.txBytes)
+        assertEquals(java.time.Instant.parse("2026-01-01T00:00:00Z").epochSecond, tunnel.lastHandshakeEpoch)
+    }
+
+    @Test fun linuxTunnelsReadUnprivilegedCounters() {
+        val b = LocalVpnBackend("Linux", { c, _ -> when (c.drop(1)) {
+            listOf("-j", "addr", "show", "type", "wireguard") -> """[{"ifname":"wg0","flags":["UP"],"addr_info":[]}]"""
+            listOf("show", "all", "dump") -> "wg0\tpub\tpub\t51820\toff\nwg0\tpeer\tpsk\t203.0.113.9:51820\t10.8.0.2/32\t1700000000\t1\t2\toff"
+            else -> ""
+        } }, { if (it == "ip" || it == "wg") it else null }, counters = { if (it == "wg0") 30L to 8L else null to null })
+        val wg = b.snapshot().tunnels.single { it.id == "wg:wg0" }
+        assertEquals(30L, wg.rxBytes)
+        assertEquals(8L, wg.txBytes)
+        assertEquals(1700000000L, wg.lastHandshakeEpoch)
+        assertEquals(null to null, interfaceCounters("../etc"))
+    }
+
+    @Test fun confirmHelpersAndLanDefault() {
+        val down = VpnTunnel("wg:a", VpnKind.WireGuard, "a", VpnState.Down, canToggle = true, canRemove = true)
+        val up = down.copy(state = VpnState.Up)
+        assertTrue(toggleStillApplies(true, down))
+        assertFalse(toggleStillApplies(true, up))
+        assertFalse(toggleStillApplies(false, down.copy(state = VpnState.Connecting)))
+        assertTrue(removeStillApplies(down))
+        assertFalse(removeStillApplies(up))
+        val peer = TailscalePeer("p", "home", null, null, true, listOf("100.64.0.2"), true, false, null, null, null, null, null)
+        val other = peer.copy(id = "q", hostName = "other", exitNode = true)
+        val status = TailscaleStatus("Running", null, null, null, null, listOf(peer, other), null, emptyList())
+        assertTrue(exitNodeStillApplies(peer, status))
+        assertFalse(exitNodeStillApplies(other, status))
+        assertTrue(exitNodeStillApplies(null, status))
+        assertFalse(exitNodeStillApplies(null, status.copy(peers = listOf(peer))))
+        assertTrue(privateLanAddress("10.1.2.3"))
+        assertTrue(privateLanAddress("192.168.0.9"))
+        assertFalse(privateLanAddress("100.64.0.1"))
+        assertTrue(exitNodeLanDefault("10.0.0.5", VpnRoute("h", "10.0.0.5", "eth0", null, null)))
+        assertFalse(exitNodeLanDefault("10.0.0.5", VpnRoute("h", "10.0.0.5", "tailscale0", "tailscale", "Tailscale")))
+        assertEquals("SEARCHING ONLINE PEERS ON 8006 · 8007 · 8443", tailnetSearchHeader(true, 0))
+        assertEquals("PROXMOX ON THE TAILNET · 2", tailnetSearchHeader(false, 2))
+    }
+
+    @Test fun findExecutableAlsoSearchesLinuxAdminPaths() {
+        val root = Files.createTempDirectory("vpn-path")
+        val sbin = Files.createDirectories(root.resolve("sbin"))
+        val tool = sbin.resolve("wg")
+        Files.writeString(tool, "x")
+        assertEquals(tool.toString(), findExecutableIn("wg", "", listOf(sbin.toString())))
+        val earlier = Files.createDirectories(root.resolve("bin"))
+        val preferred = earlier.resolve("wg")
+        Files.writeString(preferred, "y")
+        assertEquals(preferred.toString(), findExecutableIn("wg", earlier.toString(), listOf(sbin.toString())))
+        val extras = extraExecutableDirs()
+        if (System.getProperty("os.name").startsWith("Windows", true)) assertTrue(extras.isEmpty())
+        else assertTrue(extras.containsAll(listOf("/usr/local/bin", "/usr/sbin", "/sbin")))
     }
 }

@@ -36,6 +36,7 @@ fun main(args: Array<String>) {
     } else desktopMain()
 }
 
+@OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
 fun desktopMain() = application {
     remember { ConfigGuard().startup(); Appearance.load() }
     // The last placement when its display is still connected, otherwise a size that fits the primary display.
@@ -49,9 +50,14 @@ fun desktopMain() = application {
     var settings by remember { mutableStateOf(false) }
     var preferenceError by remember { mutableStateOf(false) }
     Window(onCloseRequest = { ConsoleHost.close(); exitApplication() }, title = "RingMASTER", icon = AppIcon.large, onPreviewKeyEvent = { desktopShortcuts?.invoke(it) ?: false },
-        undecorated = true, resizable = true, state = windowState) {
-        InstallEdgeResize(window,windowState.placement == WindowPlacement.Maximized)
+        // Compose's own undecorated resizer is off (zero thickness): WindowResizeFrame below is the only resizer.
+        decoration = WindowDecoration.Undecorated(0.dp), resizable = true, state = windowState) {
         InstallDisplayFit(window, windowState) { Appearance.useDisplay(it) }
+        // Every maximise goes through here, so the frame has the work area of its current monitor first (Windows).
+        fun toggleMaximized() {
+            if (windowState.placement == WindowPlacement.Maximized) windowState.placement = WindowPlacement.Floating
+            else { applyMaximizedBounds(window); windowState.placement = WindowPlacement.Maximized }
+        }
         LaunchedEffect(windowState.placement) { WindowMemory.rememberMaximized(windowState.placement == WindowPlacement.Maximized) }
         var focused by remember { mutableStateOf(window.isFocused) }
         DisposableEffect(window) {
@@ -65,10 +71,10 @@ fun desktopMain() = application {
         }
         val host = remember { DesktopAppHost(WindowControls(
             minimize = { windowState.isMinimized = true },
-            maximize = { windowState.placement = if(windowState.placement == WindowPlacement.Maximized) WindowPlacement.Floating else WindowPlacement.Maximized },
+            maximize = { toggleMaximized() },
             close = { ConsoleHost.close(); exitApplication() }
         )) }
-        MaterialTheme(colorScheme = ringColors) { CompositionLocalProvider(LocalReduceMotion provides reduce, LocalSetReduceMotion provides { value -> preferences.write(value); reduce=value }) {
+        MaterialTheme(colorScheme = ringColors) { CompositionLocalProvider(LocalReduceMotion provides reduce, LocalSetReduceMotion provides { value -> preferences.write(value); reduce=value }) { ThemeCrossfade(Modifier.fillMaxSize()) {  // theme changes crossfade the whole window
             val base = androidx.compose.ui.platform.LocalDensity.current
             // Interface size: scales layout and text together on top of the OS display scaling.
             CompositionLocalProvider(androidx.compose.ui.platform.LocalDensity provides androidx.compose.ui.unit.Density(base.density * Appearance.uiScale, base.fontScale * Appearance.textScale)) {
@@ -85,7 +91,7 @@ fun desktopMain() = application {
                                     if (event.type != PointerEventType.Press) continue
                                     val at = event.changes.firstOrNull()?.uptimeMillis ?: continue
                                     if (at - lastPress <= viewConfiguration.doubleTapTimeoutMillis) {
-                                        windowState.placement = if (windowState.placement == WindowPlacement.Maximized) WindowPlacement.Floating else WindowPlacement.Maximized
+                                        toggleMaximized()
                                         lastPress = 0L
                                     } else lastPress = at
                                 }
@@ -95,16 +101,16 @@ fun desktopMain() = application {
                             Spacer(Modifier.width(8.dp))
                             Text("RingMASTER", color = Tech.Amber)
                         }
-                        WindowControl("—") { windowState.isMinimized=true }
-                        WindowControl("□") { windowState.placement=if(windowState.placement==WindowPlacement.Maximized) WindowPlacement.Floating else WindowPlacement.Maximized }
-                        WindowControl("×",close=true) { ConsoleHost.close();exitApplication() }
-
-
+                        WindowControl(WindowGlyph.Minimize) { windowState.isMinimized=true }
+                        WindowControl(if (windowState.placement == WindowPlacement.Maximized) WindowGlyph.Restore else WindowGlyph.Maximize) { toggleMaximized() }
+                        WindowControl(WindowGlyph.Close) { ConsoleHost.close();exitApplication() }
                     }
                 }
                 Box(Modifier.weight(1f)) { RingApp(host, windowState.isMinimized, focused) }
             } } } }
-        } }
+            // Resize edges only while floating; they sit outside the interface-size scaling so they keep their physical width.
+            if (windowState.placement == WindowPlacement.Floating) WindowResizeFrame(window, titleBar = 32.dp * Appearance.uiScale)
+        } } }
     }
 }
 
@@ -121,7 +127,7 @@ private var desktopShortcuts: ((KeyEvent) -> Boolean)? = null
     val base = androidx.compose.ui.platform.LocalDensity.current
     CompositionLocalProvider(androidx.compose.ui.platform.LocalDensity provides androidx.compose.ui.unit.Density(if(host.web) base.density * Appearance.uiScale else base.density, if (host.web) base.fontScale * Appearance.textScale else base.fontScale)) {
     // The motion system (tier, tokens, operating-system preference, the spark overlay) wraps the desktop app.
-    if (!host.web) ProvideMotionSystem { RingLeader(host, minimized, focused) } else BackdropHost { Surface(Modifier.fillMaxSize(), color = androidx.compose.ui.graphics.Color.Transparent, contentColor = Tech.Ink) { Column { Row(Modifier.fillMaxWidth().background(Tech.Raised).padding(6.dp), verticalAlignment = Alignment.CenterVertically) { androidx.compose.foundation.Image(AppIcon.small, contentDescription = null, modifier = Modifier.size(14.dp)); Spacer(Modifier.width(6.dp)); Text("RingMASTER / Browser", color = Tech.Amber, fontSize = 11.sp) }; Box(Modifier.weight(1f)) { RingLeader(host, minimized, focused) } } } }
+    if (!host.web) ProvideMotionSystem { RingLeader(host, minimized, focused) } else ThemeCrossfade(Modifier.fillMaxSize()) { BackdropHost { Surface(Modifier.fillMaxSize(), color = androidx.compose.ui.graphics.Color.Transparent, contentColor = Tech.Ink) { Column { Row(Modifier.fillMaxWidth().background(Tech.Raised).padding(6.dp), verticalAlignment = Alignment.CenterVertically) { androidx.compose.foundation.Image(AppIcon.small, contentDescription = null, modifier = Modifier.size(14.dp)); Spacer(Modifier.width(6.dp)); Text("RingMASTER / Browser", color = Tech.Amber, fontSize = 11.sp) }; Box(Modifier.weight(1f)) { RingLeader(host, minimized, focused) } } } } }
     } } }
 }
 
@@ -137,7 +143,8 @@ private var desktopShortcuts: ((KeyEvent) -> Boolean)? = null
     var scannedSelection by remember { mutableStateOf<ScanHit?>(null) }
     val scanSession = remember { ScanSession(scope) }
     val bluetoothScanner = remember { localBluetoothScanner() }
-    val vpnSession = remember { VpnSession(scope, local.ringleader.core.localVpnBackend()) }
+    val vpnSession = remember { VpnSession(scope, local.ringleader.core.localVpnBackend(host.hostActions), host.hostActions) }
+    SideEffect { vpnSession.minimized = minimized }
     val toolsSession = remember { ToolsSession(scope) }
     var page by remember { mutableStateOf("Desk") }
     var fleetRequest by remember { mutableStateOf<FleetRequest?>(null) }
@@ -255,7 +262,11 @@ private var desktopShortcuts: ((KeyEvent) -> Boolean)? = null
             linkNote?.let { Text(it, fontSize = 12.sp, color = Tech.Muted) }
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 val activeProfile = deskState.profiles.find { it.id == deskState.connectedProfileId }
-                AnimatedContent(page,transitionSpec = { (fadeIn(tween(if(reduceMotion) 0 else 180)) + slideInHorizontally(tween(if(reduceMotion) 0 else 180)) { if(reduceMotion) 0 else if(ringPages.indexOf(targetState)>ringPages.indexOf(initialState)) 12 else -12 }) togetherWith fadeOut(tween(if(reduceMotion) 0 else 180)) }) { targetPage ->
+                // Fade plus a 12dp slide in the navigation direction; a fade only on Lite, nothing under Reduce motion.
+                val motion = LocalMotion.current
+                val pageMs = if (reduceMotion || motion.reduced) 0 else PAGE_TRANSITION_MS
+                val slidePx = with(androidx.compose.ui.platform.LocalDensity.current) { pageSlideDp(reduceMotion, motion).dp.roundToPx() }
+                AnimatedContent(page,transitionSpec = { (fadeIn(tween(pageMs, easing = MotionEase.Standard)) + slideInHorizontally(tween(pageMs, easing = MotionEase.Standard)) { if(ringPages.indexOf(targetState)>ringPages.indexOf(initialState)) slidePx else -slidePx }) togetherWith fadeOut(tween(pageMs)) }) { targetPage ->
                 when (targetPage) {
                     "Fleet" -> InventoryScreen(state, workspace, activeProfile?.let { "${it.displayName} · ${it.origin}" }, search, { search = it }, filter, { filter = it }, { page = "Desk" }, disconnectInView, pins, connectionKey, fleetRequest) { fleetRequest = null }
                     "Activity" -> ActivityScreen(state, workspace, activeProfile?.let { "${it.displayName} · ${it.origin}" }, { page = "Desk" }, disconnectInView)
@@ -277,6 +288,11 @@ private var desktopShortcuts: ((KeyEvent) -> Boolean)? = null
 }
     }
 }
+
+internal const val PAGE_TRANSITION_MS = 180
+
+/** Page change slide in dp: 12 on the Full tier, none on Lite (fade only) and none under Reduce motion. */
+internal fun pageSlideDp(reduceMotion: Boolean, motion: RmMotion): Float = if (reduceMotion) 0f else motion.travel(12f)
 
 /** Pages that show one connection's data. The heading names the session in view on these when several are open. */
 private val sessionPages = setOf("Fleet", "Storage", "Activity", "Under the Hood")

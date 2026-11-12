@@ -5,6 +5,7 @@ import java.nio.file.attribute.PosixFilePermissions
 import java.security.*
 import java.security.spec.*
 import java.util.Base64
+import local.ringleader.core.parseUpdateManifest
 import local.ringleader.core.verifyUpdateSignature
 
 /** Private key bytes never go to stdout, logs or the repository. */
@@ -31,7 +32,12 @@ fun main(args: Array<String>) {
         "verify" -> {
             require(args.size == 3) { "verify <public-SPKI-base64> <manifest-path>" }
             val manifest = Path.of(args[2])
-            check(verifyUpdateSignature(Files.readAllBytes(manifest),Files.readAllBytes(manifest.resolveSibling("${manifest.fileName}.sig")),listOf(args[1]))) { "Signature could not be verified" }
+            val bytes = Files.readAllBytes(manifest)
+            check(verifyUpdateSignature(bytes,Files.readAllBytes(manifest.resolveSibling("${manifest.fileName}.sig")),listOf(args[1]))) { "Signature could not be verified" }
+            val parsed = parseUpdateManifest(bytes)
+            println("version ${parsed.version}")
+            println("published ${parsed.published}")
+            println("platforms ${parsed.assets.joinToString(",") { it.platform }}")
         }
         else -> error("Use generate, sign or verify")
     }

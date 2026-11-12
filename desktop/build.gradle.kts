@@ -43,7 +43,7 @@ val buildBluetoothHelper by tasks.registering {
         ?: System.getenv("PATH").orEmpty().split(File.pathSeparator).map { File(it, "cargo.exe") }.firstOrNull { it.isFile }
     val windowsHost = System.getProperty("os.name").startsWith("Windows")
     val out = bluetoothHelper.asFile
-    inputs.dir(File(crate, "src")); inputs.file(File(crate, "Cargo.toml"))
+    inputs.dir(File(crate, "src")); inputs.file(File(crate, "Cargo.toml")); inputs.file(File(crate, "Cargo.lock"))
     outputs.file(out)
     onlyIf("Windows host with cargo") { windowsHost && cargo != null }
     doLast {
@@ -52,9 +52,16 @@ val buildBluetoothHelper by tasks.registering {
             .map { File(it, "lib/rustlib/x86_64-pc-windows-gnu/bin/self-contained") }.filter { it.isDirectory }
         val pb = ProcessBuilder(cargo!!.path, "build", "--release", "--locked", "--manifest-path", File(crate, "Cargo.toml").path).inheritIO()
         pb.environment()["PATH"] = (listOf(cargo.parentFile.path) + selfContained.map { it.path } + System.getenv("PATH")).joinToString(File.pathSeparator)
+        // A forced progress bar writes only carriage returns. The build queue captures that pipe and the compile stalls.
+        pb.environment()["CARGO_TERM_PROGRESS_WHEN"] = "never"
         // Panic locations would otherwise carry this computer's paths (and so the account name) into the shipped exe.
         // The later, more specific prefix wins. The \u001f-separated form keeps paths with spaces intact.
-        pb.environment()["CARGO_ENCODED_RUSTFLAGS"] = listOf("--remap-path-prefix=$home=~", "--remap-path-prefix=${crate.path}=ringmaster-bt").joinToString("\u001f")
+        // +crt-static has to live here. Cargo uses only one rustflags source, and this variable wins over .cargo/config.toml.
+        pb.environment()["CARGO_ENCODED_RUSTFLAGS"] = listOf(
+            "-Ctarget-feature=+crt-static",
+            "--remap-path-prefix=$home=~",
+            "--remap-path-prefix=${crate.path}=ringmaster-bt",
+        ).joinToString("\u001f")
         check(pb.start().waitFor() == 0) { "cargo build failed for native/ringmaster-bt" }
         out.parentFile.mkdirs()
         File(crate, "target/release/ringmaster-bt.exe").copyTo(out, overwrite = true)
@@ -76,8 +83,9 @@ compose.desktop {
             modules("java.net.http", "jdk.crypto.ec", "jdk.unsupported", "java.management", "java.naming")
             linux {
                 shortcut = true
-                menuGroup = "System"
+                menuGroup = "System;"
                 appCategory = "System"
+                debMaintainer = "RingMASTER <285952344+primary-null@users.noreply.github.com>"
                 rpmLicenseType = "Apache-2.0"
                 iconFile.set(project.file("icons/ringmaster.png"))
             }
@@ -99,4 +107,7 @@ compose.desktop {
 tasks.test {
     useJUnitPlatform()
     systemProperty("ringleader.buildVersion", project.version.toString())
+    // Skia unpacks its native library under user.home/.skiko by default. Keep it in the build folder so tests never
+    // write to the real home and still run for accounts whose home is not writable (sandboxed CI and build runners).
+    systemProperty("skiko.data.path", layout.buildDirectory.dir("skiko").get().asFile.absolutePath)
 }

@@ -26,7 +26,8 @@ import javax.net.ssl.SSLException
 
 /**
  * Finds remote-viewer and hands it one SPICE ticket. The `.vv` file holds a one-time password: it is written to a
- * private directory, remote-viewer deletes it after reading (`delete-this-file=1`), and RingMASTER removes it as well.
+ * private directory, remote-viewer deletes it after reading (`delete-this-file=1`), and RingMASTER removes it as well
+ * when the viewer exits or when the app exits.
  */
 object SpiceViewer {
     private val os = System.getProperty("os.name").lowercase()
@@ -56,30 +57,52 @@ object SpiceViewer {
     /** Starts remote-viewer and waits briefly so an immediate failure can be reported. Returns once the viewer is up. */
     fun launch(ticket: SpiceTicket, onExit: () -> Unit = {}) = launch(ticket, find() ?: error(installHint()), onExit)
 
+    /**
+     * The `.vv` file is removed when the viewer exits (it usually removes it itself first, after reading it), or when
+     * RingMASTER exits while a viewer is still open. It is never removed on a timer: a slow first start (antivirus,
+     * SmartScreen) must still find it.
+     */
     internal fun launch(ticket: SpiceTicket, viewer: File, onExit: () -> Unit = {}) {
         val trace = Trace.begin(TraceSource.Console, "SPICE remote-viewer", session=true)
         val dir = try { privateDirectory() } catch(t: Throwable) { trace.end(error=t); throw t }
         val file = dir.resolve("console.vv")
+        val pending = dir to file
         try {
+            remember(pending)
             createPrivateFile(file)
             Files.writeString(file, ticket.viewerFile())
             val process = ProcessBuilder(viewer.path, file.toString()).redirectErrorStream(true).redirectInput(ProcessBuilder.Redirect.from(nullDevice())).start()
             val output = StringBuffer()
             Thread({ process.inputStream.bufferedReader().useLines { lines -> lines.forEach { if (output.length < 2000) output.append(it).append('\n') } } }, "remote-viewer-output").apply { isDaemon = true; start() }
-            Thread({ process.waitFor(30, TimeUnit.SECONDS); cleanup(dir, file) }, "remote-viewer-cleanup").apply { isDaemon = true; start() }
-            // When the viewer closes, report it on the UI thread (the guest page then captures a fresh last known image).
-            Thread({ process.waitFor(); trace.endProcess(process.exitValue()); javax.swing.SwingUtilities.invokeLater(onExit) }, "remote-viewer-exit").apply { isDaemon = true; start() }
+            // When the viewer closes, remove the ticket file and report it on the UI thread (the guest page then
+            // captures a fresh last known image).
+            Thread({ process.waitFor(); cleanup(pending); trace.endProcess(process.exitValue()); javax.swing.SwingUtilities.invokeLater(onExit) }, "remote-viewer-exit").apply { isDaemon = true; start() }
             if (process.waitFor(3, TimeUnit.SECONDS) && process.exitValue() != 0) {
                 Thread.sleep(100)
-                val reason = output.lines().map { it.trim() }.lastOrNull { it.isNotEmpty() }?.take(200)
-                error("remote-viewer exited (${process.exitValue()})" + (reason?.let { ": $it" } ?: "."))
+                error(viewerExitMessage(process.exitValue(), output.toString(), ticket))
             }
         } catch (e: Exception) {
             trace.end(error=e)
-            cleanup(dir, file)
+            cleanup(pending)
             throw e
         }
     }
+
+    /**
+     * "remote-viewer exited (N): last line". The viewer's own words help (a missing display, a bad option), but a line
+     * that repeats the password or proxy ticket, or that the redactor would change, is left out.
+     */
+    internal fun viewerExitMessage(code: Int, output: String, ticket: SpiceTicket): String {
+        val reason = output.lines().map { it.trim() }.lastOrNull { it.isNotEmpty() }?.take(200)
+            ?.takeIf { !ticket.mentionsSecret(it) && Redact.text(it) == it }
+        return "remote-viewer exited ($code)" + (reason?.let { ": $it" } ?: ".")
+    }
+
+    /** Ticket files of viewers that are still open; removed by the viewer's exit thread or at app exit. */
+    private val open = java.util.concurrent.ConcurrentHashMap.newKeySet<Pair<Path, Path>>()
+    private val exitHook by lazy { Runtime.getRuntime().addShutdownHook(Thread({ open.toList().forEach(::cleanup) }, "remote-viewer-files")) }
+    private fun remember(pending: Pair<Path, Path>) { exitHook; open += pending }
+    private fun cleanup(pending: Pair<Path, Path>) { open -= pending; cleanup(pending.first, pending.second) }
 
     private fun privateDirectory(): Path {
         val probe = Files.createTempDirectory("ringmaster-spice-")
@@ -141,14 +164,20 @@ fun SpiceLaunch.open(scope: kotlinx.coroutines.CoroutineScope, workspace: Worksp
     if (busy) return
     busy = true; failed = false; message = "Requesting a SPICE ticket…"
     scope.launch {
+        // While the viewer runs the guest has a live console: no automatic still capture until it exits.
+        val released = java.util.concurrent.atomic.AtomicBoolean(false)
+        fun release() { if (released.compareAndSet(false, true)) LiveConsoles.close(guest.resource) }
+        var started = false
         try {
             val ticket = workspace.spiceTicket(guest)
             message = "Starting remote-viewer…"
-            withContext(Dispatchers.IO) { SpiceViewer.launch(ticket) { workspace.captureConsoleStill(guest) } }
+            LiveConsoles.open(guest.resource)
+            started = true
+            withContext(Dispatchers.IO) { SpiceViewer.launch(ticket) { release(); workspace.captureConsoleStill(guest) } }
             message = "Console open · ${ticket.title.ifBlank { "VM ${guest.id}" }} · Shift+F11 full screen · Ctrl+Alt+R releases the cursor"
-        } catch (e: CancellationException) { message = null; throw e }
+        } catch (e: CancellationException) { if (started) release(); message = null; throw e }
         catch (e: SessionExpiredException) { failed = true; message = "The session expired. Reconnect to open a console." }
-        catch (e: Exception) { failed = true; message = spiceError(e) }
+        catch (e: Exception) { if (started) release(); failed = true; message = spiceError(e) }
         finally { busy = false }
     }
 }

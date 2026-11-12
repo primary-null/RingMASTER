@@ -1,6 +1,7 @@
 package local.ringleader.desktop
 
 import java.nio.file.Files
+import java.nio.file.Path
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -29,7 +30,22 @@ class AppDataTest {
         assertFalse(Files.exists(config.resolve("backgrounds")))
         assertTrue(Files.exists(config.resolve("plugins/mine.json")), "hand-written plugins stay")
         assertFalse(Files.exists(cache.resolve("chromium-profile")))
-        assertTrue(Files.exists(cache.resolve("jcef-152.0.6/engine")), "the engine download stays")
+        assertTrue(Files.exists(cache.resolve("jcef-152.0.6/engine")), "an older engine download stays")
+        assertTrue(AppData.KEPT_NOTE.contains("plugins"))
+        assertTrue(AppData.KEPT_NOTE.contains("older Chromium engine"))
+        assertTrue(AppData.removes.any { it.contains("leftover console browser profile") })
+    }
+    @Test fun cacheDirectoryIgnoresBlankAndRelativeXdgCacheHome() {
+        val home = Files.createTempDirectory("rm-home")
+        val expected = home.resolve(".cache").resolve("ring-leader")
+        assertEquals(expected, cacheDirectory(null, home))
+        assertEquals(expected, cacheDirectory("", home))
+        assertEquals(expected, cacheDirectory("   ", home))
+        assertEquals(expected, cacheDirectory("relative/cache", home))
+        val absolute = Files.createTempDirectory("rm-xdg")
+        assertEquals(absolute.resolve("ring-leader"), cacheDirectory(absolute.toString(), home))
+        assertEquals(absolute.resolve("ring-leader"), cacheDirectory("  ${absolute}  ", home))
+        assertTrue(cacheDirectory("relative/cache", home).isAbsolute)
     }
 
     @Test fun clearAllOnAFreshComputerIsANoOp() {

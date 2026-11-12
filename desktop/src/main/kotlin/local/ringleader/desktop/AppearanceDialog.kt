@@ -40,7 +40,10 @@ import kotlinx.coroutines.withContext
     FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         ThemeMode.entries.forEach { mode ->
             val selected = Appearance.theme == mode
-            val swatch = when (mode) { ThemeMode.Dark -> listOf(DarkPalette); ThemeMode.Light -> listOf(LightPalette); ThemeMode.System -> listOf(DarkPalette, LightPalette) }
+            val swatch = when (mode) {
+                ThemeMode.Dark -> listOf(DarkPalette); ThemeMode.Light -> listOf(LightPalette); ThemeMode.PitchBlack -> listOf(PitchBlackPalette)
+                ThemeMode.System -> listOf(DarkPalette, LightPalette)
+            }
             Column(Modifier.width(150.dp).clip(Tech.Control).border(1.dp, if (selected) Tech.Amber else Tech.Edge, Tech.Control)
                 .clickable { Appearance.chooseTheme(mode) }.padding(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Canvas(Modifier.fillMaxWidth().height(54.dp)) {
@@ -60,7 +63,7 @@ import kotlinx.coroutines.withContext
             }
         }
     }
-    Caption("Light uses soft greys with deeper accents for contrast; System follows the operating system at start-up.")
+    Caption("Light uses soft greys with deeper accents for contrast. Pitch Black uses true black for OLED screens. System follows the operating system. Changes fade in.")
 }
 
 @Composable internal fun SizeSettingsSection() {
@@ -154,24 +157,25 @@ import kotlinx.coroutines.withContext
     }
 }
 
-/** What the window's display is, and how fast RingMASTER is actually drawing on it (measured while this is open). */
+/**
+ * What the window's display is and how RingMASTER draws on it. Static facts only: an earlier frame counter here asked
+ * for a frame every refresh while the section was open, which pegged a core on software rendering.
+ */
 @Composable private fun DisplayFacts() {
     val display = Appearance.display
-    var fps by remember { mutableStateOf(0) }
-    LaunchedEffect(Unit) {
-        // Count real frames for a second at a time; a display at 240 Hz should read close to 240 here.
-        while (true) {
-            var frames = 0
-            val start = androidx.compose.runtime.withFrameNanos { it }
-            var now = start
-            while (now - start < 1_000_000_000L) { now = androidx.compose.runtime.withFrameNanos { it }; frames++ }
-            fps = frames
-        }
-    }
+    val api = LocalRenderApi.current
+    val tier = LocalMotion.current.tier
     Column(Modifier.padding(top = 6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Text("THIS DISPLAY", fontSize = 10.sp, letterSpacing = 1.sp, fontFamily = Tech.Mono, color = Tech.Muted)
         Text(display?.summary ?: "Browser viewport", Modifier.identity(), fontSize = 11.sp, fontFamily = Tech.Mono, color = Tech.Ink)
-        Text(if (fps > 0) "drawing at $fps fps" else "measuring…", fontSize = 11.sp, fontFamily = Tech.Mono,
-            color = if ((display?.refreshHz ?: 0) > 0 && fps >= (display?.refreshHz ?: 0) * .9) Tech.Green else Tech.Amber)
+        if (display != null) Text(displayDrawingLine(api, SoftwareGl.detected, tier), fontSize = 11.sp, fontFamily = Tech.Mono, color = Tech.Ink)
     }
 }
+
+/** "Drawing with Direct3D · full motion", the render line under the display facts. */
+internal fun displayDrawingLine(api: org.jetbrains.skiko.GraphicsApi?, softwareGl: Boolean, tier: MotionTier): String =
+    "Drawing with ${renderApiLabel(api, softwareGl)} · " + when (tier) {
+        MotionTier.Full -> "full motion"
+        MotionTier.Lite -> "light motion for software drawing"
+        MotionTier.Reduced -> "reduced motion"
+    }

@@ -20,6 +20,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import kotlinx.coroutines.launch
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.graphics.drawscope.translate
+import androidx.compose.ui.graphics.drawOutline
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.geometry.Offset
@@ -71,7 +76,7 @@ val ringColors: ColorScheme get() = Appearance.palette.let { p ->
     val hovered by interaction.collectIsHoveredAsState()
     val focused by interaction.collectIsFocusedAsState()
     val pressed by interaction.collectIsPressedAsState()
-    val tint by animateColorAsState(if(active || hovered || pressed || focused) Tech.Amber else Tech.Edge, tween(if(LocalReduceMotion.current) 0 else 140))
+    val tint by animateColorAsState(if(active || hovered || pressed || focused) Tech.Amber else Tech.Edge, LocalMotion.current.fade(MotionDur.Quick))
     OutlinedButton(interactionSource = interaction, onClick = onClick, enabled = enabled, modifier = modifier.heightIn(min = 32.dp),
         shape = Tech.Control, border = BorderStroke(1.dp, tint),
         colors = ButtonDefaults.outlinedButtonColors(containerColor = if (active) Tech.AmberWash else Color.Transparent,
@@ -145,11 +150,60 @@ val ringColors: ColorScheme get() = Appearance.palette.let { p ->
         tooltipPlacement = androidx.compose.foundation.TooltipPlacement.CursorPoint(offset = androidx.compose.ui.unit.DpOffset(4.dp, 18.dp)),
     ) { content() }
 }
-@Composable fun WindowControl(label: String, close: Boolean = false, onClick: () -> Unit) {
+/** Title-bar control marks. [Restore] is shown while the window is maximised. */
+enum class WindowGlyph(val label: String) { Minimize("Minimise"), Maximize("Maximise"), Restore("Restore"), Close("Close") }
+
+@Composable fun WindowControl(glyph: WindowGlyph, onClick: () -> Unit) {
+    val close = glyph == WindowGlyph.Close
     val interaction=remember { MutableInteractionSource() }
     val hovered by interaction.collectIsHoveredAsState()
-    TextButton(onClick=onClick,interactionSource=interaction,modifier=Modifier.width(40.dp).height(32.dp),shape=androidx.compose.ui.graphics.RectangleShape,contentPadding=PaddingValues(0.dp),colors=ButtonDefaults.textButtonColors(containerColor=if(hovered) { if(close) Tech.Red else Tech.Edge } else Color.Transparent,contentColor=if(close && hovered) Tech.OnAccent else Tech.Ink)) { Text(label) }
+    val ink = if (close && hovered) Tech.OnAccent else Tech.Ink
+    TextButton(onClick=onClick,interactionSource=interaction,modifier=Modifier.width(40.dp).height(32.dp).semantics { contentDescription = glyph.label },shape=androidx.compose.ui.graphics.RectangleShape,contentPadding=PaddingValues(0.dp),colors=ButtonDefaults.textButtonColors(containerColor=if(hovered) { if(close) Tech.Red else Tech.Edge } else Color.Transparent,contentColor=ink)) {
+        // Drawn, not font glyphs: a crisp 1dp mark at every scale, and no missing-glyph box on a Linux font set.
+        Canvas(Modifier.size(10.dp)) { drawWindowGlyph(glyph, ink) }
+    }
 }
+
+/** The old text labels ("—", "□", "×"), still used by the screenshot scenes that rebuild the title bar. */
+@Composable fun WindowControl(label: String, onClick: () -> Unit) =
+    WindowControl(when (label) { "—", "-" -> WindowGlyph.Minimize; "×", "x" -> WindowGlyph.Close; else -> WindowGlyph.Maximize }, onClick)
+
+internal fun androidx.compose.ui.graphics.drawscope.DrawScope.drawWindowGlyph(glyph: WindowGlyph, color: Color) {
+    val stroke = 1.dp.toPx().coerceAtLeast(1f)
+    val half = stroke / 2
+    val w = size.width; val h = size.height
+    when (glyph) {
+        // Centred on a pixel row, so the 1px bar stays solid instead of smearing over two rows.
+        WindowGlyph.Minimize -> { val y = (h / 2).toInt() + half; drawLine(color, Offset(0f, y), Offset(w, y), stroke) }
+        WindowGlyph.Maximize -> drawRect(color, Offset(half, half), androidx.compose.ui.geometry.Size(w - stroke, h - stroke), style = Stroke(stroke))
+        WindowGlyph.Restore -> {
+            // A front square low left, and the edge of the one behind it showing above and to the right.
+            val back = w * .2f
+            drawRect(color, Offset(half, back + half), androidx.compose.ui.geometry.Size(w - back - stroke, h - back - stroke), style = Stroke(stroke))
+            val behind = androidx.compose.ui.graphics.Path().apply {
+                moveTo(back + half, back); lineTo(back + half, half); lineTo(w - half, half); lineTo(w - half, h - back - half); lineTo(w - back, h - back - half)
+            }
+            drawPath(behind, color, style = Stroke(stroke))
+        }
+        WindowGlyph.Close -> {
+            drawLine(color, Offset(0f, 0f), Offset(w, h), stroke)
+            drawLine(color, Offset(w, 0f), Offset(0f, h), stroke)
+        }
+    }
+}
+
+/**
+ * Keyboard focus ring: a 1dp amber outline in [shape], drawn [gap] outside the element so it still shows on an amber
+ * control. Rail rows draw the same mark at their own edge.
+ */
+fun Modifier.focusRing(focused: Boolean, shape: androidx.compose.ui.graphics.Shape = androidx.compose.ui.graphics.RectangleShape, gap: androidx.compose.ui.unit.Dp = 0.dp): Modifier =
+    if (!focused) this else this.drawWithContent {
+        drawContent()
+        val g = gap.toPx(); val stroke = 1.dp.toPx()
+        val ring = androidx.compose.ui.geometry.Size(size.width + 2 * g - stroke, size.height + 2 * g - stroke)
+        val outline = shape.createOutline(ring, layoutDirection, this)
+        translate(-g + stroke / 2, -g + stroke / 2) { drawOutline(outline, Tech.Amber, style = Stroke(stroke)) }
+    }
 
 /**
  * Compact 28dp desktop action for toolbars and cards. [glow] (0 to 1) blends the plain style towards the amber one;
@@ -206,20 +260,23 @@ internal const val ARRIVAL_FADE_MS = 700
     val interaction = remember { MutableInteractionSource() }
     val hovered by interaction.collectIsHoveredAsState()
     val focused by interaction.collectIsFocusedAsState()
-    val speed = if (LocalReduceMotion.current) 0 else 140
-    val travel by animateFloatAsState(if (checked) 1f else 0f, tween(speed))
+    val motion = LocalMotion.current
+    // The thumb slide is movement (it snaps under Reduce motion); the colours are tints and keep their short fade.
+    val travel by animateFloatAsState(if (checked) 1f else 0f, if (motion.reduced) snap() else tween(MotionDur.Short, easing = MotionEase.Standard))
     val edge by animateColorAsState(when {
         !enabled -> Tech.Edge.copy(alpha = .5f)
         checked -> Tech.Amber
         hovered || focused -> Tech.Amber.copy(alpha = .6f)
         else -> Tech.Edge
-    }, tween(speed))
-    val fill by animateColorAsState(if (checked && enabled) Tech.AmberWash else Color.Transparent, tween(speed))
-    val thumb by animateColorAsState(when { !enabled -> Tech.Muted.copy(alpha = .4f); checked -> Tech.Amber; else -> Tech.Muted }, tween(speed))
+    }, motion.fade(MotionDur.Quick))
+    val fill by animateColorAsState(if (checked && enabled) Tech.AmberWash else Color.Transparent, motion.fade(MotionDur.Quick))
+    val thumb by animateColorAsState(when { !enabled -> Tech.Muted.copy(alpha = .4f); checked -> Tech.Amber; else -> Tech.Muted }, motion.fade(MotionDur.Quick))
     val shape = CutCornerShape(bottomEnd = 6.dp)
-    Box(modifier.size(36.dp, 18.dp).clip(shape).background(fill).border(1.dp, edge, shape)
-        .then(if (onChange != null) Modifier.toggleable(checked, interactionSource = interaction, indication = null, enabled = enabled, role = Role.Switch) { onChange(it) }
-              .hoverable(interaction).pointerHoverIcon(androidx.compose.ui.input.pointer.PointerIcon.Hand) else Modifier)
+    // The drawn track stays 36 by 18; an interactive switch takes a 24dp tall pointer target around it (WCAG 2.5.8).
+    val target = if (onChange != null) Modifier.height(SWITCH_TARGET.dp).toggleable(checked, interactionSource = interaction, indication = null, enabled = enabled, role = Role.Switch) { onChange(it) }
+        .hoverable(interaction).pointerHoverIcon(androidx.compose.ui.input.pointer.PointerIcon.Hand) else Modifier
+    Box(modifier.width(36.dp).then(target), contentAlignment = Alignment.Center) {
+    Box(Modifier.size(36.dp, 18.dp).focusRing(focused && onChange != null, shape, gap = 3.dp).clip(shape).background(fill).border(1.dp, edge, shape)
         .padding(3.dp)) {
         // The thumb is a 12dp square; the off side shows a faint tick so both states read without colour.
         Canvas(Modifier.fillMaxSize()) {
@@ -229,20 +286,25 @@ internal const val ARRIVAL_FADE_MS = 700
             drawRect(thumb, Offset(x, 0f), androidx.compose.ui.geometry.Size(side, side))
         }
     }
+    }
 }
+
+/** Pointer target height of an interactive [TechSwitch], in dp. */
+internal const val SWITCH_TARGET = 24
 
 /** Check box in the Tech language: a cut-corner square that fills amber with a dark tick. The whole [label] row toggles it. */
 @Composable fun TechCheck(checked: Boolean, onChange: (Boolean) -> Unit, label: String, modifier: Modifier = Modifier, enabled: Boolean = true) {
     val interaction = remember { MutableInteractionSource() }
     val hovered by interaction.collectIsHoveredAsState()
-    val speed = if (LocalReduceMotion.current) 0 else 120
-    val fill by animateColorAsState(if (checked && enabled) Tech.Amber else Color.Transparent, tween(speed))
-    val edge by animateColorAsState(when { !enabled -> Tech.Edge.copy(alpha = .5f); checked || hovered -> Tech.Amber; else -> Tech.Edge }, tween(speed))
+    val focused by interaction.collectIsFocusedAsState()
+    val motion = LocalMotion.current
+    val fill by animateColorAsState(if (checked && enabled) Tech.Amber else Color.Transparent, motion.fade(MotionDur.Quick))
+    val edge by animateColorAsState(when { !enabled -> Tech.Edge.copy(alpha = .5f); checked || hovered -> Tech.Amber; else -> Tech.Edge }, motion.fade(MotionDur.Quick))
     val shape = CutCornerShape(bottomEnd = 4.dp)
     Row(modifier.heightIn(min = 28.dp).toggleable(checked, interactionSource = interaction, indication = null, enabled = enabled, role = Role.Checkbox) { onChange(it) }
         .hoverable(interaction).pointerHoverIcon(androidx.compose.ui.input.pointer.PointerIcon.Hand),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        Box(Modifier.size(16.dp).clip(shape).background(fill).border(1.dp, edge, shape)) {
+        Box(Modifier.size(16.dp).focusRing(focused, shape, gap = 3.dp).clip(shape).background(fill).border(1.dp, edge, shape)) {
             if (checked) Canvas(Modifier.fillMaxSize().padding(3.dp)) {
                 val tick = androidx.compose.ui.graphics.Path().apply {
                     moveTo(size.width * .08f, size.height * .52f); lineTo(size.width * .4f, size.height * .82f); lineTo(size.width * .94f, size.height * .18f)
@@ -302,16 +364,17 @@ internal const val ARRIVAL_FADE_MS = 700
 
 /** A tab strip in the Tech language: mono capitals, an amber underline under the chosen tab, a hairline under the rest. */
 @Composable fun TechTabs(tabs: List<String>, selected: String, onSelect: (String) -> Unit, modifier: Modifier = Modifier) {
-    val speed = if (LocalReduceMotion.current) 0 else 140
+    val motion = LocalMotion.current
     Row(modifier.fillMaxWidth().drawBehind { drawLine(Tech.Edge, Offset(0f, size.height - .5f), Offset(size.width, size.height - .5f), 1f) },
         horizontalArrangement = Arrangement.spacedBy(2.dp)) {
         tabs.forEach { title ->
             val interaction = remember { MutableInteractionSource() }
             val hovered by interaction.collectIsHoveredAsState()
+            val focused by interaction.collectIsFocusedAsState()
             val active = title == selected
-            val ink by animateColorAsState(when { active -> Tech.Amber; hovered -> Tech.Ink; else -> Tech.Muted }, tween(speed))
-            val bar by animateColorAsState(when { active -> Tech.Amber; hovered -> Tech.Edge; else -> Color.Transparent }, tween(speed))
-            Box(Modifier.height(32.dp).hoverable(interaction)
+            val ink by animateColorAsState(when { active -> Tech.Amber; hovered || focused -> Tech.Ink; else -> Tech.Muted }, motion.fade(MotionDur.Quick))
+            val bar by animateColorAsState(when { active -> Tech.Amber; hovered -> Tech.Edge; else -> Color.Transparent }, motion.fade(MotionDur.Quick))
+            Box(Modifier.height(32.dp).focusRing(focused).hoverable(interaction)
                 .clickable(interactionSource = interaction, indication = null, role = Role.Tab) { onSelect(title) }
                 .pointerHoverIcon(androidx.compose.ui.input.pointer.PointerIcon.Hand)
                 .drawBehind { drawRect(bar, Offset(0f, size.height - 2.dp.toPx()), androidx.compose.ui.geometry.Size(size.width, 2.dp.toPx())) }

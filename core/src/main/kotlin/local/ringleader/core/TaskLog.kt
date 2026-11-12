@@ -15,6 +15,15 @@ const val TASK_LOG_PAGE_LIMIT = 500
 /** While a task is running, read status and any new lines on this interval. */
 const val TASK_LOG_POLL_MS = 2_000L
 
+/** After a failed follow read, wait longer each time, up to this. Follow stops only on permission denial or session expiry. */
+const val TASK_LOG_RETRY_MAX_MS = 30_000L
+
+/** Lines one open log keeps. Older lines are dropped first, and the panel says how many. */
+const val TASK_LOG_KEEP_LINES = 5_000
+
+/** Proxmox puts this single line in an empty log so its web viewer has a row. It is not worker output. */
+const val TASK_LOG_EMPTY_PLACEHOLDER = "no content"
+
 const val TASK_LOG_DIRECT_ONLY =
     "Task logs are read from the node directly; open a direct Proxmox VE connection."
 
@@ -76,7 +85,30 @@ data class TaskLogState(
     val error: String? = null,
     val loading: Boolean = false,
     val following: Boolean = true,
+    /** Older lines dropped to keep at most [TASK_LOG_KEEP_LINES]. Copy and Save hold only the lines kept. */
+    val dropped: Int = 0,
 )
+
+/** Wait before the next follow read after [failures] failed reads in a row: 2 s, 4 s, 8 s, 16 s, then 30 s. */
+fun taskLogRetryDelay(failures: Int): Long {
+    if (failures <= 0) return TASK_LOG_POLL_MS
+    val shift = (failures - 1).coerceAtMost(8)
+    return (TASK_LOG_POLL_MS shl shift).coerceAtMost(TASK_LOG_RETRY_MAX_MS)
+}
+
+/** Keep the newest [keep] lines. Returns the kept lines and how many were dropped from the front. */
+fun capTaskLogLines(lines: List<TaskLogLine>, keep: Int = TASK_LOG_KEEP_LINES): Pair<List<TaskLogLine>, Int> {
+    if (lines.size <= keep) return lines to 0
+    val drop = lines.size - keep
+    return lines.drop(drop) to drop
+}
+
+/** Plain sentence for the dropped-line notice, or null when nothing was dropped. */
+fun taskLogDroppedText(dropped: Int): String? = when {
+    dropped <= 0 -> null
+    dropped == 1 -> "1 older line is not kept in this window. Copy and Save include only the lines shown."
+    else -> "$dropped older lines are not kept in this window. Copy and Save include only the lines shown."
+}
 
 /** Lines kept across polls. [running] is false once a stopped status has been applied. */
 data class TaskLogSnapshot(val lines: List<TaskLogLine>, val total: Int, val running: Boolean)
@@ -124,6 +156,10 @@ fun taskLogPath(node: String, upid: String, start: Int, limit: Int): String {
     return status.removeSuffix("/status") + "/log?start=$start&limit=$limit"
 }
 
+/**
+ * One log page. Proxmox answers an empty log with the single line `{n:1, t:"no content"}`; that placeholder
+ * becomes an empty page so the panel shows its empty state.
+ */
 fun parseTaskLogPage(body: String): TaskLogPage {
     val payload = jsonObject(body)
     if ("data" !in payload || payload["data"] is JsonNull) invalidLog()
@@ -139,11 +175,18 @@ fun parseTaskLogPage(body: String): TaskLogPage {
         }
         else -> invalidLog()
     }
-    return TaskLogPage(lines, total)
+    val placeholder = lines.size == 1 && lines[0].n == 1 && lines[0].text == TASK_LOG_EMPTY_PLACEHOLDER && total <= 1
+    return if (placeholder) TaskLogPage(emptyList(), 0) else TaskLogPage(lines, total)
 }
 
-fun parseTaskLogStatus(body: String): TaskLogStatus {
+/**
+ * Task status for the log panel. When [node] and [upid] are given (the request route), a body that names another
+ * node or another task is refused as invalid, the same way the power status check refuses it.
+ */
+fun parseTaskLogStatus(body: String, node: String? = null, upid: String? = null): TaskLogStatus {
     val row = jsonObject(body)["data"] as? JsonObject ?: invalidLog()
+    if (node != null && row.text("node") != node) invalidLog()
+    if (upid != null) row.rawText("upid")?.let { if (it.trim() != upid) invalidLog() }
     val status = row.text("status") ?: invalidLog()
     if (status != "running" && status != "stopped") invalidLog()
     val exitStatus = row.text("exitstatus")
@@ -342,4 +385,29 @@ private fun JsonObject.epoch(key: String): Instant? {
     } catch (_: Exception) {
         invalidLog()
     }
+}
+
+/** Text for Save. When older lines were dropped, a first line says so; the rest is the log as held. */
+fun taskLogSaveText(lines: List<TaskLogLine>, dropped: Int): String {
+    val body = taskLogText(lines)
+    return if (dropped > 0) "[RingMASTER: $dropped older lines were not kept and are not in this file.]\n$body" else body
+}
+
+/**
+ * Write [text] to [file] so only the current user can read it. On POSIX the file is created (or tightened) as 0600
+ * before anything is written. Elsewhere an empty file is created, limited to its owner with [restrictToCurrentUser],
+ * and then written. I/O failures propagate.
+ */
+fun writeOwnerOnlyText(file: java.nio.file.Path, text: String) {
+    val options = arrayOf(java.nio.file.StandardOpenOption.WRITE, java.nio.file.StandardOpenOption.TRUNCATE_EXISTING)
+    if ("posix" in file.fileSystem.supportedFileAttributeViews()) {
+        val owner = java.nio.file.attribute.PosixFilePermissions.fromString("rw-------")
+        if (java.nio.file.Files.exists(file)) java.nio.file.Files.setPosixFilePermissions(file, owner)
+        else java.nio.file.Files.createFile(file, java.nio.file.attribute.PosixFilePermissions.asFileAttribute(owner))
+        java.nio.file.Files.writeString(file, text, Charsets.UTF_8, *options)
+        return
+    }
+    if (!java.nio.file.Files.exists(file)) java.nio.file.Files.createFile(file)
+    restrictToCurrentUser(file)
+    java.nio.file.Files.writeString(file, text, Charsets.UTF_8, *options)
 }

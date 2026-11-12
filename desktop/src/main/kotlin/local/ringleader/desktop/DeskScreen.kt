@@ -312,7 +312,7 @@ private val ConnectPanelWidth = 520.dp
         if (active) Text("This profile is in use. A connection change will disconnect it instead of switching the open session.", color = Tech.Amber, fontSize = 13.sp)
         deskState.formError?.let { Text(it, color = Tech.Red, fontSize = 12.sp, fontFamily = Tech.Mono) }
         FlowRow(horizontalArrangement = Arrangement.spacedBy(Tech.Space12), verticalArrangement = Arrangement.spacedBy(Tech.Space8)) {
-            TechAction("Save profile", active = true) { desk.saveDraft() }
+            TechAction("Save profile", active = true) { desk.saveDraft(passwordLogin = passwordMode && draft.kind == DIRECT_PVE_KIND) }
             TechAction("Cancel", onClick = desk::cancelEdit)
         }
     }
@@ -357,7 +357,12 @@ private val ConnectPanelWidth = 520.dp
             if (kind == DIRECT_PVE_KIND) AuthChoice(passwordMode) { passwordMode = it }
             // Tab order is composition order. These fields stay consecutive:
             // Server address, user or token ID, password or secret, (two-factor code), Trusted certificate SHA-256.
-            CompactDeskField(address, { address = it; pinPrompt.addressChanged(it); if (!pinPrompt.pending) pinConfirmShowing = false }, "Server address", identity = true)
+            CompactDeskField(address, {
+                address = it
+                // A pin confirmed from the scan belongs to the scanned address only.
+                if (pinPrompt.addressChanged(it, fingerprint)) fingerprint = ""
+                if (!pinPrompt.pending) pinConfirmShowing = false
+            }, "Server address", identity = true)
             if (passwordMode) {
                 CompactDeskField(user, { user = it.trim() }, "User · user@realm, for example root@pam", identity = true)
                 SecretField(deskState.secretGeneration, "Password") { desk.setManualSecret(it) }
@@ -371,7 +376,8 @@ private val ConnectPanelWidth = 520.dp
                 scanned.fingerprint?.let { seen ->
                     Text("Scanned SHA-256: $seen", fontFamily = FontFamily.Monospace, fontSize = Tech.Label, color = Tech.Amber)
                     Text("Compare with the server's real fingerprint before trusting it. Proxmox: node › System › Certificates.", color = Tech.Muted, fontFamily = Tech.Mono, fontSize = 11.sp, lineHeight = 15.sp)
-                    TechAction("Use scanned fingerprint…") { pinPrompt.request(); pinConfirmShowing = true }
+                    // Offered again here: an earlier confirm or address edit may have dropped the offer.
+                    TechAction("Use scanned fingerprint…") { pinPrompt.offer(scanned.origin, seen); pinPrompt.request(); pinConfirmShowing = true }
                 }
             }
             if (pinConfirmShowing) ScannedPinConfirmation(
@@ -382,7 +388,8 @@ private val ConnectPanelWidth = 520.dp
             )
             FlowRow(horizontalArrangement = Arrangement.spacedBy(Tech.Space12), verticalArrangement = Arrangement.spacedBy(Tech.Space8)) {
                 TechAction(if (anyOpen) "Add connection" else "Connect", active = true, enabled = address.isNotBlank() && (if (passwordMode) user else tokenId).isNotBlank() && deskState.manualSecretPresent) {
-                    if (desk.connectManual(address, if (passwordMode) user else tokenId, fingerprint, kind, otp = if (passwordMode) otp.ifBlank { null } else null)) onOpenWorkspace()
+                    if (desk.connectManual(address, if (passwordMode) user else tokenId, fingerprint, kind, otp = if (passwordMode) otp.ifBlank { null } else null,
+                            passwordLogin = passwordMode && kind == DIRECT_PVE_KIND)) onOpenWorkspace()
                 }
                 TechAction("Explore demo") { if (desk.exploreDemo()) onOpenWorkspace() }
             }

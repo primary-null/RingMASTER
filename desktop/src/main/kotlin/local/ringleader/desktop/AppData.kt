@@ -3,6 +3,7 @@ package local.ringleader.desktop
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import local.ringleader.core.createOwnerOnlyDirectories
 import local.ringleader.core.profileFile
 import java.nio.file.Files
 import java.nio.file.Path
@@ -24,13 +25,26 @@ object SaveStatus {
 /** The project's public home (the maintainer's GitHub account). */
 const val PROJECT_URL = "https://github.com/primary-null"
 
+/**
+ * Cache directory. A blank or relative `XDG_CACHE_HOME` is ignored, matching [profileFile].
+ * The folder name stays `ring-leader`.
+ */
+internal fun cacheDirectory(env: String? = System.getenv("XDG_CACHE_HOME"), home: Path = Path.of(System.getProperty("user.home"))): Path {
+    val configured = env?.trim()?.takeIf { it.isNotEmpty() }?.let { Path.of(it) }
+    val base = if (configured != null && configured.isAbsolute) configured.normalize() else home.resolve(".cache")
+    val dir = base.resolve("ring-leader").normalize()
+    require(dir.isAbsolute) { "The cache location must be an absolute path." }
+    return dir
+}
+
 /** Where RingMASTER keeps things on this computer, and the deliberate wipe. */
 object AppData {
     val configDir: Path get() = profileFile().parent
-    val cacheDir: Path get() = (System.getenv("XDG_CACHE_HOME")?.takeIf { it.isNotBlank() }?.let { Path.of(it) }
-        ?: Path.of(System.getProperty("user.home"), ".cache")).resolve("ring-leader")
+    val cacheDir: Path get() = cacheDirectory()
     /** User tool plugins are files the user wrote by hand, so the wipe leaves them. */
     const val KEPT = "plugins"
+    /** Shown before the wipe. Matches [clearAll]: plugins and the rest of the cache stay. */
+    const val KEPT_NOTE = "Kept: your tool plugins folder, and the rest of the cache. An older Chromium engine download is not removed. Nothing on any server is changed."
 
     /** What the wipe removes, as shown before it runs. */
     val removes = listOf(
@@ -38,7 +52,7 @@ object AppData {
         "Appearance, interface sizes and background images",
         "Window placement, rail, live-refresh and update preferences",
         "Configuration backups",
-        "The embedded console's browser profile (cookies, cache)",
+        "A leftover console browser profile, if one is in the cache",
     )
 
     /** Deletes everything in [configDir] except [KEPT], and the console browser profile. Returns the paths it could not remove. */
@@ -56,7 +70,7 @@ object AppData {
     }
 
     fun open(path: Path): Boolean = runCatching {
-        Files.createDirectories(path)
+        createOwnerOnlyDirectories(path)
         java.awt.Desktop.getDesktop().open(path.toFile()); true
     }.getOrDefault(false)
 

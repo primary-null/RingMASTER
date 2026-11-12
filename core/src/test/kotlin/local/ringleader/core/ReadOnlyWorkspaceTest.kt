@@ -64,14 +64,17 @@ class ReadOnlyWorkspaceTest {
         val servicesCalls = mutableListOf<String>()
         val updatesCalls = mutableListOf<String>()
         val syslogCalls = mutableListOf<SyslogCall>()
+        val networkCalls = mutableListOf<String>()
         var inFlight = 0
         var maxInFlight = 0
         val journal = Journal(1_200)
         var servicesReader: suspend (Connection, String) -> List<NodeService> = { _, _ -> listOf(NodeService("pveproxy", null, "PVE API Proxy Server", "running", "enabled", "active")) }
         var updatesReader: suspend (Connection, String) -> List<PackageUpdate> = { _, _ -> listOf(PackageUpdate("pve-manager", null, null, "9.2.23", "9.2.21", "all", "Proxmox", null, null)) }
         var syslogReader: suspend (SyslogCall) -> SyslogPage = { journal.page(it.start, it.limit) }
+        var networkReader: suspend (Connection, String) -> NodeNetworkReport = { _, _ -> NodeNetworkReport(demoNodeNetwork, null) }
         override suspend fun services(connection: Connection, node: String): List<NodeService> { servicesCalls += node; return servicesReader(connection, node) }
         override suspend fun updates(connection: Connection, node: String): List<PackageUpdate> { updatesCalls += node; return updatesReader(connection, node) }
+        override suspend fun network(connection: Connection, node: String): NodeNetworkReport { networkCalls += node; return networkReader(connection, node) }
         override suspend fun syslog(connection: Connection, node: String, start: Int, limit: Int, service: String?): SyslogPage {
             val call = SyslogCall(node, start, limit, service)
             syslogCalls += call
@@ -100,15 +103,16 @@ class ReadOnlyWorkspaceTest {
 
     private fun TestScope.newWorkspace(
         permissions: Permissions = Permissions(), tools: Tools = Tools(), storage: Storage = Storage(),
-        inventory: Inventory = Inventory { overviewFor(it.remoteKey) },
+        inventory: Inventory = Inventory { overviewFor(it.remoteKey) }, clock: () -> Instant = { now },
     ) = Workspace(this, gateway = inventory, pdmGateway = QuietPdm(), permissionsGateway = permissions, nodeToolsGateway = tools,
-        storageContentGateway = storage, clock = { now })
+        storageContentGateway = storage, clock = clock)
 
     private fun TestScope.connected(
         permissions: Permissions = Permissions(), tools: Tools = Tools(), storage: Storage = Storage(),
         inventory: Inventory = Inventory { overviewFor(it.remoteKey) }, connection: Connection = connection(),
+        clock: () -> Instant = { now },
     ): Workspace {
-        val workspace = newWorkspace(permissions, tools, storage, inventory)
+        val workspace = newWorkspace(permissions, tools, storage, inventory, clock)
         workspace.connect(connection)
         workspace.setLive(false)
         runCurrent()
@@ -336,12 +340,13 @@ class ReadOnlyWorkspaceTest {
         val tools = Tools()
         val workspace = newWorkspace(tools = tools)
         workspace.connect(Connection(remote, "tester@pdm!read", "test-only-secret", "", PDM_KIND)); workspace.setLive(false); runCurrent()
-        workspace.loadNodeServices("node-a"); workspace.loadNodeUpdates("node-a"); workspace.openNodeSyslog("node-a"); workspace.selectStorage("node-a", "local"); runCurrent()
+        workspace.loadNodeServices("node-a"); workspace.loadNodeUpdates("node-a"); workspace.openNodeSyslog("node-a"); workspace.selectStorage("node-a", "local"); workspace.loadNodeNetwork("node-a"); runCurrent()
         assertEquals(NODE_TOOLS_DIRECT_ONLY, workspace.state.value.nodeServices.error)
         assertEquals(NODE_TOOLS_DIRECT_ONLY, workspace.state.value.nodeUpdates.error)
         assertEquals(NODE_TOOLS_DIRECT_ONLY, workspace.state.value.nodeSyslog.error)
+        assertEquals(NODE_TOOLS_DIRECT_ONLY, workspace.state.value.nodeNetwork.error)
         assertEquals(STORAGE_CONTENT_DIRECT_ONLY, workspace.state.value.storageContent.error)
-        assertTrue(tools.servicesCalls.isEmpty() && tools.updatesCalls.isEmpty() && tools.syslogCalls.isEmpty())
+        assertTrue(tools.servicesCalls.isEmpty() && tools.updatesCalls.isEmpty() && tools.syslogCalls.isEmpty() && tools.networkCalls.isEmpty())
         workspace.close()
     }
 
@@ -396,7 +401,7 @@ class ReadOnlyWorkspaceTest {
         assertEquals(2, tools.syslogCalls.size, "A hidden panel reads nothing after the first page")
         workspace.setSyslogVisible(true); runCurrent()
         assertEquals(3, tools.syslogCalls.size, "Showing the panel reads at once")
-        assertEquals(SyslogCall("node-a", 1_199, 501, null), tools.syslogCalls.last(), "The held last line is read again, plus what follows it")
+        assertEquals(SyslogCall("node-a", 1_197, 503, null), tools.syslogCalls.last(), "The last three held lines are read again, plus what follows them")
         advanceTimeBy(4_999); runCurrent()
         assertEquals(3, tools.syslogCalls.size)
         advanceTimeBy(1); runCurrent()
@@ -437,7 +442,7 @@ class ReadOnlyWorkspaceTest {
         view = workspace.state.value.nodeSyslog.value!!
         assertEquals(1_203, view.lines.last().n, "Nothing new keeps the lines")
         assertEquals(listOf(SyslogCall("node-a", 0, 1, null), SyslogCall("node-a", 700, 500, null),
-            SyslogCall("node-a", 1_199, 501, null), SyslogCall("node-a", 1_202, 501, null)), tools.syslogCalls)
+            SyslogCall("node-a", 1_197, 503, null), SyslogCall("node-a", 1_200, 503, null)), tools.syslogCalls)
         assertTrue(tools.syslogCalls.none { it.start == 0 && it.limit > 1 }, "The whole log is never read again")
         workspace.close()
     }
@@ -452,7 +457,7 @@ class ReadOnlyWorkspaceTest {
         val view = workspace.state.value.nodeSyslog.value!!
         assertEquals(2_300, view.lines.last().n)
         assertEquals(2_300, view.total)
-        assertEquals(listOf(1_199, 1_699, 2_199), tools.syslogCalls.drop(2).map { it.start })
+        assertEquals(listOf(1_197, 1_697, 2_197), tools.syslogCalls.drop(2).map { it.start })
         workspace.close()
     }
 
@@ -469,7 +474,7 @@ class ReadOnlyWorkspaceTest {
         assertEquals(1_150, view.total)
         assertEquals((651..1_150).toList(), view.lines.map { it.n })
         assertEquals("line 1200", view.lines.last().text)
-        assertEquals(listOf(SyslogCall("node-a", 1_199, 501, null), SyslogCall("node-a", 0, 1, null), SyslogCall("node-a", 650, 500, null)), tools.syslogCalls)
+        assertEquals(listOf(SyslogCall("node-a", 1_197, 503, null), SyslogCall("node-a", 0, 1, null), SyslogCall("node-a", 650, 500, null)), tools.syslogCalls)
         workspace.close()
     }
 
@@ -667,6 +672,202 @@ class ReadOnlyWorkspaceTest {
         // The tail began at line 741 (1240 - 500 + 1); one more page of 500 lines goes before it.
         assertEquals(741 - 500, workspace.state.value.nodeSyslog.value!!.lines.first().n)
         assertTrue(tools.syslogCalls.isEmpty(), "Demo contacts no server")
+        workspace.close()
+    }
+
+    @Test fun turningFollowOnWhenItIsAlreadyOnDoesNotRestartTheWait() = runTest {
+        val tools = Tools()
+        val workspace = connected(tools = tools)
+        workspace.setSyslogVisible(true)
+        workspace.openNodeSyslog("node-a"); runCurrent()
+        advanceTimeBy(4_000); runCurrent()
+        workspace.setSyslogFollowing(true); runCurrent()
+        assertEquals(2, tools.syslogCalls.size, "The same Follow state does not read again")
+        advanceTimeBy(1_000); runCurrent()
+        assertEquals(3, tools.syslogCalls.size, "The original five second wait still ends on time")
+        workspace.close()
+    }
+
+    @Test fun loadEarlierTurnsFollowOff() = runTest {
+        val tools = Tools()
+        val workspace = connected(tools = tools)
+        workspace.setSyslogVisible(true)
+        workspace.openNodeSyslog("node-a"); runCurrent()
+        assertTrue(workspace.state.value.nodeSyslog.value!!.following)
+        workspace.loadEarlierSyslog(); runCurrent()
+        assertFalse(workspace.state.value.nodeSyslog.value!!.following)
+        val calls = tools.syslogCalls.size
+        advanceTimeBy(60_000); runCurrent()
+        assertEquals(calls, tools.syslogCalls.size, "Follow stays off after earlier lines are loaded")
+        workspace.close()
+    }
+
+    @Test fun aSlowFollowReadStopsFollowing() = runTest {
+        var tick = now
+        val tools = Tools()
+        var slow = false
+        tools.syslogReader = { call ->
+            if (slow && call.limit > SYSLOG_PAGE) tick = tick.plusMillis(11_000)
+            tools.journal.page(call.start, call.limit)
+        }
+        val workspace = connected(tools = tools, clock = { tick })
+        workspace.setSyslogVisible(true)
+        workspace.openNodeSyslog("node-a"); runCurrent()
+        assertTrue(workspace.state.value.nodeSyslog.value!!.following)
+        slow = true
+        advanceTimeBy(5_000); runCurrent()
+        val view = workspace.state.value.nodeSyslog.value!!
+        assertFalse(view.following)
+        assertEquals(NODE_SYSLOG_FOLLOW_PAUSED, view.notice)
+        assertNull(workspace.state.value.nodeSyslog.error)
+        val calls = tools.syslogCalls.size
+        advanceTimeBy(60_000); runCurrent()
+        assertEquals(calls, tools.syslogCalls.size)
+        workspace.close()
+    }
+
+    @Test fun aSlowOpenDoesNotStartFollowing() = runTest {
+        var tick = now
+        val tools = Tools()
+        tools.syslogReader = { call ->
+            if (call.limit == SYSLOG_PAGE) tick = tick.plusMillis(11_000)
+            tools.journal.page(call.start, call.limit)
+        }
+        val workspace = connected(tools = tools, clock = { tick })
+        workspace.setSyslogVisible(true)
+        workspace.openNodeSyslog("node-a"); runCurrent()
+        val view = workspace.state.value.nodeSyslog.value!!
+        assertFalse(view.following)
+        assertEquals(NODE_SYSLOG_FOLLOW_PAUSED, view.notice)
+        val calls = tools.syslogCalls.size
+        advanceTimeBy(60_000); runCurrent()
+        assertEquals(calls, tools.syslogCalls.size)
+        workspace.close()
+    }
+
+    @Test fun aSlowFailedFollowReadStopsInsteadOfRetrying() = runTest {
+        var tick = now
+        val tools = Tools()
+        tools.syslogReader = { call ->
+            if (call.limit > SYSLOG_PAGE) { tick = tick.plusMillis(11_000); throw IOException("private endpoint data") }
+            tools.journal.page(call.start, call.limit)
+        }
+        val workspace = connected(tools = tools, clock = { tick })
+        workspace.setSyslogVisible(true)
+        workspace.openNodeSyslog("node-a"); runCurrent()
+        advanceTimeBy(5_000); runCurrent()
+        val section = workspace.state.value.nodeSyslog
+        assertFalse(section.value!!.following)
+        assertEquals(NODE_SYSLOG_FOLLOW_PAUSED, section.value!!.notice)
+        assertNull(section.error)
+        assertFalse(section.stale)
+        assertEquals(500, section.value!!.lines.size)
+        val calls = tools.syslogCalls.size
+        advanceTimeBy(60_000); runCurrent()
+        assertEquals(calls, tools.syslogCalls.size)
+        workspace.close()
+    }
+
+    @Test fun aSlowishFollowReadWaitsThreeTimesAsLong() = runTest {
+        var tick = now
+        var jumps = 0
+        val tools = Tools()
+        tools.syslogReader = { call ->
+            if (call.limit > SYSLOG_PAGE && jumps == 0) { jumps++; tick = tick.plusMillis(3_000) }
+            tools.journal.page(call.start, call.limit)
+        }
+        val workspace = connected(tools = tools, clock = { tick })
+        workspace.setSyslogVisible(true)
+        workspace.openNodeSyslog("node-a"); runCurrent()
+        advanceTimeBy(5_000); runCurrent()
+        assertEquals(3, tools.syslogCalls.size)
+        advanceTimeBy(8_999); runCurrent()
+        assertEquals(3, tools.syslogCalls.size, "Three times a 3 second call is 9 seconds")
+        advanceTimeBy(1); runCurrent()
+        assertEquals(4, tools.syslogCalls.size)
+        workspace.close()
+    }
+
+    @Test fun repeatedFollowFailuresWaitLonger() = runTest {
+        val tools = Tools()
+        val workspace = connected(tools = tools)
+        workspace.setSyslogVisible(true)
+        workspace.openNodeSyslog("node-a"); runCurrent()
+        tools.syslogReader = { throw IOException("private endpoint data") }
+        advanceTimeBy(5_000); runCurrent()
+        assertTrue(workspace.state.value.nodeSyslog.value!!.following)
+        assertFalse(workspace.state.value.nodeSyslog.error!!.contains("private"))
+        assertEquals(3, tools.syslogCalls.size)
+        advanceTimeBy(5_000); runCurrent()
+        assertEquals(4, tools.syslogCalls.size, "The first retry keeps the five second wait")
+        assertTrue(workspace.state.value.nodeSyslog.value!!.following)
+        advanceTimeBy(5_000); runCurrent()
+        assertEquals(4, tools.syslogCalls.size, "The next failure waits ten seconds")
+        advanceTimeBy(5_000); runCurrent()
+        assertEquals(5, tools.syslogCalls.size)
+        assertTrue(workspace.state.value.nodeSyslog.value!!.following)
+        workspace.close()
+    }
+
+    @Test fun nodeNetworkKeepsTheLastRowsAndShowsPendingChanges() = runTest {
+        val tools = Tools()
+        val workspace = connected(tools = tools)
+        workspace.loadNodeNetwork("node-a"); runCurrent()
+        val first = workspace.state.value.nodeNetwork.value
+        assertEquals(listOf("node-a"), tools.networkCalls)
+        assertEquals(demoNodeNetwork, first)
+        assertNull(workspace.state.value.nodeNetworkPending)
+        assertFalse(workspace.state.value.nodeNetworkLoading)
+        val gate = CompletableDeferred<Unit>()
+        val staged = parseNodeNetwork("""{"data":[{"iface":"eth0","type":"eth","active":1,"method":"dhcp"}]}""")
+        tools.networkReader = { _, _ -> gate.await(); NodeNetworkReport(staged, "--- live\n+++ staged") }
+        workspace.loadNodeNetwork("node-a"); runCurrent()
+        assertTrue(workspace.state.value.nodeNetworkLoading)
+        assertEquals(first, workspace.state.value.nodeNetwork.value, "A refresh keeps the rows already shown")
+        assertNull(workspace.state.value.nodeNetworkPending)
+        gate.complete(Unit); runCurrent()
+        assertFalse(workspace.state.value.nodeNetworkLoading)
+        assertEquals(staged, workspace.state.value.nodeNetwork.value)
+        assertEquals("--- live\n+++ staged", workspace.state.value.nodeNetworkPending)
+        workspace.loadNodeNetwork("node-b"); runCurrent()
+        assertEquals(NODE_TOOLS_NODE_NOT_ONLINE, workspace.state.value.nodeNetwork.error)
+        assertNull(workspace.state.value.nodeNetwork.value)
+        assertNull(workspace.state.value.nodeNetworkPending)
+        assertEquals(listOf("node-a", "node-a"), tools.networkCalls)
+        workspace.loadNodeNetwork("node.example"); runCurrent()
+        assertEquals(NODE_TOOLS_NODE_UNKNOWN, workspace.state.value.nodeNetwork.error)
+        assertEquals(listOf("node-a", "node-a"), tools.networkCalls)
+        workspace.close()
+    }
+
+    @Test fun aFailedNetworkRefreshKeepsTheRows() = runTest {
+        val tools = Tools()
+        val workspace = connected(tools = tools)
+        workspace.loadNodeNetwork("node-a"); runCurrent()
+        val first = workspace.state.value.nodeNetwork.value
+        tools.networkReader = { _, _ -> throw IOException("private endpoint data") }
+        workspace.loadNodeNetwork("node-a"); runCurrent()
+        assertEquals(first, workspace.state.value.nodeNetwork.value)
+        assertFalse(workspace.state.value.nodeNetwork.error!!.contains("private"))
+        assertFalse(workspace.state.value.nodeNetworkLoading)
+        tools.networkReader = { _, _ -> throw GuestPermissionException() }
+        workspace.loadNodeNetwork("node-a"); runCurrent()
+        assertEquals(first, workspace.state.value.nodeNetwork.value)
+        assertEquals(NODE_NETWORK_DENIED, workspace.state.value.nodeNetwork.error)
+        workspace.close()
+    }
+
+    @Test fun demoNetworkContactsNoServer() = runTest {
+        val tools = Tools()
+        val workspace = newWorkspace(tools = tools)
+        workspace.exploreDemo(); workspace.setLive(false)
+        workspace.loadNodeNetwork("demo-node-a"); runCurrent()
+        assertEquals(demoNodeNetwork, workspace.state.value.nodeNetwork.value)
+        assertNull(workspace.state.value.nodeNetworkPending)
+        assertNull(workspace.state.value.nodeNetwork.error)
+        workspace.loadNodeNetwork("not a node"); runCurrent()
+        assertEquals(NODE_TOOLS_NODE_UNKNOWN, workspace.state.value.nodeNetwork.error)
+        assertTrue(tools.networkCalls.isEmpty())
         workspace.close()
     }
 

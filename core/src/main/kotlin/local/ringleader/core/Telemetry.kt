@@ -89,6 +89,33 @@ internal fun nextLiveBackoff(current: Int?): Int = when (current) {
     else -> 60
 }
 
+/** Why a history chart is empty when its RRD cannot be read now. */
+internal const val HISTORY_NOT_CONNECTED = "Connect to a server to read history."
+internal const val HISTORY_DIRECT_ONLY = "History needs a direct Proxmox VE connection."
+internal const val HISTORY_NOTHING_SELECTED = "Select a guest or node to read its history."
+internal const val HISTORY_STALE = "The inventory is out of date. History loads again when it is back."
+
+/** Largest share of a wait that [liveWaitMillis] adds or takes away: about ±15%. */
+internal const val LIVE_JITTER_FRACTION = 0.15
+/** A tick that found another read still running looks again after this long instead of waiting a whole interval. */
+internal const val LIVE_BUSY_RECHECK_MS = 1_000L
+
+/**
+ * How long the live loop waits before its next read (GET only; a mutation is never retried on this schedule).
+ *
+ * The base is the larger of the chosen interval and the error backoff, so a failure never makes the loop poll faster than
+ * the user asked. [jitter] is in -1..1 and moves the base by up to [LIVE_JITTER_FRACTION]; the loop passes 0 on a normal
+ * tick and a random value after a failure or a resume, so several sessions do not poll in the same second. A jittered
+ * wait that would fall below the interval is folded back above it: the wait is never shorter than the interval.
+ */
+internal fun liveWaitMillis(intervalSeconds: Int, backoffSeconds: Int?, jitter: Double = 0.0): Long {
+    val interval = clampLiveInterval(intervalSeconds) * 1000L
+    val base = maxOf(interval, (backoffSeconds ?: 0) * 1000L)
+    val shift = (base * LIVE_JITTER_FRACTION * jitter.coerceIn(-1.0, 1.0)).toLong()
+    val jittered = base + shift
+    return if (jittered < interval) 2 * interval - jittered else jittered
+}
+
 internal fun Series.appendCapped(sample: Sample): Series = Series((samples + sample).takeLast(SERIES_CAP))
 
 /**

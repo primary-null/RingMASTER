@@ -22,6 +22,20 @@ data class DeskState(
 )
 
 /**
+ * The Password / API token choice must agree with the id: an API token ID has a '!', a user does not.
+ * Returns the message to show when they disagree, or null. Only direct PVE has the choice.
+ */
+fun authChoiceMismatch(passwordLogin: Boolean, identity: String, kind: String): String? {
+    val id = identity.trim()
+    return when {
+        kind != DIRECT_PVE_KIND || id.isEmpty() -> null
+        passwordLogin && '!' in id -> "Password is selected, but this is an API token ID. Enter a user such as root@pam, or choose API token."
+        !passwordLogin && '!' !in id -> "API token is selected, but this is a user. Enter a token ID such as root@pam!monitor, or choose Password."
+        else -> null
+    }
+}
+
+/**
  * Desk workflows for saved profiles and the manual connection.
  * Secrets stay in transient character arrays and are cleared on profile change, connect, cancel and leaving the desk.
  * Editing connection-defining fields of the active profile, or deleting it, disconnects instead of rerouting the session.
@@ -113,7 +127,8 @@ class ProfileDesk(
         mutableState.update { it.copy(editing = false, formError = null) }
     }
 
-    fun saveDraft(): Boolean {
+    /** [passwordLogin] is the editor's Password / API token choice; null skips that check. */
+    fun saveDraft(passwordLogin: Boolean? = null): Boolean {
         onWorkspace(workspace.state.value)
         if (refuseBlocked()) return false
         val draft = mutableState.value.draft
@@ -124,6 +139,10 @@ class ProfileDesk(
             return false
         } catch (e: IllegalStateException) {
             mutableState.update { it.copy(formError = e.message) }
+            return false
+        }
+        passwordLogin?.let { authChoiceMismatch(it, profile.tokenId, profile.kind) }?.let { message ->
+            mutableState.update { it.copy(formError = message) }
             return false
         }
         val current = mutableState.value.profiles
@@ -232,8 +251,13 @@ class ProfileDesk(
         }
     }
 
-    fun connectManual(address: String, tokenId: String, pin: String, kind: String = DIRECT_PVE_KIND, otp: String? = null): Boolean {
+    /** [passwordLogin] is the Password / API token choice; null skips that check. */
+    fun connectManual(address: String, tokenId: String, pin: String, kind: String = DIRECT_PVE_KIND, otp: String? = null, passwordLogin: Boolean? = null): Boolean {
         onWorkspace(workspace.state.value)
+        passwordLogin?.let { authChoiceMismatch(it, tokenId, kind) }?.let { message ->
+            mutableState.update { it.copy(formError = message) }
+            return false
+        }
         val chars = manualSecret?.copyOf() ?: CharArray(0)
         return try {
             val connection = Connection(address, tokenId.trim(), chars.concatToString(), pin, kind, otp)

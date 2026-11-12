@@ -14,7 +14,7 @@ Releases are built by GitHub Actions from a version tag. The update feed is sign
 
 Plus `SHA256SUMS`, `ringmaster-update.json` and `ringmaster-update.json.sig`.
 
-Linux packages are built on their own distribution because jpackage writes the build system's package names into Depends/Requires (Debian `libjpeg62-turbo`, Ubuntu `libjpeg-turbo8`, Fedora `libglvnd-glx`). Arch wraps the app image with a PKGBUILD. Debian and Ubuntu use `amd64` in the file name; Fedora and Arch use `x86_64`. The packages are not code-signed or GPG-signed. Integrity comes from `SHA256SUMS`, the build attestations and the signed update feed.
+Linux packages are built on their own distribution because jpackage writes the build system's package names into Depends/Requires (Debian `libjpeg62-turbo`, Ubuntu `libjpeg-turbo8`, Fedora `libglvnd-glx`). Arch wraps the app image with a PKGBUILD. Debian and Ubuntu use `amd64` in the file name; Fedora and Arch use `x86_64`. The packages are not code-signed or GPG-signed. Integrity comes from `SHA256SUMS`, the build attestations and the signed update feed. Each Linux desktop entry is named RingMASTER, ends its Categories line with a semicolon, and sets StartupWMClass to `local-ringleader-desktop-MainKt`.
 
 ## Steps
 
@@ -44,7 +44,7 @@ Commands (PowerShell or cmd; one Gradle property per argument, quoted when a pat
 .\gradlew.bat -q :core:releaseKey -Prelease=verify -PreleasePublic=PUBLIC_SPKI_BASE64 "-PreleaseManifest=C:\release\ringmaster-update.json"
 ```
 
-Generate prints only the public key and refuses to overwrite an existing private key file. Sign writes `ringmaster-update.json.sig` (base64, detached) next to the manifest. Verify exits unsuccessfully if verification fails. Never put the private key or its contents in commands, logs, screenshots, source or CI variables.
+Generate prints only the public key and refuses to overwrite an existing private key file. Sign writes `ringmaster-update.json.sig` (base64, detached) next to the manifest and prints nothing. Verify exits unsuccessfully if the signature does not match or the manifest is not one the app would accept. On success it prints the version, the published time and the platform ids. Never put the private key or its contents in commands, logs, screenshots, source or CI variables.
 
 ## The manifest
 

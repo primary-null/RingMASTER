@@ -31,6 +31,21 @@ const val HARD_STOP_CONSEQUENCE =
 const val SHUTDOWN_GUARANTEE =
     "Requests graceful shutdown. RingMASTER does not retry it as a hard stop. For HA-managed guests, server HA policy may force a stop after its timeout."
 const val SIMULATED_POWER_DETAIL = "Simulated on this computer. No request was sent to a server."
+const val RESET_CONSEQUENCE =
+    "Reset restarts this guest at once, without a shutdown. Unsaved work in the guest is lost and its data can be damaged."
+const val SNAPSHOT_DELETE_CONSEQUENCE = "The snapshot is removed for good. The guest's current state does not change."
+const val HA_ROUTING_NOTE =
+    "This guest is managed by HA. Start and stop requests go through the HA manager, which decides when and how they run."
+
+/** Rollback text. [ram] is whether the snapshot is known to include RAM; null when the snapshot list was not read. */
+fun rollbackConsequence(snapshot: String, ram: Boolean?): String {
+    val head = "Rolling back discards every change made since snapshot $snapshot. A running guest is stopped at once, like a hard stop."
+    return head + " " + when (ram) {
+        true -> "This snapshot includes RAM, so the guest starts again from that saved moment."
+        false -> "This snapshot has no RAM, so the guest stays stopped afterwards."
+        null -> "The guest stays stopped afterwards unless the snapshot includes RAM."
+    }
+}
 
 private val routeNode = Regex("[A-Za-z0-9][A-Za-z0-9.-]*")
 private val unreserved = BooleanArray(128).also { table ->
@@ -116,6 +131,57 @@ fun powerActionTitle(action: PowerAction): String = when (action) {
     PowerAction.SnapshotDelete -> "Delete snapshot"
 }
 
+/** The confirmation's commit button names the action itself, never a generic Send. */
+fun powerCommitLabel(action: PowerAction): String = when (action) {
+    PowerAction.SnapshotRollback -> "Roll back"
+    else -> powerActionTitle(action)
+}
+
+/** Actions that end a running guest at once or discard data. Their commit button is not the suggested one. */
+fun powerActionDestructive(action: PowerAction): Boolean =
+    action == PowerAction.HardStop || action == PowerAction.Reset || action == PowerAction.SnapshotRollback || action == PowerAction.SnapshotDelete
+
+/** Start and stop of an HA-managed guest are run by the HA manager. */
+fun powerActionUsesHa(guest: Guest?, action: PowerAction): Boolean =
+    guest?.haState != null && action in listOf(PowerAction.Start, PowerAction.Shutdown, PowerAction.HardStop)
+
+/**
+ * Why Proxmox would refuse this action on a locked guest, as plain text such as "Locked: backup.", or null.
+ * A hibernated VM carries the `suspended` lock and is resumed with Start, so that one combination is allowed.
+ */
+fun guestLockRefusal(guest: Guest, action: PowerAction): String? {
+    val lock = guest.lock?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+    if (lock == "suspended" && action == PowerAction.Start) return null
+    return "Locked: $lock."
+}
+
+/** A snapshot whose `snapstate` is set (for example `prepare` or `delete`) is not complete and cannot be rolled back to. */
+fun snapshotRollbackRefusal(snapshot: GuestSnapshot?): String? {
+    val state = snapshot?.snapstate?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+    return "Snapshot ${snapshot.name} is not complete ($state)."
+}
+
+/** The snapshot this confirmation names, from the open guest inspection. Null when that list is not loaded. */
+fun confirmationSnapshot(confirmation: PowerConfirmation, state: WorkspaceState): GuestSnapshot? {
+    val name = confirmation.snapshot?.name ?: return null
+    val inspection = state.inspection?.takeIf { it.resource == confirmation.resource } ?: return null
+    return inspection.snapshots.value?.firstOrNull { it.name == name && !it.current }
+}
+
+/** The submission that blocks other actions in this session: accepted and not finished, or with an unknown result. */
+fun unresolvedSubmission(state: WorkspaceState): PowerSubmission? =
+    state.submissions.firstOrNull { it.phase == PowerPhase.Accepted || it.phase == PowerPhase.Unknown }
+
+/** Names the guest and the action that is still open, and what the user can do. */
+fun unresolvedActionText(submission: PowerSubmission): String {
+    val what = "${powerActionTitle(submission.action)} on ${submission.name.ifBlank { "guest" }} (${submission.vmid})"
+    return if (submission.phase == PowerPhase.Accepted) {
+        "$what is still running. RingMASTER follows it and allows another action when it ends."
+    } else {
+        "The result of $what is unknown. Check the guest on the server, then reconnect before another action."
+    }
+}
+
 /** Requests no direct force-stop fallback; server HA policy can override shutdown behavior. */
 fun powerRequestBody(action: PowerAction): ByteArray = when (action) {
     PowerAction.Shutdown -> """{"forceStop":false}"""
@@ -166,7 +232,7 @@ fun powerRefusal(confirmation: PowerConfirmation, state: WorkspaceState): String
     } else if (!state.connected || confirmation.remote != state.address || confirmation.origin != state.address) {
         return notSent("The connection changed.")
     }
-    if (state.submissions.any { it.phase == PowerPhase.Accepted || it.phase == PowerPhase.Unknown }) return notSent("An earlier action is unresolved. Check it in Activity before another action.")
+    unresolvedSubmission(state)?.let { return notSent(unresolvedActionText(it)) }
     if (state.loading || state.overview == null) return notSent("Inventory is still loading.")
     if (state.stale) return notSent("Inventory is stale.")
     val guest = state.overview.guests.singleOrNull { it.resource == confirmation.resource }
@@ -177,6 +243,8 @@ fun powerRefusal(confirmation: PowerConfirmation, state: WorkspaceState): String
         return notSent("This guest changed in the inventory.")
     }
     if (!actionMatches(guest, confirmation.action)) return notSent("This action does not match the guest state.")
+    guestLockRefusal(guest, confirmation.action)?.let { return notSent(it) }
+    if (confirmation.action == PowerAction.SnapshotRollback) snapshotRollbackRefusal(confirmationSnapshot(confirmation, state))?.let { return notSent(it) }
     val selected = state.selected
     if (selected == null || selected.resource != confirmation.resource || selected.node != confirmation.node) {
         return notSent("The selection changed.")
@@ -283,3 +351,64 @@ private fun jsonData(body: String): kotlinx.serialization.json.JsonElement {
     }
     return root["data"] ?: throw PowerResponseUnclearException("The server response could not be read. It was not sent again.")
 }
+
+/** First wait before the automatic status read of an accepted task. Each later wait is one second longer, up to [POWER_FOLLOW_MAX_MS]. */
+const val POWER_FOLLOW_FIRST_MS = 1_000L
+const val POWER_FOLLOW_MAX_MS = 5_000L
+/** After a task ends, wait this long before reading the resource list once; the list lags the task by a few seconds. */
+const val POWER_CATCH_UP_DELAY_MS = 3_000L
+
+/** Wait before the next automatic status read. [attempt] counts from 0. */
+fun powerFollowDelay(attempt: Int): Long = (POWER_FOLLOW_FIRST_MS * (attempt.coerceAtLeast(0) + 1)).coerceAtMost(POWER_FOLLOW_MAX_MS)
+
+/**
+ * A sent action whose outcome was not read before its session ended: the server accepted it and it had not finished
+ * ([accepted]), or the answer was lost after the request was sent. Memory only. It holds no UPID, token or secret.
+ */
+data class LostPowerResult(
+    val id: String,
+    val remote: String,
+    val node: String,
+    val vmid: Int,
+    val kind: String,
+    val name: String,
+    val action: PowerAction,
+    val accepted: Boolean,
+    val at: java.time.Instant,
+)
+
+fun lostPowerResultText(item: LostPowerResult): String {
+    val what = "${powerActionTitle(item.action)} on ${item.name.ifBlank { "guest" }} (${item.vmid}, node ${item.node})"
+    return if (item.accepted) "$what was accepted by the server, but the session ended before it finished. It may still be running or may have finished."
+    else "$what may have run. The session ended before the server's answer arrived. It was not sent again."
+}
+
+const val LOST_POWER_RESULT_ADVICE = "Check the guest before you send another action."
+
+/**
+ * Lost results for this app run, shared by every session window, keyed by server origin. Kept in memory only and
+ * never written to disk. A dismissed item is gone; dismissing sends nothing to the server.
+ */
+class LostPowerResultStore {
+    private val items = mutableListOf<LostPowerResult>()
+
+    @Synchronized fun add(item: LostPowerResult) {
+        items.removeAll { it.remote == item.remote && it.vmid == item.vmid && it.kind == item.kind && it.action == item.action }
+        items.add(0, item)
+        while (items.size > LOST_POWER_RESULT_LIMIT) items.removeAt(items.lastIndex)
+    }
+
+    @Synchronized fun forRemote(remote: String): List<LostPowerResult> = items.filter { it.remote == remote }
+
+    @Synchronized fun dismiss(id: String) { items.removeAll { it.id == id } }
+
+    companion object {
+        const val LOST_POWER_RESULT_LIMIT = 20
+        /** The store for this app run. */
+        val shared = LostPowerResultStore()
+    }
+}
+
+/** After this many automatic status reads fail in a row, say so once. The follow keeps trying. */
+const val POWER_FOLLOW_NOTICE_FAILURES = 3
+const val POWER_FOLLOW_DENIED = "This token cannot read the task status, so RingMASTER cannot follow it. Use Check status in Activity."
