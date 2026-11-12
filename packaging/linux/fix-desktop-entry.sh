@@ -31,7 +31,10 @@ fix_one() {
       if (!wm) print "StartupWMClass=local-ringleader-desktop-MainKt"
     }
   ' "$file" > "$tmp"
-  mv "$tmp" "$file"
+  # Write through the existing file, so its mode and owner stay as packaged. mktemp's file is private (0600),
+  # and moving it into place would leave a menu entry only root can read.
+  cat "$tmp" > "$file"
+  rm -f "$tmp"
 }
 
 require_one() {
@@ -39,6 +42,21 @@ require_one() {
   grep -qx 'Name=RingMASTER' "$file"
   grep -Eq '^Categories=.*;$' "$file"
   grep -qx "StartupWMClass=${WM_CLASS}" "$file"
+  # Every user has to be able to read a menu entry.
+  if [ -z "$(find "$file" -perm -004)" ]; then
+    echo "not readable by everyone: $file" >&2
+    exit 1
+  fi
+}
+
+# Filter for an RPM %preun section. jpackage removes the menu entry there unconditionally, but on an upgrade rpm
+# runs the new package's %post first and the old package's %preun after it, so the entry would vanish with every
+# upgrade. The removal is kept for a real uninstall only (first argument 0).
+guard_preun() {
+  awk '
+    /^xdg-[a-z-]+ uninstall / { print "if [ \"$1\" = 0 ]; then " $0 "; fi"; next }
+    { print }
+  '
 }
 
 desktop_list() {
@@ -96,10 +114,10 @@ case ${1:-} in
     self=$(CDPATH= cd "$(dirname "$0")" && pwd)/$(basename "$0")
     stamp=$(mktemp)
     touch "$stamp"
-    # rpmrebuild runs this command with the package tree as its working directory.
-    # The rebuilt package is written under ~/rpmbuild/RPMS, then copied back.
-    change="find . -type f -name '*.desktop' -exec sh '$self' --file {} \\; -exec sh '$self' --require {} \\; ; find . -type f -name '*.desktop' | grep -q ."
-    rpmrebuild --batch --package --notest-install --change-files "$change" "$pkg"
+    # rpmrebuild runs this command from the directory it was started in, with the unpacked package tree in
+    # RPM_BUILD_ROOT. --dir fixes and checks every entry there and fails when there is none.
+    change="sh '$self' --dir \"\$RPM_BUILD_ROOT\""
+    rpmrebuild --batch --package --notest-install --change-spec-preun "sh '$self' --guard-preun" --change-files "$change" "$pkg"
     new=$(find "$HOME/rpmbuild/RPMS" -type f -name '*.rpm' -newer "$stamp" | head -n 1)
     if [ -z "$new" ]; then
       echo "rpmrebuild did not leave a package under \$HOME/rpmbuild/RPMS" >&2
@@ -110,17 +128,27 @@ case ${1:-} in
     verify=$(mktemp -d)
     (cd "$verify" && rpm2cpio "$pkg" | cpio -id >/dev/null)
     require_tree "$verify"
+    if rpm -qp --scripts "$pkg" | grep -Eq '^xdg-[a-z-]+ uninstall '; then
+      echo "the rebuilt package still removes its menu entry on upgrade" >&2
+      exit 1
+    fi
     rm -rf "$verify" "$stamp"
+    ;;
+  --guard-preun)
+    guard_preun
     ;;
   --self-check)
     dir=$(mktemp -d)
     printf '%s\n' '[Desktop Entry]' 'Name=ringmaster' 'Categories=System' 'Type=Application' > "$dir/a.desktop"
     printf '%s\n' '[Desktop Entry]' 'Type=Application' > "$dir/b.desktop"
     sh "$0" --dir "$dir"
+    guarded=$(printf '%s\n' '%preun -p /bin/sh' 'package_type=rpm' 'xdg-desktop-menu uninstall /opt/x/lib/x.desktop' | sh "$0" --guard-preun)
+    printf '%s\n' "$guarded" | grep -qx 'if \[ "$1" = 0 \]; then xdg-desktop-menu uninstall /opt/x/lib/x.desktop; fi'
+    printf '%s\n' "$guarded" | grep -qx 'package_type=rpm'
     rm -rf "$dir"
     ;;
   *)
-    echo "Use --file, --require, --dir, --deb, --rpm or --self-check" >&2
+    echo "Use --file, --require, --dir, --deb, --rpm, --guard-preun or --self-check" >&2
     exit 1
     ;;
 esac
