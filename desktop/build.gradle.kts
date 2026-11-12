@@ -32,6 +32,7 @@ dependencies {
     implementation(compose.material3)
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-swing:1.11.0")
     implementation("me.friwi:jcefmaven:152.0.6")
+    implementation("net.java.dev.jna:jna:5.19.1")
 }
 // Windows Bluetooth helper (Rust, native/ringmaster-bt). Built when cargo is available on a Windows build host and
 // shipped through the app resources; without it the app falls back to the bundled PowerShell scanner.
@@ -80,7 +81,7 @@ compose.desktop {
             description = "RingMASTER desktop infrastructure client"
             vendor = "RingMASTER"
             licenseFile.set(rootProject.file("LICENSE"))
-            modules("java.net.http", "jdk.crypto.ec", "jdk.unsupported", "java.management", "java.naming")
+            modules("java.net.http", "jdk.crypto.ec", "jdk.unsupported", "java.management", "java.naming", "java.logging")
             linux {
                 shortcut = true
                 menuGroup = "System;"

@@ -35,6 +35,11 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.focusable
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 
 // The desktop component set: square-cut frames, mono labels, amber accents.
 object Tech {
@@ -153,20 +158,37 @@ val ringColors: ColorScheme get() = Appearance.palette.let { p ->
 /** Title-bar control marks. [Restore] is shown while the window is maximised. */
 enum class WindowGlyph(val label: String) { Minimize("Minimise"), Maximize("Maximise"), Restore("Restore"), Close("Close") }
 
-@Composable fun WindowControl(glyph: WindowGlyph, onClick: () -> Unit) {
+@Composable fun WindowControl(
+    glyph: WindowGlyph,
+    outsideHovered: Boolean = false,
+    outsidePressed: Boolean = false,
+    onClick: (() -> Unit)? = null,
+) {
     val close = glyph == WindowGlyph.Close
-    val interaction=remember { MutableInteractionSource() }
+    val interaction = remember { MutableInteractionSource() }
     val hovered by interaction.collectIsHoveredAsState()
-    val ink = if (close && hovered) Tech.OnAccent else Tech.Ink
-    TextButton(onClick=onClick,interactionSource=interaction,modifier=Modifier.width(40.dp).height(32.dp).semantics { contentDescription = glyph.label },shape=androidx.compose.ui.graphics.RectangleShape,contentPadding=PaddingValues(0.dp),colors=ButtonDefaults.textButtonColors(containerColor=if(hovered) { if(close) Tech.Red else Tech.Edge } else Color.Transparent,contentColor=ink)) {
+    val pressed by interaction.collectIsPressedAsState()
+    // The native frame owns the maximise button's pointer, so Compose never sees that hover or press.
+    val hot = hovered || pressed || outsideHovered || outsidePressed
+    val ink = if (close && hot) Tech.OnAccent else Tech.Ink
+    val fill = if (hot) { if (close) Tech.Red else Tech.Edge } else Color.Transparent
+    val modifier = Modifier.width(40.dp).height(32.dp).semantics { contentDescription = glyph.label }
+    val mark = @Composable {
         // Drawn, not font glyphs: a crisp 1dp mark at every scale, and no missing-glyph box on a Linux font set.
         Canvas(Modifier.size(10.dp)) { drawWindowGlyph(glyph, ink) }
+    }
+    if (onClick != null) {
+        TextButton(onClick = onClick, interactionSource = interaction, modifier = modifier,
+            shape = androidx.compose.ui.graphics.RectangleShape, contentPadding = PaddingValues(0.dp),
+            colors = ButtonDefaults.textButtonColors(containerColor = fill, contentColor = ink)) { mark() }
+    } else {
+        Box(modifier.background(fill), contentAlignment = Alignment.Center) { mark() }
     }
 }
 
 /** The old text labels ("—", "□", "×"), still used by the screenshot scenes that rebuild the title bar. */
 @Composable fun WindowControl(label: String, onClick: () -> Unit) =
-    WindowControl(when (label) { "—", "-" -> WindowGlyph.Minimize; "×", "x" -> WindowGlyph.Close; else -> WindowGlyph.Maximize }, onClick)
+    WindowControl(when (label) { "—", "-" -> WindowGlyph.Minimize; "×", "x" -> WindowGlyph.Close; else -> WindowGlyph.Maximize }, onClick = onClick)
 
 internal fun androidx.compose.ui.graphics.drawscope.DrawScope.drawWindowGlyph(glyph: WindowGlyph, color: Color) {
     val stroke = 1.dp.toPx().coerceAtLeast(1f)
@@ -213,8 +235,11 @@ fun Modifier.focusRing(focused: Boolean, shape: androidx.compose.ui.graphics.Sha
     // Desktop pointer target: drop Material's 48dp touch minimum so the button stays 28dp tall.
     CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides androidx.compose.ui.unit.Dp.Unspecified) {
     val lit = if (primary) 1f else glow.coerceIn(0f, 1f)
-    TextButton(onClick=onClick, enabled=enabled, shape=Tech.Control, contentPadding=PaddingValues(horizontal=if (width != null) 0.dp else 10.dp, vertical=0.dp),
-        modifier=Modifier.height(26.dp).then(if (width != null) Modifier.width(width) else Modifier).border(1.dp, if (enabled) androidx.compose.ui.graphics.lerp(Tech.Edge, Tech.Amber, lit) else Tech.Edge, Tech.Control),
+    // Keyboard focus draws the amber ring 2dp outside, as on the Settings tabs, so it shows on a primary (amber) action too.
+    val interaction = remember { MutableInteractionSource() }
+    val focused by interaction.collectIsFocusedAsState()
+    TextButton(onClick=onClick, enabled=enabled, shape=Tech.Control, contentPadding=PaddingValues(horizontal=if (width != null) 0.dp else 10.dp, vertical=0.dp), interactionSource=interaction,
+        modifier=Modifier.height(26.dp).then(if (width != null) Modifier.width(width) else Modifier).focusRing(focused, Tech.Control, gap = 2.dp).border(1.dp, if (enabled) androidx.compose.ui.graphics.lerp(Tech.Edge, Tech.Amber, lit) else Tech.Edge, Tech.Control),
         colors=ButtonDefaults.textButtonColors(contentColor=androidx.compose.ui.graphics.lerp(Tech.Ink, Tech.Amber, lit), disabledContentColor=Tech.Muted.copy(alpha=.5f))) {
         Text(label.uppercase(), fontFamily=FontFamily.Monospace, fontSize=11.sp, fontWeight=FontWeight.Bold, letterSpacing=.5.sp)
     }
@@ -340,12 +365,88 @@ internal const val SWITCH_TARGET = 24
 }
 
 /**
+ * How a modal ends without one of its own buttons. Escape always cancels; only [Light] also closes on a click outside.
+ * [Light]: read-only or instant-apply content (Settings, Pinned, Permissions). [Soft]: a form whose typed input must
+ * survive a stray click. [Confirm]: a confirmation; Escape is Cancel and never the commit. Confirm is the default, so a
+ * new dialog that forgets to choose is the safe kind.
+ */
+enum class Dismiss { Light, Soft, Confirm }
+
+/** What an open overlay is, for the window shortcuts. [Shell] is open but owns Escape itself (the node terminal). */
+enum class ModalKind { Settings, Dialog, Overlay, Shell }
+
+/**
+ * The in-window overlays that are open, newest last. Window shortcuts, the browser key path and the overlays share it:
+ * while anything is open, page shortcuts stay still, and Escape closes only the top one.
+ */
+@Stable class ModalStack {
+    class Entry internal constructor(val kind: ModalKind, internal val close: (() -> Unit)?)
+    private val entries = mutableStateListOf<Entry>()
+    val open: Boolean get() = entries.isNotEmpty()
+    val top: Entry? get() = entries.lastOrNull()
+    internal fun push(kind: ModalKind, close: (() -> Unit)?): Entry = Entry(kind, close).also { entries.add(it) }
+    internal fun remove(entry: Entry) { entries.remove(entry) }
+    /** Closes the top overlay when it can be closed by Escape. Nothing beneath it is touched. */
+    fun closeTop(): Boolean { val close = top?.close ?: return false; close(); return true }
+}
+
+val LocalModalStack = staticCompositionLocalOf<ModalStack?> { null }
+
+/** Records an open overlay in [LocalModalStack] for as long as this is composed. [onClose] null: Escape is not ours. */
+@Composable internal fun RegisterModal(kind: ModalKind, onClose: (() -> Unit)?) {
+    val stack = LocalModalStack.current ?: return
+    val close = rememberUpdatedState(onClose)
+    val closable = onClose != null
+    DisposableEffect(stack, kind, closable) {
+        val entry = stack.push(kind, if (closable) ({ close.value?.invoke(); Unit }) else null)
+        onDispose { stack.remove(entry) }
+    }
+}
+
+/** The dialog properties for one dismiss class. The open and close animation is off under Reduce motion and Lite. */
+@OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
+internal fun techDialogProperties(dismiss: Dismiss, reduce: Boolean) = androidx.compose.ui.window.DialogProperties(
+    dismissOnBackPress = true, dismissOnClickOutside = dismiss == Dismiss.Light, usePlatformDefaultWidth = false, animateTransition = !reduce)
+
+/**
+ * The shared modal frame under [TechDialog] and Settings: an in-window dialog whose direct child is [content] at its
+ * own size, so the scrim around it is outside and a full click there closes a [Dismiss.Light] modal. A press that starts
+ * inside (a slider drag) and ends outside does not. Escape is handled inside the dialog as well, because a browser
+ * session and the scene tests have no platform back key. [initialFocus] takes the keyboard on open (Cancel, a first
+ * field, the active tab); without one the frame takes it, so Escape still arrives.
+ */
+@Composable internal fun TechModal(onDismiss: () -> Unit, dismiss: Dismiss, kind: ModalKind = ModalKind.Dialog,
+    initialFocus: androidx.compose.ui.focus.FocusRequester? = null, content: @Composable () -> Unit) {
+    val reduce = LocalReduceMotion.current || LocalMotion.current.reduced
+    val close = rememberUpdatedState(onDismiss)
+    RegisterModal(kind) { close.value() }
+    androidx.compose.ui.window.Dialog(onDismissRequest = { close.value() }, properties = techDialogProperties(dismiss, reduce)) {
+        val frame = remember { androidx.compose.ui.focus.FocusRequester() }
+        LaunchedEffect(Unit) {
+            // The dialog layer can attach a frame after its first composition; ask again until the focus holds.
+            repeat(3) {
+                val held = initialFocus?.let { runCatching { it.requestFocus(androidx.compose.ui.focus.FocusDirection.Enter) }.getOrDefault(false) } == true ||
+                    runCatching { frame.requestFocus(androidx.compose.ui.focus.FocusDirection.Enter) }.getOrDefault(false)
+                if (held) return@LaunchedEffect
+                withFrameNanos { }
+            }
+        }
+        Box(Modifier.focusRequester(frame).focusable().onPreviewKeyEvent { event ->
+            if (event.type == androidx.compose.ui.input.key.KeyEventType.KeyDown && event.key == androidx.compose.ui.input.key.Key.Escape) { close.value(); true } else false
+        }) { content() }
+    }
+}
+
+/**
  * Modal dialog in the Tech language, drawn inside the RingMASTER window (never an OS window with a light title bar).
- * Escape and a click outside call [onDismiss]; [actions] sit bottom right, primary action first.
+ * Escape calls [onDismiss]; a click outside does too only for [Dismiss.Light]. [actions] sit bottom right, primary
+ * action first. [initialFocus], when given, is attached by the caller to the control that takes the keyboard on open:
+ * Cancel for a confirmation, the first field for a form.
  */
 @Composable fun TechDialog(title: String, onDismiss: () -> Unit, width: androidx.compose.ui.unit.Dp = 520.dp, subtitle: String? = null,
+    dismiss: Dismiss = Dismiss.Confirm, initialFocus: androidx.compose.ui.focus.FocusRequester? = null,
     actions: @Composable RowScope.() -> Unit = {}, content: @Composable ColumnScope.() -> Unit) {
-    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss, properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)) {
+    TechModal(onDismiss, dismiss, ModalKind.Dialog, initialFocus) {
         Surface(Modifier.width(width).heightIn(max = 760.dp), color = ringColors.surface, shape = Tech.Plate, border = BorderStroke(1.dp, Tech.Edge), shadowElevation = 12.dp) {
             Row(Modifier.height(IntrinsicSize.Min)) {
                 Box(Modifier.width(3.dp).fillMaxHeight().background(Tech.Amber))

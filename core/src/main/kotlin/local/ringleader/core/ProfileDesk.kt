@@ -1,9 +1,20 @@
 package local.ringleader.core
 
 import java.util.UUID
+import kotlin.coroutines.CoroutineContext
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 data class DeskState(
     val profiles: List<ConnectionProfile> = emptyList(),
@@ -19,6 +30,11 @@ data class DeskState(
     val manualSecretPresent: Boolean = false,
     val profileSecretPresent: Boolean = false,
     val secretGeneration: Int = 0,
+    val vaultStatus: VaultStatus? = null,
+    val vaultName: String = "",
+    val remembered: Set<String> = emptySet(),
+    val rememberChoice: Boolean = false,
+    val vaultBusy: Boolean = false,
 )
 
 /**
@@ -71,10 +87,22 @@ class ProfileDesk(
     workspace: Workspace,
     private val store: ProfileStore,
     private val newId: () -> String = { UUID.randomUUID().toString() },
+    private val vault: SecretVault = NoVault("Remember is not set up."),
+    private val rememberedProfiles: RememberedProfiles = RememberedProfiles(null),
+    private val io: CoroutineContext = Dispatchers.IO,
+    /** How long a just-typed secret may wait for the first inventory before it is dropped unremembered. */
+    private val rememberWaitMs: Long = 90_000,
 ) : AutoCloseable {
     private var workspace: Workspace = workspace
     private val mutableState = MutableStateFlow(DeskState())
     val state = mutableState.asStateFlow()
+    private val dispatcher = io.minusKey(Job)
+    private val scope = CoroutineScope(SupervisorJob() + dispatcher)
+    private val gate = Any()
+    private val rememberedIds = mutableSetOf<String>()
+    private var pending: PendingRemember? = null
+    /** Test hook. Called with a secret copy after it has been zeroed. */
+    internal var onSecretReleased: ((CharArray) -> Unit)? = null
     /**
      * Called right before a connection opens, with the connection and the saved profile it came from (both null for
      * the demo). It may [attach] another workspace, so the new connection opens beside the ones already open. It
@@ -92,7 +120,28 @@ class ProfileDesk(
     private var manualSecret: CharArray? = null
     private var profileSecret: CharArray? = null
 
-    init { reload() }
+    init {
+        reload()
+        val loaded = runCatching { rememberedProfiles.load() }.getOrDefault(emptySet())
+        synchronized(gate) { rememberedIds.addAll(loaded) }
+        mutableState.update { it.copy(remembered = loaded, vaultName = vault.name) }
+        val blocked = rememberedProfiles.blockedReason()
+        if (blocked != null) {
+            mutableState.update { it.copy(vaultStatus = VaultStatus.Unavailable(blocked)) }
+        } else {
+            scope.launch {
+                val status = try {
+                    vault.status()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (t: Throwable) {
+                    VaultStatus.Unavailable(vaultFailureReason(t))
+                }
+                mutableState.update { it.copy(vaultStatus = status, vaultName = vault.name) }
+                if (status !is VaultStatus.Available) dropPending()
+            }
+        }
+    }
 
     fun reload() {
         try {
@@ -118,14 +167,14 @@ class ProfileDesk(
         if (mutableState.value.selectedId == id) return
         if (mutableState.value.profiles.none { it.id == id }) return
         discardSecrets()
-        mutableState.update { it.copy(selectedId = id, editing = false, pendingDeleteId = null, formError = null) }
+        mutableState.update { it.copy(selectedId = id, editing = false, pendingDeleteId = null, formError = null, rememberChoice = false) }
     }
 
     fun beginCreate() {
         if (refuseBlocked()) return
         discardSecrets()
         mutableState.update {
-            it.copy(editing = true, pendingDeleteId = null, formError = null, notice = null, draft = ProfileDraft(newId(), "", "", "", ""))
+            it.copy(editing = true, pendingDeleteId = null, formError = null, notice = null, rememberChoice = false, draft = ProfileDraft(newId(), "", "", "", ""))
         }
     }
 
@@ -136,7 +185,7 @@ class ProfileDesk(
         discardSecrets()
         mutableState.update {
             it.copy(
-                editing = true, selectedId = id, pendingDeleteId = null, formError = null,
+                editing = true, selectedId = id, pendingDeleteId = null, formError = null, rememberChoice = false,
                 draft = ProfileDraft(profile.id, profile.displayName, profile.origin, profile.tokenId, profile.sha256Pin.orEmpty(), profile.kind),
             )
         }
@@ -185,7 +234,14 @@ class ProfileDesk(
         val disconnect = redefined && activeId == profile.id
         if (disconnect) workspace.disconnect()
         if (redefined) profileInvalidated?.invoke(profile.id)
+        val hadRemembered = redefined && (mutableState.value.remembered.contains(profile.id) || synchronized(gate) { pending?.profile?.id == profile.id })
+        if (redefined) forgetVaultEntry(profile.id)
         wipeSecrets()
+        val savedNotice = if (disconnect) {
+            "The server, token ID, certificate pin, or connection kind changed, so the session was disconnected. Enter the token secret to connect again."
+        } else {
+            "Saved ${profile.displayName}."
+        }
         mutableState.update {
             it.copy(
                 profiles = updated,
@@ -197,11 +253,8 @@ class ProfileDesk(
                 manualSecretPresent = false,
                 profileSecretPresent = false,
                 secretGeneration = it.secretGeneration + 1,
-                notice = if (disconnect) {
-                    "The server, token ID, certificate pin, or connection kind changed, so the session was disconnected. Enter the token secret to connect again."
-                } else {
-                    "Saved ${profile.displayName}."
-                },
+                rememberChoice = false,
+                notice = if (hadRemembered) "$savedNotice The remembered secret was forgotten because the server, user or token ID, pin or kind changed." else savedNotice,
             )
         }
         return true
@@ -233,6 +286,7 @@ class ProfileDesk(
         val disconnect = mutableState.value.connectedProfileId == id
         if (disconnect) workspace.disconnect()
         profileInvalidated?.invoke(id)
+        forgetVaultEntry(id)
         wipeSecrets()
         mutableState.update {
             it.copy(
@@ -257,7 +311,13 @@ class ProfileDesk(
 
     fun discardSecrets() {
         wipeSecrets()
-        mutableState.update { it.copy(manualSecretPresent = false, profileSecretPresent = false, secretGeneration = it.secretGeneration + 1) }
+        mutableState.update { it.copy(manualSecretPresent = false, profileSecretPresent = false, secretGeneration = it.secretGeneration + 1, rememberChoice = false) }
+    }
+
+    /** The Remember box on the Connect form. Ignored until the password safe is available. */
+    fun setRememberChoice(on: Boolean) {
+        if (mutableState.value.vaultStatus !is VaultStatus.Available) return
+        mutableState.update { it.copy(rememberChoice = on) }
     }
 
     fun leaveDesk() = discardSecrets()
@@ -267,9 +327,16 @@ class ProfileDesk(
         val id = mutableState.value.selectedId ?: return false
         val profile = mutableState.value.profiles.find { it.id == id } ?: return false
         val chars = profileSecret?.copyOf() ?: CharArray(0)
+        val now = mutableState.value
+        val shouldRemember = chars.isNotEmpty() && now.vaultStatus is VaultStatus.Available &&
+            (now.rememberChoice || profile.id in now.remembered)
+        val rememberCopy = if (shouldRemember) chars.copyOf() else null
+        var handed = false
         return try {
             val connection = Connection(profile.origin, profile.tokenId, chars.concatToString(), profile.sha256Pin.orEmpty(), profile.kind, otp)
             publishSecretClear(connectedProfileId = profile.id, notice = null, connect = connection)
+            rememberCopy?.let { watchForSuccess(PendingRemember(profile, it, workspace, workspace.state.value.connectionEpoch)) }
+            handed = true
             true
         } catch (e: IllegalArgumentException) {
             mutableState.update { it.copy(formError = e.message) }
@@ -279,7 +346,88 @@ class ProfileDesk(
             false
         } finally {
             chars.fill('\u0000')
+            if (!handed) rememberCopy?.let { release(it) }
         }
+    }
+
+    /**
+     * Connect with the secret already in the password safe. The caller runs this on the UI thread: the read waits on
+     * [dispatcher], then [Workspace.connect] runs here, as a typed connect does. Returns false when nothing was opened.
+     * A remembered secret is never copied into the secret field.
+     */
+    suspend fun connectRemembered(otp: String? = null): Boolean {
+        val now = mutableState.value
+        val id = now.selectedId ?: return false
+        if (id !in now.remembered || now.vaultStatus !is VaultStatus.Available || now.vaultBusy) return false
+        val profile = now.profiles.find { it.id == id } ?: return false
+        mutableState.update { it.copy(vaultBusy = true, formError = null) }
+        var read: CharArray? = null
+        return try {
+            try {
+                read = withContext(dispatcher) { vault.read(profile.id) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (t: Throwable) {
+                mutableState.update { it.copy(formError = "The remembered secret could not be read: ${vaultFailureReason(t)} Type it to connect.") }
+                return false
+            }
+            val secret = read
+            if (secret == null) {
+                synchronized(gate) { rememberedIds.remove(profile.id) }
+                persistMarkers()
+                val ids = synchronized(gate) { rememberedIds.toSet() }
+                mutableState.update { it.copy(remembered = ids, formError = "The remembered secret is no longer in ${vault.name}. Type it to connect.") }
+                return false
+            }
+            // The read can wait on an unlock prompt. Meanwhile the selection may have moved, or the profile may have been
+            // edited or forgotten: the secret then belongs to nothing on the desk and is dropped.
+            val after = mutableState.value
+            val current = after.profiles.find { it.id == profile.id }
+            if (after.selectedId != profile.id || current == null || !current.definesSameConnection(profile) || profile.id !in after.remembered) return false
+            val connection = Connection(profile.origin, profile.tokenId, secret.concatToString(), profile.sha256Pin.orEmpty(), profile.kind, otp)
+            publishSecretClear(connectedProfileId = profile.id, notice = null, connect = connection)
+            true
+        } catch (e: IllegalArgumentException) {
+            mutableState.update { it.copy(formError = e.message) }
+            false
+        } catch (e: IllegalStateException) {
+            mutableState.update { it.copy(formError = e.message) }
+            false
+        } finally {
+            read?.let { release(it) }
+            mutableState.update { it.copy(vaultBusy = false) }
+        }
+    }
+
+    /** Drop one profile's remembered secret. The marker stays when the password safe refuses, so the user can try again. */
+    fun forgetRemembered(profileId: String) {
+        scope.launch {
+            try {
+                vault.forget(profileId)
+                synchronized(gate) { rememberedIds.remove(profileId) }
+                persistMarkers()
+                dropPendingFor(profileId)
+                val ids = synchronized(gate) { rememberedIds.toSet() }
+                mutableState.update { it.copy(remembered = ids, notice = "Forgot the remembered secret.", rememberChoice = false) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (t: Throwable) {
+                mutableState.update { it.copy(notice = "The remembered secret could not be removed: ${vaultFailureReason(t)}") }
+            }
+        }
+    }
+
+    /** Clear every remembered secret and the marker list. Null on success, otherwise one plain sentence. */
+    fun forgetAllRemembered(): String? = try {
+        vault.forgetAll()
+        dropPending()
+        synchronized(gate) { rememberedIds.clear() }
+        persistMarkers()
+        mutableState.update { it.copy(remembered = emptySet(), rememberChoice = false) }
+        null
+    } catch (t: Throwable) {
+        val reason = (t.message ?: "the password safe failed.").take(180)
+        "Remembered secrets in ${vault.name} ($reason)"
     }
 
     /** [passwordLogin] is the Password / API token choice; null skips that check. */
@@ -327,7 +475,12 @@ class ProfileDesk(
 
     fun hasManualSecret() = manualSecret != null
 
-    override fun close() = wipeSecrets()
+    override fun close() {
+        val owned = synchronized(gate) { pending.also { pending = null } }
+        scope.cancel()
+        wipeSecrets()
+        owned?.let { release(it.secret) }
+    }
 
     private fun publishSecretClear(connectedProfileId: String?, notice: String?, connect: Connection) {
         // The router runs first: when it refuses, the typed secret stays in its field and only this copy is cleared.
@@ -342,6 +495,7 @@ class ProfileDesk(
                 manualSecretPresent = false,
                 profileSecretPresent = false,
                 secretGeneration = it.secretGeneration + 1,
+                rememberChoice = false,
             )
         }
     }
@@ -375,5 +529,105 @@ class ProfileDesk(
         if (!mutableState.value.saveBlocked) return false
         mutableState.update { it.copy(formError = it.storeMessage ?: "Saved profiles could not be read. The file was left unchanged.") }
         return true
+    }
+
+    private class PendingRemember(val profile: ConnectionProfile, val secret: CharArray, val workspace: Workspace, val epoch: Long)
+
+    private fun watchForSuccess(next: PendingRemember) {
+        val previous = synchronized(gate) { pending.also { pending = next } }
+        previous?.let { release(it.secret) }
+        scope.launch {
+            val seen = try {
+                withTimeoutOrNull(rememberWaitMs) {
+                    next.workspace.state.first { it.connectionEpoch != next.epoch || !it.connected || it.overview != null || it.error != null }
+                }
+            } catch (e: CancellationException) {
+                dropPending(next)
+                throw e
+            }
+            val worked = seen != null && seen.connectionEpoch == next.epoch && seen.connected && seen.overview != null && seen.error == null
+            if (worked) storePending(next) else dropPending(next, "The secret was not remembered because the sign-in did not finish.")
+        }
+    }
+
+    private fun storePending(target: PendingRemember) {
+        val owned = synchronized(gate) { if (pending === target) pending.also { pending = null } else null } ?: return
+        try {
+            if (mutableState.value.vaultStatus !is VaultStatus.Available) return
+            val current = mutableState.value.profiles.find { it.id == owned.profile.id }
+            if (current == null || !current.definesSameConnection(owned.profile)) return
+            vault.store(current.id, current.tokenId, "RingMASTER: ${current.displayName}", owned.secret)
+            synchronized(gate) { rememberedIds.add(owned.profile.id) }
+            persistMarkers()
+            val ids = synchronized(gate) { rememberedIds.toSet() }
+            mutableState.update { it.copy(remembered = ids, notice = "Remembered on this computer.", rememberChoice = false) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: VaultException) {
+            mutableState.update { it.copy(notice = "The secret could not be remembered: ${e.message}") }
+        } catch (_: Throwable) {
+            mutableState.update { it.copy(notice = "The secret could not be remembered: the password safe failed.") }
+        } finally {
+            release(owned.secret)
+        }
+    }
+
+    private fun dropPending(target: PendingRemember? = null, notice: String? = null) {
+        val owned = synchronized(gate) {
+            when {
+                target == null -> pending.also { pending = null }
+                pending === target -> pending.also { pending = null }
+                else -> null
+            }
+        }
+        owned?.let { release(it.secret) }
+        if (notice != null && owned != null) mutableState.update { it.copy(notice = notice) }
+    }
+
+    private fun dropPendingFor(profileId: String) {
+        val owned = synchronized(gate) {
+            val current = pending
+            if (current != null && current.profile.id == profileId) pending.also { pending = null } else null
+        }
+        owned?.let { release(it.secret) }
+    }
+
+    /**
+     * For a deleted or redefined profile. The marker and any pending copy go at once, before this returns: a marker is
+     * what lets Connect read the safe, and the old secret must never be offered to a changed server. The safe is then
+     * asked to forget, marker or not, so no entry is left behind. If it refuses, the entry stays in the safe unused
+     * until Clear everything, and the desk says so.
+     */
+    private fun forgetVaultEntry(profileId: String) {
+        dropPendingFor(profileId)
+        val had = synchronized(gate) { rememberedIds.remove(profileId) }
+        if (had) persistMarkers()
+        val ids = synchronized(gate) { rememberedIds.toSet() }
+        mutableState.update { it.copy(remembered = ids) }
+        scope.launch {
+            try {
+                vault.forget(profileId)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (t: Throwable) {
+                if (had) mutableState.update { it.copy(notice = "The remembered secret could not be removed from ${vault.name}: ${vaultFailureReason(t)} Clear everything in About removes what is left.") }
+            }
+        }
+    }
+
+    private fun persistMarkers() {
+        val ids = synchronized(gate) { rememberedIds.toSet() }
+        runCatching { rememberedProfiles.save(ids) }
+    }
+
+    private fun release(chars: CharArray) {
+        chars.fill('\u0000')
+        onSecretReleased?.invoke(chars)
+    }
+
+    private fun vaultFailureReason(error: Throwable): String = when (error) {
+        is VaultException -> error.message ?: "The password safe could not be used."
+        is UnsatisfiedLinkError, is NoClassDefFoundError -> "The password safe could not be loaded."
+        else -> "The password safe could not be used."
     }
 }

@@ -383,7 +383,7 @@ internal fun pinRowKey(key: androidx.compose.ui.input.key.Key, alt: Boolean, shi
 }
 
 @Composable private fun PinMoreDialog(state: WorkspaceState, store: PinStore, connectionKey: String, hidden: List<Pin>, onDismiss: () -> Unit, onPin: (Pin) -> Unit) {
-    TechDialog("Pinned", onDismiss, width = 420.dp, subtitle = "The rail is showing the first pins.", actions = {
+    TechDialog("Pinned", onDismiss, width = 420.dp, subtitle = "The rail is showing the first pins.", dismiss = Dismiss.Light, actions = {
         TechAction("Close", onClick = onDismiss)
     }) {
         hidden.forEach { pin ->

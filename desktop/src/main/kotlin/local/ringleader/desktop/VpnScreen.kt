@@ -1,6 +1,7 @@
 @file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 package local.ringleader.desktop
 
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -8,7 +9,6 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
@@ -181,7 +181,8 @@ private fun hostOf(address: String?): String? = address?.takeIf { it.isNotBlank(
     confirm?.let { c ->
         val throughIt = c is VpnConfirm.Toggle && session.route?.tunnelId == c.tunnel.id && !c.up
         val lanRisk = c is VpnConfirm.Exit && c.peer != null && !allowLan && privateLanAddress(session.route?.address ?: host)
-        TechDialog(c.title, { confirm = null }, actions = {
+        val cancel = remember { androidx.compose.ui.focus.FocusRequester() }
+        TechDialog(c.title, { confirm = null }, initialFocus = cancel, actions = {
             TechAction(c.action, active = true) {
                 when (c) {
                     is VpnConfirm.Toggle -> {
@@ -215,7 +216,7 @@ private fun hostOf(address: String?): String? = address?.takeIf { it.isNotBlank(
                     }
                 }
             }
-            TechAction("Cancel") { confirm = null }
+            TechAction("Cancel", Modifier.focusRequester(cancel)) { confirm = null }
         }) {
             Text(c.body, fontSize = 13.sp, lineHeight = 19.sp)
             if (c is VpnConfirm.Exit && c.peer != null) TechCheck(allowLan, { allowLan = it }, "Keep this computer's local network reachable")
@@ -378,11 +379,13 @@ private val VpnKind.label get() = when (this) { VpnKind.Tailscale -> "Tailscale"
     val suggested = remember(file) { file.fileName.toString().substringBeforeLast('.').replace(Regex("[^A-Za-z0-9_-]"), "-").take(15).ifBlank { "wg0" } }
     var name by remember(file) { mutableStateOf(suggested) }
     val valid = validWireGuardName(name)
-    TechDialog("Import WireGuard tunnel", onDismiss, subtitle = file.fileName.toString(), actions = {
+    val first = remember { androidx.compose.ui.focus.FocusRequester() }
+    // A form: a stray click outside keeps the typed name. Escape is Cancel.
+    TechDialog("Import WireGuard tunnel", onDismiss, subtitle = file.fileName.toString(), dismiss = Dismiss.Soft, initialFocus = first, actions = {
         TechAction("Import", active = true, enabled = valid) { onImport(name) }
         TechAction("Cancel", onClick = onDismiss)
     }) {
-        TechField(name, { name = it.take(15) }, "Tunnel name",
+        TechField(name, { name = it.take(15) }, "Tunnel name", Modifier.focusRequester(first),
             error = if (valid) null else "Use letters, digits, - and _ only, up to 15 characters.",
             hint = "Letters, digits, - and _, up to 15 characters.")
         Text(if (windows) "The configuration goes into WireGuard's own protected store, so it also appears in the WireGuard app. Windows asks for administrator approval. The tunnel is not brought up yet."

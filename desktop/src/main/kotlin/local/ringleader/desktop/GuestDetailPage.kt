@@ -1,6 +1,7 @@
 @file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 package local.ringleader.desktop
 
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.foundation.border
 import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.interaction.collectIsHoveredAsState
@@ -66,6 +67,10 @@ internal var guestHeaderProbe: (() -> Unit)? = null
     // A dropped connection leaves immersive. Demo is not a connection, so it does not.
     LaunchedEffect(state.connected, state.demo) { if (!state.connected && !state.demo) immersive?.exit() }
     LaunchedEffect(consoleImmersive) { if (!consoleImmersive) guestsOpen = false }
+    // The guests list takes the keyboard back from the console when it opens (the terminal's bar does not clear focus
+    // as the VNC toolbar does), so Escape and the filter field reach the list rather than the guest.
+    val focusManager = androidx.compose.ui.platform.LocalFocusManager.current
+    LaunchedEffect(guestsOpen) { if (guestsOpen) focusManager.clearFocus(force = true) }
     val onShortcut = rememberUpdatedState<(ConsoleShortcut) -> Unit> { shortcut ->
         val list = switcherGuests(state, guest.resource, switcher.runningOnly, switcher.filter)
         when (shortcut) {
@@ -130,7 +135,11 @@ internal var guestHeaderProbe: (() -> Unit)? = null
                 }
             }
             // The tab strip already marks the open tab in amber; this shortcut lights up when the page opens, then settles.
-            ArrivalAction("Console", guest.resource) { tab = "Console" }
+            // A switch in the console rail is not an arrival: the page stays open on its Console tab, and a flash in the
+            // header on every click read as the page reloading.
+            var arrival by remember { mutableStateOf<Any>(guest.resource) }
+            SideEffect { if (tab != "Console" && arrival != guest.resource) arrival = guest.resource }
+            ArrivalAction("Console", arrival) { tab = "Console" }
             WebUiAction(if (state.demo || state.kind == PDM_KIND || guest.scope.isNotEmpty()) null else PveWebUi.guest(state.address, guest.kind, guest.id))
             HelpTip("Refresh") { MiniAction("↻", enabled = !state.inspectionLoading, width = 30.dp) { workspace.inspectGuest() } }
         }
@@ -142,8 +151,13 @@ internal var guestHeaderProbe: (() -> Unit)? = null
         SpiceConsoleMessage(guest)
         if(state.demo) Text("SAMPLE DATA · SIMULATED ACTIONS",color = Tech.Amber,fontFamily=Tech.Mono,fontSize=10.sp,letterSpacing=1.sp)
         if(state.stale) Text("Inventory is stale. Sync in Fleet before actions.",color = Tech.Amber)
-        TechTabs(tabs, tab, { tab = it })
-        if(state.inspectionLoading) TechProgress()
+        // The loading bar is drawn over the tab strip's bottom edge. As a row of its own it pushed everything below down
+        // by its height and the gap while a guest's details loaded, and back afterwards, so every switch in the console
+        // rail made the page and the console picture jump twice.
+        Box(Modifier.fillMaxWidth()) {
+            TechTabs(tabs, tab, { tab = it })
+            if (state.inspectionLoading) TechProgress(Modifier.align(androidx.compose.ui.Alignment.BottomCenter))
+        }
         state.detailsError?.let { Text(it,color = Tech.Red) }
         }
         when(tab) {
@@ -307,9 +321,12 @@ internal var guestHeaderProbe: (() -> Unit)? = null
                         else TerminalView(state, workspace, TerminalTarget.guest(guest), Modifier.fillMaxSize(), onHostShortcut = { onShortcut.value(it) }, onGuests = openGuests)
                     }
                     if (guestsOpen && consoleImmersive && onSwitchGuest != null) {
+                        // Recorded as open: page shortcuts wait, and Escape at the window closes this list first.
+                        RegisterModal(ModalKind.Overlay) { guestsOpen = false }
                         // No fill: a translucent scrim would sit on the live console, and Lite cannot afford one.
                         Box(Modifier.fillMaxSize().clickable(interactionSource = overlayClicks, indication = null) { guestsOpen = false })
-                        ConsoleSwitcher(state, guest, switcher, { picked -> guestsOpen = false; onSwitchGuest(picked) }, Modifier.align(androidx.compose.ui.Alignment.CenterStart).fillMaxHeight())
+                        ConsoleSwitcher(state, guest, switcher, { picked -> guestsOpen = false; onSwitchGuest(picked) },
+                            Modifier.align(androidx.compose.ui.Alignment.CenterStart).fillMaxHeight().blockPointerPassThrough())
                     }
                 }
             }
@@ -415,11 +432,13 @@ internal fun nicExtras(p: Map<String, String>): String = listOfNotNull(
     val nameError = if (name.isEmpty()) null else serviceNameError(name)
     val addressError = if (address.isEmpty()) null else serviceAddressError(address)
     val ready = serviceNameError(name) == null && serviceAddressError(address) == null
-    TechDialog("Pin a service", onDismiss, width = 440.dp, subtitle = "Opens in the system browser. No username or password is stored.", actions = {
+    val first = remember { androidx.compose.ui.focus.FocusRequester() }
+    // A form: a stray click outside keeps what was typed. Escape is Cancel.
+    TechDialog("Pin a service", onDismiss, width = 440.dp, subtitle = "Opens in the system browser. No username or password is stored.", dismiss = Dismiss.Soft, initialFocus = first, actions = {
         TechAction("Pin service", active = true, enabled = ready) { refused = onPin(name.trim(), address.trim()) }
         TechAction("Cancel", onClick = onDismiss)
     }) {
-        TechField(name, { name = it.take(32) }, "Name", placeholder = "AdGuard UI", error = nameError)
+        TechField(name, { name = it.take(32) }, "Name", Modifier.focusRequester(first), placeholder = "AdGuard UI", error = nameError)
         Box(Modifier.fillMaxWidth().identity()) {
             TechField(address, { address = it.take(200) }, "Address", placeholder = "http://192.0.2.8:3000", error = addressError ?: refused,
                 hint = if (addressError == null && refused == null) "http or https, with a host." else null)

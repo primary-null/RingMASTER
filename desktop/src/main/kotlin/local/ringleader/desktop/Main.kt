@@ -15,6 +15,8 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.input.key.*
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -86,6 +88,40 @@ fun desktopMain() = application {
             focused = window.isFocused
             onDispose { window.removeWindowFocusListener(listener) }
         }
+        // Windows snapping needs a real frame. Until that installs (or it is switched off, or it fails) the Compose
+        // drag and resize path stays. A failed install is undone inside the attempt and never stops the window opening.
+        val wantNative = remember { nativeFrameRequested() }
+        var native by remember { mutableStateOf<WindowsNativeFrame?>(null) }
+        var nativeFailed by remember { mutableStateOf(false) }
+        var titleBarRect by remember { mutableStateOf<IntRect?>(null) }
+        var maximizeRect by remember { mutableStateOf<IntRect?>(null) }
+        var minimizeRect by remember { mutableStateOf<IntRect?>(null) }
+        var closeRect by remember { mutableStateOf<IntRect?>(null) }
+        var frameWidth by remember { mutableStateOf(0) }
+        var frameHeight by remember { mutableStateOf(0) }
+        DisposableEffect(window) {
+            var frame: WindowsNativeFrame? = null
+            fun attempt() {
+                if (frame != null || nativeFailed) return
+                val outcome = WindowsNativeFrame.attempt(window, windowState.placement)
+                val installed = outcome.frame
+                if (installed != null) {
+                    installed.onMaximize = { toggleMaximized() }
+                    frame = installed
+                    native = installed
+                } else if (outcome.giveUp) nativeFailed = true
+            }
+            val opener = object : java.awt.event.WindowAdapter() {
+                override fun windowOpened(e: java.awt.event.WindowEvent) { attempt() }
+            }
+            window.addWindowListener(opener)
+            attempt()
+            onDispose {
+                window.removeWindowListener(opener)
+                frame?.uninstall()
+                native = null
+            }
+        }
         val host = remember { DesktopAppHost(WindowControls(
             minimize = { windowState.isMinimized = true },
             maximize = { toggleMaximized() },
@@ -93,54 +129,96 @@ fun desktopMain() = application {
         )) }
         MaterialTheme(colorScheme = ringColors) { CompositionLocalProvider(LocalReduceMotion provides reduce, LocalSetReduceMotion provides { value -> preferences.write(value); reduce=value }) { ThemeCrossfade(Modifier.fillMaxSize()) {  // theme changes crossfade the whole window
             val base = androidx.compose.ui.platform.LocalDensity.current
+            val composeChrome = native == null && (nativeFailed || !wantNative)
+            val fitted = native
+            // Read during composition. SideEffect alone does not subscribe, so a later resize would keep stale hit targets.
+            val publishedWidth = frameWidth
+            val publishedHeight = frameHeight
+            val publishedTitle = titleBarRect
+            val publishedMaximize = maximizeRect
+            val publishedMinimize = minimizeRect
+            val publishedClose = closeRect
+            val publishedPlacement = windowState.placement
+            val publishedShown = !immersive.active
+            val publishedDark = !Appearance.palette.light
+            val publishedEdge = Appearance.palette.edge
+            val publishedBand = (6f * base.density + 0.5f).toInt().coerceAtLeast(1)
+            val publishedCorner = (14f * base.density + 0.5f).toInt().coerceAtLeast(1)
+            SideEffect {
+                val frame = fitted ?: return@SideEffect
+                frame.publish(publishedPlacement, FrameRegions(
+                    width = publishedWidth, height = publishedHeight,
+                    titleBar = if (publishedShown) publishedTitle else null,
+                    maximizeButton = if (publishedShown) publishedMaximize else null,
+                    otherControls = if (publishedShown) listOfNotNull(publishedMinimize, publishedClose) else emptyList(),
+                    resizeBandPx = publishedBand, resizeCornerPx = publishedCorner,
+                    titleBarHeightPx = if (publishedShown) publishedTitle?.height ?: 0 else 0,
+                ), dark = publishedDark, border = colorRef(publishedEdge))
+            }
             // Interface size: scales layout and text together on top of the OS display scaling.
             CompositionLocalProvider(androidx.compose.ui.platform.LocalDensity provides androidx.compose.ui.unit.Density(base.density * Appearance.uiScale, base.fontScale * Appearance.textScale)) {
-            BackdropHost { Surface(Modifier.fillMaxSize(), color = androidx.compose.ui.graphics.Color.Transparent, contentColor = Tech.Ink) { Column {
-                if (!immersive.active) WindowDraggableArea(Modifier.fillMaxWidth()) {
-                    Row(Modifier.fillMaxWidth().background(Tech.Raised).height(32.dp).padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                        // Observe presses without consuming them: a consuming tap detector here swallowed the
-                        // press and WindowDraggableArea never started a drag (verified on Debian/Xfce 0.11.0).
-                        Row(Modifier.weight(1f).pointerInput(Unit) {
-                            awaitPointerEventScope {
-                                var lastPress = 0L
-                                while (true) {
-                                    val event = awaitPointerEvent(PointerEventPass.Initial)
-                                    if (event.type != PointerEventType.Press) continue
-                                    val at = event.changes.firstOrNull()?.uptimeMillis ?: continue
-                                    if (at - lastPress <= viewConfiguration.doubleTapTimeoutMillis) {
-                                        toggleMaximized()
-                                        lastPress = 0L
-                                    } else lastPress = at
+            BackdropHost { Surface(Modifier.fillMaxSize().onGloballyPositioned { frameWidth = it.size.width; frameHeight = it.size.height }, color = androidx.compose.ui.graphics.Color.Transparent, contentColor = Tech.Ink) { Column {
+                if (!immersive.active) {
+                    val row = @Composable {
+                        Row(Modifier.fillMaxWidth().background(Tech.Raised).height(32.dp).padding(horizontal = 12.dp).onGloballyPositioned { titleBarRect = it.frameRect() }, verticalAlignment = Alignment.CenterVertically) {
+                            // Observe presses without consuming them: a consuming tap detector here swallowed the
+                            // press and WindowDraggableArea never started a drag (verified on Debian/Xfce 0.11.0).
+                            // With the native frame, Windows owns the caption drag and the double-click.
+                            val drag = if (composeChrome) Modifier.weight(1f).pointerInput(Unit) {
+                                awaitPointerEventScope {
+                                    var lastPress = 0L
+                                    while (true) {
+                                        val event = awaitPointerEvent(PointerEventPass.Initial)
+                                        if (event.type != PointerEventType.Press) continue
+                                        val at = event.changes.firstOrNull()?.uptimeMillis ?: continue
+                                        if (at - lastPress <= viewConfiguration.doubleTapTimeoutMillis) {
+                                            toggleMaximized()
+                                            lastPress = 0L
+                                        } else lastPress = at
+                                    }
                                 }
+                            } else Modifier.weight(1f)
+                            Row(drag, verticalAlignment = Alignment.CenterVertically) {
+                                androidx.compose.foundation.Image(AppIcon.small, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(8.dp))
+                                Text("RingMASTER", color = Tech.Amber)
                             }
-                        }, verticalAlignment = Alignment.CenterVertically) {
-                            androidx.compose.foundation.Image(AppIcon.small, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(Modifier.width(8.dp))
-                            Text("RingMASTER", color = Tech.Amber)
+                            Box(Modifier.onGloballyPositioned { minimizeRect = it.frameRect() }) {
+                                WindowControl(WindowGlyph.Minimize) { windowState.isMinimized=true }
+                            }
+                            val glyph = if (windowState.placement == WindowPlacement.Maximized) WindowGlyph.Restore else WindowGlyph.Maximize
+                            Box(Modifier.onGloballyPositioned { maximizeRect = it.frameRect() }) {
+                                if (fitted != null) WindowControl(glyph, onClick = null, outsideHovered = fitted.hovered.value, outsidePressed = fitted.pressed.value)
+                                else WindowControl(glyph) { toggleMaximized() }
+                            }
+                            Box(Modifier.onGloballyPositioned { closeRect = it.frameRect() }) {
+                                WindowControl(WindowGlyph.Close) { ConsoleHost.close();exitApplication() }
+                            }
                         }
-                        WindowControl(WindowGlyph.Minimize) { windowState.isMinimized=true }
-                        WindowControl(if (windowState.placement == WindowPlacement.Maximized) WindowGlyph.Restore else WindowGlyph.Maximize) { toggleMaximized() }
-                        WindowControl(WindowGlyph.Close) { ConsoleHost.close();exitApplication() }
                     }
+                    if (composeChrome) WindowDraggableArea(Modifier.fillMaxWidth()) { row() } else row()
                 }
                 Box(Modifier.weight(1f)) { RingApp(host, windowState.isMinimized, focused, immersive) }
             } } } }
             // Resize edges only while floating; they sit outside the interface-size scaling so they keep their physical width.
-            if (windowState.placement == WindowPlacement.Floating) WindowResizeFrame(window, titleBar = 32.dp * Appearance.uiScale)
+            // The native frame answers the same zones from WM_NCHITTEST, so the Compose grabs stay off while it is in.
+            if (windowState.placement == WindowPlacement.Floating && composeChrome) WindowResizeFrame(window, titleBar = 32.dp * Appearance.uiScale)
         } } }
     }
 }
 
 private var desktopShortcuts: ((KeyEvent) -> Boolean)? = null
 
-@Composable fun RingApp(host: AppHost, minimized: Boolean = false, focused: Boolean = true, immersive: ImmersiveState? = null) {
+@Composable fun RingApp(host: AppHost, minimized: Boolean = false, focused: Boolean = true, immersive: ImmersiveState? = null, modals: ModalStack? = null) {
     val immersiveState = immersive ?: remember { ImmersiveState() }
-    if (!host.web) { CompositionLocalProvider(LocalAppHost provides host) { UpdateLifecycle() } }
+    // One record of the open overlays for the window shortcuts, the browser key path and the overlays themselves.
+    val modalStack = modals ?: remember { ModalStack() }
+    if (!host.web) { CompositionLocalProvider(LocalAppHost provides host, LocalModalStack provides modalStack) { UpdateLifecycle() } }
     val motionPreferences = remember { MotionPreferences() }
     var webReduceMotion by remember { mutableStateOf(motionPreferences.read()) }
     val reduceMotion = if (host.web) webReduceMotion else LocalReduceMotion.current
     val setReduceMotion = if (host.web) { value: Boolean -> motionPreferences.write(value); webReduceMotion = value } else LocalSetReduceMotion.current
-    CompositionLocalProvider(LocalAppHost provides host, LocalReduceMotion provides reduceMotion, LocalSetReduceMotion provides setReduceMotion, LocalImmersive provides immersiveState) {
+    CompositionLocalProvider(LocalAppHost provides host, LocalReduceMotion provides reduceMotion, LocalSetReduceMotion provides setReduceMotion, LocalImmersive provides immersiveState, LocalModalStack provides modalStack) {
     MaterialTheme(colorScheme = ringColors) {
     val base = androidx.compose.ui.platform.LocalDensity.current
     CompositionLocalProvider(androidx.compose.ui.platform.LocalDensity provides androidx.compose.ui.unit.Density(if(host.web) base.density * Appearance.uiScale else base.density, if (host.web) base.fontScale * Appearance.textScale else base.fontScale)) {
@@ -152,10 +230,11 @@ private var desktopShortcuts: ((KeyEvent) -> Boolean)? = null
 @Composable private fun RingLeader(host: AppHost, minimized:Boolean, focused:Boolean) {
     val platform = remember { platformLabel() }
     val reduceMotion = LocalReduceMotion.current
+    val modals = LocalModalStack.current
     val scope = rememberCoroutineScope()
     // Several connections can be open at once. Each has its own workspace; one is in view and the desk is attached to it.
     val sessions = remember { Sessions(scope) { Workspace(scope) } }
-    val desk = remember { ProfileDesk(sessions.state.value.active.workspace, ProfileStore(profileFile()).apply { onNewerSchema = SaveStatus::notice }).also(sessions::bind) }
+    val desk = remember { ProfileDesk(sessions.state.value.active.workspace, ProfileStore(profileFile()).apply { onNewerSchema = SaveStatus::notice }, vault = SystemVault.forHost(host.web), rememberedProfiles = RememberedProfiles(profileFile().resolveSibling("remembered.json"))).also(sessions::bind) }
     DisposableEffect(sessions) { onDispose { desk.close(); sessions.close() } }
     val sessionsState by sessions.state.collectAsState()
     var scannedSelection by remember { mutableStateOf<ScanHit?>(null) }
@@ -216,7 +295,7 @@ private var desktopShortcuts: ((KeyEvent) -> Boolean)? = null
             if(it.key==Key.Comma) { settingsOpen = true;true } else if(it.key==Key.F && page=="Fleet") { runCatching { searchFocus.requestFocus() };true } else if(target!=null) { page=target;true } else if(it.key==Key.B && it.isShiftPressed) { Appearance.toggleShowcase();true } else if(it.key==Key.Equals || it.key==Key.Plus || it.key==Key.NumPadAdd) { Appearance.zoom(1);true } else if(it.key==Key.Minus || it.key==Key.NumPadSubtract) { Appearance.zoom(-1);true } else if(it.key==Key.Zero || it.key==Key.NumPad0) { Appearance.chooseScale(null);true } else if(it.key==Key.B) { railToggle++;true } else false
         } else false
     })
-    DisposableEffect(host) { host.shortcuts = { Shortcuts.handle(it, pageKeys) }; if (!host.web) desktopShortcuts = host.shortcuts; onDispose { host.shortcuts = null; if(!host.web) desktopShortcuts = null } }
+    DisposableEffect(host) { host.shortcuts = { Shortcuts.handle(it, pageKeys, modals) }; if (!host.web) desktopShortcuts = host.shortcuts; onDispose { host.shortcuts = null; if(!host.web) desktopShortcuts = null } }
     val connectionKey = pinConnectionKey(state.demo, deskState.connectedProfileId, state.address)
     // Pins saved on a manual connection live under the origin. When this session moves from that manual connection to
     // the saved profile for the same server, kind and account, they move onto the profile once. Profile to profile never adopts.
@@ -328,20 +407,32 @@ internal fun sessionLabel(state: WorkspaceState, profile: ConnectionProfile?): S
 }
 
 /**
- * Window-level keyboard shortcuts. Global ones (zoom, showcase) are handled here; page ones (Ctrl 1-9, Ctrl F,
- * Ctrl B, F5) are registered by the workspace. Handling them at the window means they work with no focused field.
+ * True when a console that has the keyboard keeps every key. A dialog, Settings or an in-page overlay on top of it holds
+ * the keyboard instead, so the guest cannot receive keys and the window handles them. The node shell is itself the
+ * console ([ModalKind.Shell]), so it keeps them.
  */
+internal fun consoleOwnsKeys(captured: Boolean, top: ModalKind?): Boolean = captured && (top == null || top == ModalKind.Shell)
+
+/** Window shortcuts. Page keys wait while an overlay is open; Ctrl+, closes Settings when it is on top. */
 object Shortcuts {
-    fun handle(e: androidx.compose.ui.input.key.KeyEvent, page: ((androidx.compose.ui.input.key.KeyEvent) -> Boolean)? = null): Boolean {
+    fun handle(e: androidx.compose.ui.input.key.KeyEvent, page: ((androidx.compose.ui.input.key.KeyEvent) -> Boolean)? = null, modals: ModalStack? = null): Boolean {
         if (e.key == Key.AltLeft || e.key == Key.AltRight) Appearance.revealHeld = e.type == KeyEventType.KeyDown
         if (e.type != KeyEventType.KeyDown) return false
-        // While a VM console has the keyboard, every key belongs to the guest (Ctrl+B, Ctrl+1-9, F5 included).
-        if (VncKeyboard.captured) return false
+        val top = modals?.top
+        // While a VM console or the node shell has the keyboard, every key belongs to it (Ctrl+B, Ctrl+1-9, F5, zoom and
+        // Ctrl+, included), unless a dialog or overlay is open above it.
+        if (consoleOwnsKeys(VncKeyboard.captured, top?.kind)) return false
         if (e.isCtrlPressed) when {
             e.key == Key.B && e.isShiftPressed -> { Appearance.toggleShowcase(); return true }
             e.key == Key.Equals || e.key == Key.Plus || e.key == Key.NumPadAdd -> { Appearance.zoom(1); return true }
             e.key == Key.Minus || e.key == Key.NumPadSubtract -> { Appearance.zoom(-1); return true }
             e.key == Key.Zero || e.key == Key.NumPad0 -> { Appearance.chooseScale(null); return true }
+        }
+        if (top != null) {
+            if (e.isCtrlPressed && e.key == Key.Comma) { if (top.kind == ModalKind.Settings) modals.closeTop(); return true }
+            // An in-page overlay (the guests list) has no dialog layer to take Escape, so it is closed from here.
+            if (e.key == Key.Escape && !e.isCtrlPressed && !e.isAltPressed && !e.isShiftPressed && !e.isMetaPressed && top.kind == ModalKind.Overlay) return modals.closeTop()
+            return false
         }
         return page?.invoke(e) ?: false
     }

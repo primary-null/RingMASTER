@@ -12,6 +12,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.ImageComposeScene
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.key.*
+import androidx.compose.ui.semantics.SemanticsNode
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.unit.Density
 import java.awt.event.KeyEvent as AwtKey
 import kotlinx.coroutines.CoroutineScope
@@ -27,6 +30,7 @@ import local.ringleader.core.PDM_KIND
 import local.ringleader.core.ResourceId
 import local.ringleader.core.Workspace
 import local.ringleader.core.WorkspaceState
+import java.nio.file.Files
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -152,4 +156,68 @@ class ConsoleSwitcherTest {
         copy[0] = 9
         assertEquals(1, pixels[0], "the view buffer is not the copy that is kept")
     }
+
+    @Test fun keepMinutesOutsideTheChoicesReadsAsTen() {
+        assertEquals(10, consoleKeepMinutes(7))
+        assertEquals(10, consoleKeepMinutes(-1))
+        assertEquals(0, consoleKeepMinutes(0))
+        assertEquals(5, consoleKeepMinutes(5))
+        assertEquals(60, consoleKeepMinutes(60))
+    }
+
+    @Test fun choosingAKeepTimeWritesTheSanitizedValue() {
+        val saved = ConsoleKeepPreference.minutes
+        val file = Files.createTempFile("motion-", ".txt")
+        try {
+            val prefs = MotionPreferences(file)
+            ConsoleKeepPreference.choose(30, prefs)
+            assertEquals(30, ConsoleKeepPreference.minutes)
+            assertEquals(30, prefs.number(CONSOLE_KEEP_MINUTES_KEY, -1))
+            ConsoleKeepPreference.choose(7, prefs)
+            assertEquals(10, ConsoleKeepPreference.minutes)
+            assertEquals(10, prefs.number(CONSOLE_KEEP_MINUTES_KEY, -1))
+        } finally {
+            ConsoleKeepPreference.preview(saved)
+            Files.deleteIfExists(file)
+        }
+    }
+
+    @Test fun aKeptRowShowsADotOnlyWhenItIsNotCurrent() = runBlocking<Unit> {
+        val alpha = guest(1, "alpha", "n")
+        val beta = guest(2, "beta", "n")
+        val kept = state(alpha, beta).copy(keptConsoles = setOf(alpha.resource, beta.resource))
+        val none = state(alpha, beta)
+        assertEquals(1, keptDots(kept, alpha, expanded = true), "the other kept guest shows the dot")
+        assertEquals(1, keptDots(kept, beta, expanded = true), "the dot follows whoever is not on screen")
+        assertEquals(0, keptDots(none, alpha, expanded = true))
+        assertEquals(1, keptDots(kept, alpha, expanded = false), "the folded row keeps the same dot")
+    }
+
+    private suspend fun keptDots(fleet: WorkspaceState, current: Guest, expanded: Boolean): Int {
+        val switcher = ConsoleSwitcherState().also { it.fold(expanded) }
+        val scene = ImageComposeScene(420, 320, Density(1f), coroutineContext = kotlin.coroutines.coroutineContext) {
+            MaterialTheme(colorScheme = ringColors) {
+                CompositionLocalProvider(LocalReduceMotion provides true) {
+                    Surface(Modifier.fillMaxSize(), color = Tech.Canvas, contentColor = Tech.Ink) {
+                        ConsoleSwitcher(fleet, current, switcher, {}, Modifier.fillMaxSize())
+                    }
+                }
+            }
+        }
+        try {
+            scene.render(16_000_000L).close(); yield()
+            scene.render(32_000_000L).close(); yield()
+            return switcherDescriptions(scene).count { it == "Console kept open. Switching back is instant." }
+        } finally { scene.close() }
+    }
+}
+
+private fun switcherDescriptions(scene: ImageComposeScene): List<String> {
+    val out = ArrayList<String>()
+    fun visit(node: SemanticsNode) {
+        node.config.getOrNull(SemanticsProperties.ContentDescription)?.let { out += it }
+        node.children.forEach { visit(it) }
+    }
+    scene.semanticsOwners.forEach { visit(it.rootSemanticsNode) }
+    return out
 }

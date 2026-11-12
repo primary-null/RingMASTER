@@ -37,6 +37,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.*
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupPositionProvider
+import androidx.compose.ui.window.PopupProperties
 import local.ringleader.core.*
 import java.time.Instant
 import java.time.ZoneId
@@ -380,34 +383,89 @@ private fun Modifier.sparkTrack(cursor: SparkHover): Modifier =
 }
 
 /**
- * The only composable that reads the hover position. Past 60% of the width the bubble sits to the left of the pointer.
- * It stays inside the window, and inside the chart when there is no room above it (a chart that fills the scene).
+ * Window position of a hover readout. Past 60% of the anchor width it sits left of the pointer.
+ * It prefers the space above the anchor, then below, and is clamped to the window either way.
+ * [above] false keeps the history readout beside the crosshair (a few pixels down from the plot top).
  */
-@Composable private fun BoxScope.SparkBubble(cursor: SparkHover, count: Int, textAt: (Int) -> String) {
-    val x = cursor.x ?: return
-    BoxWithConstraints(Modifier.matchParentSize()) {
-        val widthPx = constraints.maxWidth.toFloat()
-        val index = sparkNearestIndex(x, widthPx, count) ?: return@BoxWithConstraints
-        val text = textAt(index)
-        var bubble by remember { mutableStateOf(IntSize.Zero) }
-        var chartAt by remember { mutableStateOf(Offset.Zero) }
-        val window = LocalWindowInfo.current.containerSize
-        Box(Modifier.matchParentSize().onGloballyPositioned { chartAt = it.positionInWindow() }) {
-            val windowW = window.width
-            val limit = if (windowW > 0) windowW.toFloat() else widthPx
-            val originX = if (windowW > 0) chartAt.x else 0f
-            var left = if (x > widthPx * .6f) x - 8f - bubble.width else x + 8f
-            if (bubble.width > 0) {
-                if (originX + left + bubble.width > limit) left = limit - originX - bubble.width
-                if (originX + left < 0f) left = -originX
-            }
-            val top = if (window.height > 0 && bubble.height > 0 && chartAt.y >= bubble.height + 2) -bubble.height.toFloat() else 4f
-            Surface(Modifier.offset { IntOffset(left.roundToInt(), top.roundToInt()) }.onSizeChanged { bubble = it },
-                color = Tech.Raised, shape = Tech.Control, border = BorderStroke(1.dp, Tech.Edge),
-                shadowElevation = if (LocalMotion.current.lite) 0.dp else 4.dp) {
-                Text(text, Modifier.padding(horizontal = 6.dp, vertical = 3.dp), color = Tech.Ink, fontSize = 10.sp, fontFamily = Tech.Mono, maxLines = 1)
-            }
+internal fun hoverBubblePosition(
+    pointerX: Float, anchor: IntRect, bubble: IntSize, window: IntSize,
+    center: Boolean = false, above: Boolean = true, gap: Int = 8, besideTop: Int = 6,
+): IntOffset {
+    val width = anchor.width.coerceAtLeast(1)
+    var left = if (center) anchor.left + (anchor.width - bubble.width) / 2
+        else if (pointerX > width * 0.6f) anchor.left + pointerX.roundToInt() - gap - bubble.width
+        else anchor.left + pointerX.roundToInt() + gap
+    if (bubble.width > 0 && window.width > 0) {
+        if (left + bubble.width > window.width) left = window.width - bubble.width
+        if (left < 0) left = 0
+    }
+    val top = if (!above) {
+        var y = anchor.top + besideTop
+        if (bubble.height > 0 && window.height > 0) {
+            if (y + bubble.height > window.height) y = window.height - bubble.height
+            if (y < 0) y = 0
         }
+        y
+    } else {
+        val aboveY = anchor.top - bubble.height
+        val belowY = anchor.bottom
+        var y = when {
+            bubble.height <= 0 -> anchor.top
+            window.height <= 0 -> if (anchor.top >= bubble.height + 2) aboveY else anchor.top + 4
+            aboveY >= 0 -> aboveY
+            belowY + bubble.height <= window.height -> belowY
+            else -> (window.height - bubble.height).coerceAtLeast(0)
+        }
+        if (bubble.height > 0 && window.height > 0) {
+            if (y < 0) y = 0
+            if (y + bubble.height > window.height) y = (window.height - bubble.height).coerceAtLeast(0)
+        }
+        y
+    }
+    return IntOffset(left, top)
+}
+
+private class HoverBubblePosition(
+    private val pointerX: Float, private val center: Boolean, private val above: Boolean, private val gap: Int, private val besideTop: Int,
+) : PopupPositionProvider {
+    override fun calculatePosition(anchorBounds: IntRect, windowSize: IntSize, layoutDirection: LayoutDirection, popupContentSize: IntSize): IntOffset =
+        hoverBubblePosition(pointerX, anchorBounds, popupContentSize, windowSize, center, above, gap, besideTop)
+}
+
+private val readoutPopupProperties = PopupProperties(
+    focusable = false, dismissOnBackPress = false, dismissOnClickOutside = false,
+    clippingEnabled = false, usePlatformDefaultWidth = false, usePlatformInsets = false,
+)
+
+/**
+ * A scene-layer readout. It is not a child of the chart, so a clipped fleet row cannot crop it,
+ * and it does not take the click (not focusable, and it does not dismiss on an outside press).
+ */
+@Composable internal fun HoverReadoutPopup(
+    pointerX: Float, center: Boolean = false, above: Boolean = true, gap: Int = 8, besideTop: Int = 6,
+    content: @Composable () -> Unit,
+) {
+    val window = LocalWindowInfo.current.containerSize
+    val maxWidth = with(LocalDensity.current) { (window.width.takeIf { it > 24 } ?: 480).toDp() - 8.dp }
+    val position = remember(pointerX, center, above, gap, besideTop) { HoverBubblePosition(pointerX, center, above, gap, besideTop) }
+    Popup(popupPositionProvider = position, onDismissRequest = null, properties = readoutPopupProperties) {
+        Surface(color = Tech.Raised, shape = Tech.Control, border = BorderStroke(1.dp, Tech.Edge),
+            shadowElevation = if (LocalMotion.current.lite) 0.dp else 4.dp) {
+            Box(Modifier.widthIn(max = maxWidth)) { content() }
+        }
+    }
+}
+
+/** The only composable that reads the hover position for one sparkline. Past 60% of the width the bubble sits to the left. */
+@Composable private fun BoxScope.SparkBubble(cursor: SparkHover, count: Int, textAt: (Int) -> String) {
+    // Measured even before the pointer arrives, so the first hover frame already knows the chart width.
+    // The popup's anchor is this sparkline, not this zero-content box.
+    var width by remember { mutableIntStateOf(0) }
+    Box(Modifier.matchParentSize().onSizeChanged { width = it.width })
+    val x = cursor.x ?: return
+    val index = sparkNearestIndex(x, width.toFloat(), count) ?: return
+    HoverReadoutPopup(pointerX = x) {
+        Text(textAt(index), Modifier.padding(horizontal = 6.dp, vertical = 3.dp), color = Tech.Ink, fontSize = 10.sp, fontFamily = Tech.Mono, maxLines = 2)
     }
 }
 
@@ -581,15 +639,12 @@ internal fun shortRate(value: Double?): String = when {
     }
 }
 
-/** Immediate readout. HelpTip waits 450 ms, which is too slow for a value under the pointer. */
-@Composable private fun BoxScope.GaugeTip(hovered: Boolean, value: Double?, detail: String?, series: Series?, metric: (Sample) -> Double?) {
+/** Immediate readout, above the gauge. HelpTip waits 450 ms, which is too slow for a value under the pointer. */
+@Composable private fun GaugeTip(hovered: Boolean, value: Double?, detail: String?, series: Series?, metric: (Sample) -> Double?) {
     if (!hovered) return
-    Box(Modifier.matchParentSize().wrapContentSize(Alignment.TopCenter, unbounded = true)) {
-        Surface(color = Tech.Raised, shape = Tech.Control, border = BorderStroke(1.dp, Tech.Edge),
-            shadowElevation = if (LocalMotion.current.lite) 0.dp else 4.dp) {
-            Text(gaugeHoverText(value, detail, series, metric), Modifier.padding(horizontal = 6.dp, vertical = 3.dp),
-                color = Tech.Ink, fontSize = 10.sp, fontFamily = Tech.Mono, textAlign = TextAlign.Center)
-        }
+    HoverReadoutPopup(pointerX = 0f, center = true) {
+        Text(gaugeHoverText(value, detail, series, metric), Modifier.padding(horizontal = 6.dp, vertical = 3.dp),
+            color = Tech.Ink, fontSize = 10.sp, fontFamily = Tech.Mono, textAlign = TextAlign.Center)
     }
 }
 
@@ -831,7 +886,7 @@ internal fun syncedAgo(updatedAt: java.time.Instant?, now: java.time.Instant): S
             }
             var permissions by remember { mutableStateOf(false) }
             HelpTip("What this sign-in is allowed to do, feature by feature") { MiniAction("Permissions", enabled = state.connected || state.demo) { permissions = true } }
-            if (permissions) TechDialog("Permissions", { permissions = false }, width = 860.dp, subtitle = "Effective privileges of the signed-in identity, read from the server", actions = {
+            if (permissions) TechDialog("Permissions", { permissions = false }, width = 860.dp, subtitle = "Effective privileges of the signed-in identity, read from the server", dismiss = Dismiss.Light, actions = {
                 TechAction("Done", active = true) { permissions = false }
             }) { PermissionsPanel(state, workspace, framed = false) }
             MiniAction("Disconnect", enabled = state.connected || state.demo, onClick = onDisconnect)

@@ -9,7 +9,6 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
@@ -29,7 +28,6 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -226,7 +224,8 @@ internal fun historyChartDescription(title: String, latest: String?, min: String
             Column(Modifier.width(axisWidth).height(plotHeight).padding(end = 8.dp), verticalArrangement = Arrangement.SpaceBetween) {
                 listOf(max, max * .75, max / 2, max * .25, 0.0).forEach { Text(axisFormat(it), Modifier.fillMaxWidth(), fontSize = 9.sp, color = Tech.Muted, fontFamily = Tech.Mono, textAlign = TextAlign.End, maxLines = 1) }
             }
-            Box(Modifier.weight(1f).height(plotHeight).clipToBounds().onSizeChanged { chartSize = it }
+            Box(Modifier.weight(1f).height(plotHeight)) {
+            Box(Modifier.fillMaxSize().clipToBounds().onSizeChanged { chartSize = it }
                 .semantics { contentDescription = description }
                 .onPointerEvent(PointerEventType.Move) { event ->
                     val x = event.changes.firstOrNull()?.position?.x ?: return@onPointerEvent
@@ -295,8 +294,8 @@ internal fun historyChartDescription(title: String, latest: String?, min: String
                             }
                         }
                     }
-                }) {
-                HistoryReadout(shared, points, { inside }, { chartSize.width }, activeKeys, readoutClock, ::historySeriesName, format, ::seriesColor)
+                })
+            HistoryReadout(shared, points, { inside }, { chartSize.width }, activeKeys, readoutClock, ::historySeriesName, format, ::seriesColor)
             }
         }
         // One time label per ~110 dp of plot, between 2 and 5, so labels never run into each other. Uses the plot's
@@ -343,8 +342,7 @@ internal fun historyChartDescription(title: String, latest: String?, min: String
     val p = shared.instant?.let { nearestHistory(points, it) } ?: return
     val w = width().coerceAtLeast(1)
     val x = ((p.time - points.first().time) / (points.last().time - points.first().time).coerceAtLeast(1.0) * w).toFloat()
-    Surface(Modifier.offset { IntOffset(if (x > w * .6f) (x.toInt() - 12 - 170.dp.roundToPx()).coerceAtLeast(0) else x.toInt() + 12, 6) }, color = Tech.Raised, shape = Tech.Control,
-        border = androidx.compose.foundation.BorderStroke(1.dp, Tech.Edge), shadowElevation = 4.dp) {
+    HoverReadoutPopup(pointerX = x, above = false, gap = 12, besideTop = 6) {
         Column(Modifier.padding(horizontal = 8.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Text(clock.format(Instant.ofEpochSecond(p.time.toLong())), color = Tech.Muted, fontSize = 9.sp, fontFamily = Tech.Mono)
             keys.forEach { k -> Text("${name(k)}  ${format(p.values[k])}", color = color(k), fontSize = 10.sp, fontFamily = Tech.Mono) }

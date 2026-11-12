@@ -3,6 +3,7 @@ package local.ringleader.desktop
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import local.ringleader.core.SecretVault
 import local.ringleader.core.createOwnerOnlyDirectories
 import local.ringleader.core.profileFile
 import java.nio.file.Files
@@ -53,11 +54,27 @@ object AppData {
         "Window placement, rail, live-refresh and update preferences",
         "Configuration backups",
         "A leftover console browser profile, if one is in the cache",
+        REMEMBERED,
     )
 
-    /** Deletes everything in [configDir] except [KEPT], and the console browser profile. Returns the paths it could not remove. */
-    fun clearAll(config: Path = configDir, cache: Path = cacheDir): List<String> {
+    /** Shown in the wipe list. [vaultName] replaces the generic sentence when the dialog already has the safe's name. */
+    const val REMEMBERED = "Secrets remembered in Windows Credential Manager or your password safe"
+
+    fun rememberedLine(vaultName: String?): String =
+        if (vaultName.isNullOrBlank()) REMEMBERED else "Secrets remembered in $vaultName"
+
+    /**
+     * Forgets every remembered secret, then deletes everything in [config] except [KEPT], and the console browser profile.
+     * A vault failure is one line in the result; the files are still wiped. Call off the UI thread: the safe may prompt.
+     */
+    fun clearAll(config: Path = configDir, cache: Path = cacheDir, vault: SecretVault = SystemVault.instance): List<String> {
         val failed = mutableListOf<String>()
+        try {
+            vault.forgetAll()
+        } catch (t: Throwable) {
+            val reason = (t.message ?: "the password safe failed.").take(180)
+            failed += "Remembered secrets in ${vault.name} ($reason)"
+        }
         fun wipe(path: Path) {
             if (!Files.exists(path)) return
             runCatching {

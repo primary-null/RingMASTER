@@ -55,6 +55,8 @@ class LiveConsoleSwitchTest {
         val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
         val workspace = Workspace(scope)
         val sceneThread = java.util.concurrent.Executors.newSingleThreadExecutor().asCoroutineDispatcher()
+        val savedKeep = ConsoleKeepPreference.minutes
+        ConsoleKeepPreference.preview(10)
         try {
             workspace.connect(origin.toString().trimEnd('/'), raw.substringBefore('='), raw.substringAfter('='), pin)
             runBlocking { withTimeout(30_000) { while (workspace.state.value.overview?.guests?.count { it.id in ids && it.status == "running" } != 2) delay(250) } }
@@ -96,6 +98,7 @@ class LiveConsoleSwitchTest {
                 // Captured: Ctrl+Alt+PageDown goes to the next guest in the rail.
                 press(AwtKey.VK_PAGE_DOWN)
                 assertTrue(pumpUntil(10_000) { selected() == b.id }, "Ctrl+Alt+PageDown moved to B")
+                assertTrue(pumpUntil(10_000) { a.resource in workspace.state.value.keptConsoles }, "A stayed open after leaving it")
                 assertTrue(pumpUntil(10_000) { workspace.state.value.consoleStills[a.resource] != null }, "A's last frame became its thumbnail")
                 pump(6_000)
                 shot("switch-4-console-b-thumb-a.png")
@@ -112,6 +115,8 @@ class LiveConsoleSwitchTest {
                 move(800f, 500f); pump(300)
                 press(AwtKey.VK_PAGE_UP)
                 assertTrue(pumpUntil(10_000) { selected() == a.id }, "Ctrl+Alt+PageUp moved back to A in immersive")
+                assertTrue(pumpUntil(10_000) { a.resource !in workspace.state.value.keptConsoles }, "A was taken back from the kept set")
+                log("A returned from the kept set")
                 assertTrue(immersive.active, "immersive stays on across a switch")
                 pump(5_000)
                 shot("switch-8-immersive-a.png")
@@ -131,6 +136,6 @@ class LiveConsoleSwitchTest {
                 assertNotNull(workspace.state.value.consoleStills[b.resource], "B's frame kept too")
                 log("all steps passed")
             } finally { runBlocking(sceneThread) { scene.close() } }
-        } finally { sceneThread.close(); workspace.close(); scope.cancel() }
+        } finally { ConsoleKeepPreference.preview(savedKeep); sceneThread.close(); workspace.close(); scope.cancel() }
     }
 }

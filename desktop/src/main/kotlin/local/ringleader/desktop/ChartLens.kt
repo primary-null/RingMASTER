@@ -168,6 +168,9 @@ fun Modifier.opensLens(request: () -> LensRequest): Modifier = composed {
 @Composable private fun ChartLensLayer(lens: ChartLensState, state: WorkspaceState, workspace: Workspace) {
     var shown by remember { mutableStateOf<LensRequest?>(null) }
     val request = lens.request
+    // Recorded as an overlay only while it is open, so page shortcuts wait behind it and are back as soon as it starts
+    // to close: the frame stays composed for the closing animation, the record does not.
+    if (request != null) RegisterModal(ModalKind.Overlay, lens::close)
     SideEffect { if (request != null) shown = request }
     val display = request ?: shown ?: return
     val reduce = LocalReduceMotion.current || LocalMotion.current.reduced

@@ -96,9 +96,20 @@ internal fun offeredAssetLines(asset: UpdateAsset): List<String> {
     DisposableEffect(checker) { val job=checker.schedule(scope); onDispose { job.cancel() } }
     var prompt by remember { mutableStateOf(false) }
     LaunchedEffect(state == UpdateState.NeedsConsent) { if(state == UpdateState.NeedsConsent) { delay(5000); prompt=true } }
-    if(prompt && state == UpdateState.NeedsConsent) TechDialog("Check for updates?", { checker.consent(false); prompt=false }, subtitle="Your choice can be changed in Settings.",actions={
-        TechAction("Check automatically",active=true) { checker.consent(true); prompt=false; scope.launch { checker.check() } }
-        TechAction("Not now") { checker.consent(false); prompt=false }
+    if(prompt && state == UpdateState.NeedsConsent) UpdateConsentDialog({ yes ->
+        checker.consent(yes); prompt=false
+        if (yes) scope.launch { checker.check() }
+    }) { prompt=false }
+}
+
+/**
+ * The first-run question. Only the two buttons call [onAnswer]. Escape calls [onClose], which puts the question away
+ * with no answer saved, so it is asked again on a later start; a click outside does nothing (a confirmation).
+ */
+@Composable internal fun UpdateConsentDialog(onAnswer: (Boolean) -> Unit, onClose: () -> Unit) {
+    TechDialog("Check for updates?", onClose, subtitle="Your choice can be changed in Settings.",actions={
+        TechAction("Check automatically",active=true) { onAnswer(true) }
+        TechAction("Not now") { onAnswer(false) }
     }) {
         Text(UPDATE_CONSENT,fontSize=13.sp,color=Tech.Ink)
     }

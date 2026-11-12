@@ -16,6 +16,14 @@ JediTerm (org.jetbrains.jediterm:jediterm-core 3.69)
   links above; write to the RingMASTER maintainer for a copy of the
   corresponding JediTerm source if the links stop working.
 
+JNA (net.java.dev.jna:jna 5.19.1)
+  Calls the Windows credential store and libsecret for Remember on this computer.
+  Copyright the Java Native Access authors and contributors.
+  License: Apache License 2.0. JNA is dual-licensed Apache-2.0 or
+  LGPL-2.1-or-later; RingMASTER uses it under Apache-2.0.
+  https://github.com/java-native-access/jna
+  https://www.apache.org/licenses/LICENSE-2.0
+
 Other libraries (Kotlin, kotlinx, Compose Multiplatform, Ktor, JCEF,
 Skiko) are distributed under the Apache License 2.0 or BSD-style
 licenses. See each project's repository for its notice.

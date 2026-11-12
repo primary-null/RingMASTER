@@ -16,11 +16,15 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.*
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
@@ -32,6 +36,28 @@ import local.ringleader.core.*
 internal object ConsoleSwitcherPreference {
     var expanded = true
     var runningOnly = true
+}
+
+/** Persisted keep time. Anything other than Off, 5, 10, 30 or 60 minutes reads as 10. */
+internal const val CONSOLE_KEEP_MINUTES_KEY = "console.keepMinutes"
+
+internal fun consoleKeepMinutes(value: Int): Int =
+    if (value == 0 || value == 5 || value == 10 || value == 30 || value == 60) value else CONSOLE_KEEP_DEFAULT_MINUTES
+
+internal object ConsoleKeepPreference {
+    var minutes by mutableStateOf(consoleKeepMinutes(runCatching {
+        MotionPreferences().number(CONSOLE_KEEP_MINUTES_KEY, CONSOLE_KEEP_DEFAULT_MINUTES)
+    }.getOrDefault(CONSOLE_KEEP_DEFAULT_MINUTES)))
+        private set
+
+    fun choose(value: Int, prefs: MotionPreferences = MotionPreferences()) {
+        val next = consoleKeepMinutes(value)
+        minutes = next
+        prefs.putNumber(CONSOLE_KEEP_MINUTES_KEY, next)
+    }
+
+    /** In-memory only, so a test can force a keep time without writing the owner's preferences. */
+    fun preview(value: Int) { minutes = consoleKeepMinutes(value) }
 }
 
 /** The rail's guests: this connection's guests with a page, templates left out, by node then VMID. The current guest is always listed. */
@@ -72,6 +98,15 @@ internal fun consoleShortcut(event: KeyEvent): ConsoleShortcut? {
  * Set while the guest page is on its Console tab, so a shortcut reaches the page when the console does not hold the
  * keyboard. Cleared when that tab leaves the composition.
  */
+/**
+ * Takes every press inside a panel that floats over a click-to-close layer, so a click on its header or padding stays
+ * on the panel instead of reaching the layer beneath (the same guard as the chart lens panel). Nothing is consumed, so
+ * the panel's own rows and buttons still get their clicks.
+ */
+internal fun Modifier.blockPointerPassThrough(): Modifier = pointerInput(Unit) {
+    awaitPointerEventScope { while (true) awaitPointerEvent(PointerEventPass.Initial) }
+}
+
 internal object ConsoleKeys {
     var handler: ((KeyEvent) -> Boolean)? = null
 }
@@ -164,23 +199,36 @@ internal fun consoleFrameToKeep(shown: Boolean, width: Int, height: Int, pixels:
         .pointerHoverIcon(PointerIcon.Hand)
         .clickable(interactionSource = interactions, indication = null, enabled = !current, onClick = onClick)
         .padding(horizontal = 4.dp, vertical = 4.dp)
+    val kept = !current && guest.resource in state.keptConsoles
     if (!expanded) {
         HelpTip(guest.name.ifBlank { "Guest ${guest.id}" }, identity = true) {
             Row(row, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 StatusDot(guest.status)
+                if (kept) KeptDot()
                 Text("${guest.id}", fontFamily = Tech.Mono, fontSize = 10.sp, color = if (current) Tech.Amber else Tech.Muted, maxLines = 1)
             }
         }
         return
     }
     Row(row, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        GuestThumb(state, guest)
+        Box {
+            GuestThumb(state, guest)
+            if (kept) KeptDot(Modifier.align(Alignment.TopEnd))
+        }
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
             Text(guest.name.ifBlank { "Guest ${guest.id}" }, Modifier.identity(), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, color = Tech.Ink)
             Text("${if (guest.kind == "VM") "VM" else "CT"} ${guest.id} · ${guest.node}", Modifier.identity(), color = Tech.Muted, fontFamily = Tech.Mono, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             if (guest.status == "running") Sparkline(state.history.guests[guest.resource] ?: Series(), Modifier.size(48.dp, 10.dp), grid = false, pulse = false)
         }
         StatusDot(guest.status)
+    }
+}
+
+@Composable private fun KeptDot(modifier: Modifier = Modifier) {
+    HelpTip("Console kept open. Switching back is instant.") {
+        Box(modifier.size(6.dp).background(Tech.Green, CircleShape).semantics {
+            contentDescription = "Console kept open. Switching back is instant."
+        })
     }
 }
 

@@ -31,6 +31,8 @@ import androidx.compose.ui.input.pointer.isSecondaryPressed
 import androidx.compose.ui.input.pointer.isTertiaryPressed
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.style.TextOverflow
@@ -254,11 +256,27 @@ private fun sendCtrlAltDel(session: VncSession) {
 }
 
 /**
- * In-app VNC console. Opens [Workspace.openConsole] while composed and closes it when the guest,
- * connection, or this view leaves the composition.
+ * In-app VNC console. A console the user has opened stays paused after they leave it, and coming back within the
+ * keep time shows that same session. The power-on reveal plays only for a fresh connection.
  */
 /** Set by a test. Runs once each time a console view enters composition, with no guest key of its own. */
 internal var consoleViewBirthProbe: ((ResourceId) -> Unit)? = null
+
+/**
+ * A kept console taken during composition. Taking it resumes the session, so a composition that is thrown away before
+ * it is applied must hand it back: the effect that would release it never runs then.
+ */
+private class KeptTake(val lease: ConsoleLease?) : RememberObserver {
+    override fun onRemembered() = Unit
+    override fun onForgotten() = Unit
+    override fun onAbandoned() { lease?.release(keep = true) }
+}
+
+/** Set by a test. Receives the picture area's bounds in the window each time it is laid out. */
+internal var consolePictureProbe: ((androidx.compose.ui.geometry.Rect) -> Unit)? = null
+
+/** Set by a test. [fresh] is true when this visit opened a new session and the reveal should play. */
+internal var consoleRevealProbe: ((ResourceId, Boolean) -> Unit)? = null
 
 private class ConsoleFrameSnap {
     var shown = false
@@ -271,6 +289,8 @@ private class ConsoleFrameSnap {
 @Composable internal fun VncConsoleView(state: WorkspaceState, workspace: Workspace, guest: Guest, modifier: Modifier = Modifier, onHostShortcut: ((ConsoleShortcut) -> Unit)? = null, onGuests: (() -> Unit)? = null) {
     // Unkeyed on purpose: the guest page's key(guest.resource) is what makes a switch start from an empty view.
     remember { consoleViewBirthProbe?.invoke(guest.resource) }
+    val keepMinutes = ConsoleKeepPreference.minutes
+    SideEffect { workspace.consoleKeepMinutes = keepMinutes }
     val frameSnap = remember { ConsoleFrameSnap() }
     var serial by remember(guest.resource) { mutableStateOf(false) }
     val serialAvailable = state.inspection?.takeIf { it.resource == guest.resource && it.node == guest.node }?.hardware?.value?.fields?.containsKey("serial0") == true
@@ -287,9 +307,18 @@ private class ConsoleFrameSnap {
     }
     val scope = rememberCoroutineScope()
     var reconnect by remember(guest.resource) { mutableStateOf(0) }
+    // Set by Reconnect before [reconnect] changes, so this effect's dispose closes instead of keeping.
+    val abandon = remember(guest.resource, state.connectionEpoch, reconnect) { AtomicBoolean(false) }
     val status = remember(guest.resource, state.connectionEpoch, reconnect) { mutableStateOf("Connecting…") }
     val failed = remember(guest.resource, state.connectionEpoch, reconnect) { mutableStateOf(false) }
     val session = remember(guest.resource, state.connectionEpoch, reconnect) { mutableStateOf<VncSession?>(null) }
+    val reveal = remember(guest.resource, state.connectionEpoch, reconnect) { mutableStateOf(false) }
+    // During composition, so a kept console draws in the first frame. Reconnect does not take one.
+    val kept = remember(guest.resource, state.connectionEpoch, reconnect) {
+        KeptTake(if (reconnect == 0) workspace.takeKeptConsole(guest) else null)
+    }.lease
+    val held = remember(guest.resource, state.connectionEpoch, reconnect) { AtomicReference(kept) }
+    val noted = remember(guest.resource, state.connectionEpoch, reconnect) { AtomicBoolean(false) }
     var fit by remember { mutableStateOf(true) }
     var focused by remember { mutableStateOf(false) }
     var frame by remember { mutableStateOf(0) }
@@ -319,6 +348,20 @@ private class ConsoleFrameSnap {
         if (probe.width > 0 && probe.height > 0) { frames.write(probe.width, probe.height, dest); screen = true }
         frame++
     }
+    fun note(lease: ConsoleLease) {
+        if (noted.compareAndSet(false, true)) consoleRevealProbe?.invoke(guest.resource, lease.fresh)
+    }
+    // A kept session already has a frame. Copy it before the first draw so CONNECTING… never flashes.
+    val primed = remember(guest.resource, state.connectionEpoch, reconnect) { booleanArrayOf(false) }
+    if (kept != null && !primed[0]) {
+        primed[0] = true
+        val live = kept.session
+        session.value = live
+        reveal.value = kept.fresh
+        status.value = "Connected ${live.width}×${live.height}"
+        publish(live)
+        note(kept)
+    }
     // While this view is composed the guest has a live console, so the Summary page does not auto-capture a still.
     DisposableEffect(guest.resource) {
         LiveConsoles.open(guest.resource)
@@ -332,41 +375,71 @@ private class ConsoleFrameSnap {
     DisposableEffect(guest.resource, state.connectionEpoch, reconnect) {
         val uiTrace = Trace.begin(TraceSource.Console, "VNC UI attached")
         alive.set(true)
-        val box = AtomicReference<VncSession?>(null)
-        val job = scope.launch {
+        fun attach(lease: ConsoleLease) {
+            val live = lease.session
+            held.set(lease)
+            session.value = live
+            reveal.value = lease.fresh
+            status.value = "Connected ${live.width}×${live.height}"
+            note(lease)
+            // Coalesced: however fast updates arrive, at most one publish waits on the event queue.
+            val pending = AtomicBoolean(false)
+            live.onUpdate = { if (pending.compareAndSet(false, true)) EventQueue.invokeLater { pending.set(false); if (alive.get()) publish(live) } }
+            live.onClosed = { reason -> EventQueue.invokeLater { if (alive.get() && status.value != VNC_GUEST_STOPPED) { failed.value = true; status.value = reason } } }
+            publish(live)
+        }
+        val job = if (kept != null) {
+            attach(kept)
+            null
+        } else scope.launch {
+            var opened: ConsoleLease? = null
             try {
-                val opened = workspace.openConsole(guest)
-                box.set(opened)
-                if (!isActive || !alive.get()) { opened.close(); return@launch }
-                session.value = opened
-                status.value = "Connected ${opened.width}×${opened.height}"
-                // Coalesced: however fast updates arrive, at most one publish waits on the event queue.
-                val pending = AtomicBoolean(false)
-                opened.onUpdate = { if (pending.compareAndSet(false, true)) EventQueue.invokeLater { pending.set(false); if (alive.get()) publish(opened) } }
-                opened.onClosed = { reason -> EventQueue.invokeLater { if (alive.get() && status.value != VNC_GUEST_STOPPED) { failed.value = true; status.value = reason } } }
-                publish(opened)
-            } catch (e: CancellationException) { throw e }
+                val lease = workspace.leaseConsole(guest)
+                opened = lease
+                if (!held.compareAndSet(null, lease)) { lease.release(keep = false); return@launch }
+                if (!isActive || !alive.get()) {
+                    held.compareAndSet(lease, null)
+                    lease.release(keep = false)
+                    return@launch
+                }
+                attach(lease)
+            } catch (e: CancellationException) {
+                opened?.let { lease ->
+                    held.compareAndSet(lease, null)
+                    lease.release(keep = false)
+                }
+                throw e
+            }
             catch (e: Exception) { if (alive.get()) { failed.value = true; status.value = safeConsoleReason(e) } }
         }
         onDispose {
             uiTrace.end()
             alive.set(false)
-            job.cancel()
-            // close() sends a key-up for every held key and button mask 0 before the socket goes.
-            box.get()?.let { it.onUpdate = null; it.onClosed = null; it.close() }
-            session.value = null
+            job?.cancel()
             focused = false
             VncKeyboard.captured = false
+            session.value = null
+            // Keep it unless it failed, the guest stopped, or the user asked for a fresh one.
+            held.getAndSet(null)?.let { lease ->
+                lease.session.onUpdate = null
+                lease.session.onClosed = null
+                lease.release(keep = !failed.value && !abandon.get())
+            }
         }
     }
     DisposableEffect(frames) { onDispose { frames.close() } }
     LaunchedEffect(session.value, guest.status, guest.template) {
         val live = session.value ?: return@LaunchedEffect
-        if (guest.status != "running" || guest.template) {
-            failed.value = true
-            status.value = VNC_GUEST_STOPPED
-            live.close()
-        }
+        if (guest.status == "running" && !guest.template) return@LaunchedEffect
+        failed.value = true
+        status.value = VNC_GUEST_STOPPED
+        val lease = held.getAndSet(null)
+        if (lease != null) {
+            lease.session.onUpdate = null
+            lease.session.onClosed = null
+            lease.release(keep = false)
+        } else live.close()
+        session.value = null
     }
     val hardware = state.inspection?.takeIf { it.resource == guest.resource && it.node == guest.node }?.hardware?.value
     val spice = hardware != null && spiceDisplayAvailable(hardware.fields["vga"])
@@ -378,15 +451,15 @@ private class ConsoleFrameSnap {
     frameSnap.height = fbH
     frameSnap.pixels = pixels.value
     frameSnap.guest = guest
-    // The first frame arrives with the CRT power-on reveal (a draw effect, so input and frames are never delayed); it replaces the old alpha fade.
+    // The reveal plays only for a fresh connection. A kept console comes back with the picture already there.
     val liveAlpha = 1f
-    val powerOn = if (haveFrame) session.value else null
+    val powerOn = if (haveFrame && reveal.value) session.value else null
     val immersiveState = LocalImmersive.current
     val immersiveNow = immersiveState?.active == true
     val edgeResting = remember { mutableStateOf(false) }
     LaunchedEffect(immersiveNow) { if (!immersiveNow) edgeResting.value = false }
     val toolbar: @Composable (Boolean) -> Unit = { immersive ->
-        ConsoleToolbar(status.value, failed.value, spice, hardware != null, session.value, fit, focused, { fit = !fit }, { reconnect++ }, state, workspace, guest, focusManager, { serial = true },
+        ConsoleToolbar(status.value, failed.value, spice, hardware != null, session.value, fit, focused, { fit = !fit }, { abandon.set(true); reconnect++ }, state, workspace, guest, focusManager, { serial = true },
             onImmersive = if (immersive) null else immersiveState?.let { live -> { live.enter() } },
             onGuests = if (immersive) onGuests else null,
             onExit = if (immersive) ({ immersiveState?.exit() }) else null,
@@ -395,10 +468,13 @@ private class ConsoleFrameSnap {
     // The picture box stays the second child, immersive or not, so its remembered session is not rebuilt.
     Box(modifier.fillMaxSize().then(if (immersiveState != null) Modifier.consoleTopRest(immersiveNow) { edgeResting.value = it } else Modifier)) {
     Column(Modifier.fillMaxSize()) {
-        Box(Modifier.fillMaxWidth().height(if (immersiveNow) 0.dp else if (spice) 48.dp else 32.dp)) {
+        // One height whether or not the VM has a SPICE display. That is only known once the hardware has loaded, and a
+        // toolbar that grew then moved the picture a moment after every switch.
+        Box(Modifier.fillMaxWidth().height(if (immersiveNow) 0.dp else 32.dp)) {
             if (!immersiveNow) toolbar(false)
         }
-        Box(Modifier.weight(1f).fillMaxWidth().background(Color.Black)) {
+        Box(Modifier.weight(1f).fillMaxWidth().background(Color.Black)
+            .then(if (consolePictureProbe != null) Modifier.onGloballyPositioned { consolePictureProbe?.invoke(it.boundsInWindow()) } else Modifier)) {
             val still = if (!haveFrame) rememberStillBitmap(state.consoleStills[guest.resource]) else null
             if (still != null) Image(still, "Last known screen", Modifier.fillMaxSize().alpha(0.45f), contentScale = ContentScale.Fit)
             if (screen && haveFrame) {
@@ -428,7 +504,7 @@ private class ConsoleFrameSnap {
     focusManager: androidx.compose.ui.focus.FocusManager, onSerial: () -> Unit,
     onImmersive: (() -> Unit)? = null, onGuests: (() -> Unit)? = null, onExit: (() -> Unit)? = null, immersive: Boolean = false,
 ) {
-    Column(Modifier.fillMaxWidth().height(if (spice) 48.dp else 32.dp).pointerInput(focusManager) {
+    Column(Modifier.fillMaxWidth().height(32.dp).pointerInput(focusManager) {
         awaitPointerEventScope {
             while (true) {
                 val event = awaitPointerEvent(PointerEventPass.Final)
@@ -439,7 +515,8 @@ private class ConsoleFrameSnap {
         Row(Modifier.fillMaxWidth().height(32.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             Text(status, maxLines = 1, overflow = TextOverflow.Ellipsis, fontFamily = Tech.Mono, fontSize = 11.sp, color = if (failed) Tech.Amber else if (session != null) Tech.Green else Tech.Muted)
             // The chip sits in the toolbar, outside the guest picture, and is the lasting sign of capture.
-            if (session != null && captured) HelpTip("Keys go to the VM, Ctrl+Alt shortcuts included. Click outside the screen to release the keyboard. Ctrl+Alt+Enter: immersive. Ctrl+Alt+PageUp / PageDown: other guests.") {
+            // Immersive has no page around the screen, so the release is a click on this bar, not a click outside.
+            if (session != null && captured) HelpTip(captureChipHelp(immersive)) {
                 Text("⌨ KEYS TO VM", Modifier.border(1.dp, Tech.Amber, Tech.Control).padding(horizontal = 6.dp, vertical = 2.dp),
                     color = Tech.Amber, fontFamily = Tech.Mono, fontSize = 10.sp, maxLines = 1)
             } else if (session != null) Text("Click the screen to type", color = Tech.Muted, fontFamily = Tech.Mono, fontSize = 10.sp, maxLines = 1)
@@ -600,7 +677,17 @@ internal suspend fun awaitComposedMillis(ms: Long) {
  * each time the console takes the keyboard. The toolbar chip is the lasting sign. The 2.5 s is measured from the
  * moment of capture, including the short entrance, so the hint is gone once the hold and the fade have both run.
  */
-@Composable internal fun BoxScope.CaptureHint(captured: Boolean) {
+/** The chip's tooltip. In immersive there is often nothing outside the screen to click, so it names the bar instead. */
+internal fun captureChipHelp(immersive: Boolean): String =
+    if (immersive) "Keys go to the VM, Ctrl+Alt shortcuts included. Click this bar to release the keyboard. Ctrl+Alt+Enter: leave immersive. Ctrl+Alt+PageUp / PageDown: other guests."
+    else "Keys go to the VM, Ctrl+Alt shortcuts included. Click outside the screen to release the keyboard. Ctrl+Alt+Enter: immersive. Ctrl+Alt+PageUp / PageDown: other guests."
+
+/** The capture hint line. In immersive the screen fills the window, so it points at the top-edge bar, not "outside". */
+internal fun captureHintText(immersive: Boolean): String =
+    if (immersive) "Keyboard captured · top edge for the bar · Ctrl+Alt+Enter to leave"
+    else "Keyboard captured · click outside to release"
+
+@Composable internal fun BoxScope.CaptureHint(captured: Boolean, immersive: Boolean = LocalImmersive.current?.active == true) {
     val reduce = LocalReduceMotion.current
     val alpha = remember { Animatable(0f) }
     LaunchedEffect(captured) {
@@ -613,7 +700,7 @@ internal suspend fun awaitComposedMillis(ms: Long) {
     // Composed only while visible; the per-frame alpha is read in the layer, so the fade does not recompose.
     val visible by remember { derivedStateOf { alpha.value > 0f } }
     if (!visible) return
-    Text("Keyboard captured · click outside to release",
+    Text(captureHintText(immersive),
         Modifier.align(Alignment.BottomCenter).padding(8.dp).graphicsLayer { this.alpha = alpha.value }
             .background(Color.Black.copy(alpha = .65f), Tech.Control).padding(horizontal = 8.dp, vertical = 3.dp),
         color = Tech.Amber, fontFamily = Tech.Mono, fontSize = 10.sp, maxLines = 1)

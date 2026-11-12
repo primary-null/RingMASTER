@@ -19,6 +19,7 @@ optdepends=(
   'iperf3: iPerf3 tests'
   'wireguard-tools: WireGuard'
   'tailscale: Tailscale'
+  'libsecret: Remember on this computer (with a password safe such as gnome-keyring)'
 )
 options=(!strip !debug)
 source=('ringmaster-app.tar.gz' 'ringmaster.desktop' 'LICENSE' 'NOTICE' 'ringmaster.png')

@@ -160,6 +160,8 @@ data class WorkspaceState(
     val history: FleetHistory = FleetHistory(),
     /** Last known console frames, memory only (never written to disk), newest last, at most [CONSOLE_STILL_LIMIT]. */
     val consoleStills: Map<ResourceId, ConsoleStill> = emptyMap(),
+    /** Consoles paused in memory after their page was left. Empty on a new connection. */
+    val keptConsoles: Set<ResourceId> = emptySet(),
     val consoleStillBusy: Set<ResourceId> = emptySet(),
     val consoleStillErrors: Map<ResourceId, String> = emptyMap(),
     /** Open task log. Memory only. Cleared with the session. */
@@ -221,6 +223,24 @@ class Workspace(
 ) : AutoCloseable {
     private val mutableState = MutableStateFlow(WorkspaceState())
     val state = mutableState.asStateFlow()
+    // Read by the keeper from the reader thread and the expiry job as well as the UI thread.
+    @Volatile private var consoleKeepMinutesField = CONSOLE_KEEP_DEFAULT_MINUTES
+    private val consoleKeeper = ConsoleKeeper(
+        scope = scope,
+        now = { clock().toEpochMilli() },
+        keepMillis = { consoleKeepMinutesField.coerceAtLeast(0).toLong() * 60_000L },
+        changed = { ids -> mutableState.update { it.copy(keptConsoles = ids) } },
+    )
+
+    /** Minutes a console stays open after its page is left. 0 turns keeping off and closes the kept ones. */
+    var consoleKeepMinutes: Int
+        get() = consoleKeepMinutesField
+        set(value) {
+            val next = value.coerceAtLeast(0)
+            if (next == consoleKeepMinutesField) return
+            consoleKeepMinutesField = next
+            if (next == 0) consoleKeeper.closeAll() else consoleKeeper.wake()
+        }
     private var connection: Connection? = null
     private var generation = 0L
     private var detailGeneration = 0L
@@ -344,6 +364,7 @@ class Workspace(
             val readAt = clock()
             mutableState.update { it.copy(overview = demoOverview, updatedAt = readAt, stale = false, error = null, loading = false, nodeStatusLoading = false, liveBackoffSeconds = null) }
             recordHistory(demoOverview, readAt)
+            retireKeptConsoles(demoOverview)
             reconcile(DEMO_REMOTE_KEY, demoOverview.guests)
             holdMember(DEMO_REMOTE_KEY)
             return
@@ -370,6 +391,7 @@ class Workspace(
                 val readAt = clock()
                 mutableState.update { it.copy(overview = overview, loading = false, stale = false, error = null, updatedAt = readAt, nodeStatusLoading = false, liveBackoffSeconds = null) }
                 recordHistory(overview, readAt)
+                retireKeptConsoles(overview)
                 if (selected != null) {
                     val fresh = findCurrentGuest(remote, selected, overview.guests)
                     if (fresh == null) clearSelection() else select(fresh)
@@ -1093,6 +1115,38 @@ class Workspace(
         return opened
     }
 
+    /**
+     * A kept console for [guest], if one is waiting. Never blocks: call it during composition so the picture is there
+     * in the first frame. The same refusals as [openConsole] close the kept session and return null.
+     */
+    fun takeKeptConsole(guest: Guest): ConsoleLease? {
+        fun drop(): ConsoleLease? {
+            consoleKeeper.closeGuest(guest.resource)
+            return null
+        }
+        val state = mutableState.value
+        if (state.demo) return drop()
+        val current = connection ?: return drop()
+        if (current.kind == PDM_KIND || guest.scope.isNotEmpty()) return drop()
+        if (guest.kind != "VM") return drop()
+        val remote = currentRemote() ?: return drop()
+        val live = state.overview?.guests?.let { findCurrentGuest(remote, guest, it) } ?: return drop()
+        if (live.status != "running" || live.template) return drop()
+        return consoleKeeper.take(guest.resource)
+    }
+
+    /** Opens a new console and hands it to the keeper. Same refusals as [openConsole]. */
+    suspend fun leaseConsole(guest: Guest): ConsoleLease {
+        val session = openConsole(guest)
+        try {
+            currentCoroutineContext().ensureActive()
+        } catch (e: CancellationException) {
+            session.close()
+            throw e
+        }
+        return consoleKeeper.adopt(guest.resource, session)
+    }
+
     suspend fun openConsole(guest: Guest): VncSession {
         val state = mutableState.value
         check(!state.demo) { SPICE_DEMO }
@@ -1464,6 +1518,7 @@ class Workspace(
     }
 
     private fun closeSession() {
+        consoleKeeper.closeAll(sealOutstanding = true)
         recordLostResults()
         powerInFlight = null
         captureNotice = null
@@ -1664,6 +1719,16 @@ class Workspace(
         if (selected != null && fresh == null) clearSelection()
         // Same guest on a new node (migration): read its page again, keeping the old sections up meanwhile.
         else if (selected != null && fresh != null) refreshInspectionIfGuestMoved(selected, fresh)
+        retireKeptConsoles(overview)
+    }
+
+    /** Drops kept consoles whose guest stopped, became a template, or left the inventory. */
+    private fun retireKeptConsoles(overview: Overview) {
+        val gone = mutableState.value.keptConsoles.filter { id ->
+            val guest = overview.guests.singleOrNull { it.resource == id }
+            guest == null || guest.status != "running" || guest.template
+        }
+        gone.forEach { consoleKeeper.closeGuest(it) }
     }
 
     private fun markLiveFailure(error: Exception) {

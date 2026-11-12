@@ -42,6 +42,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -72,11 +73,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlin.math.cos
 import kotlin.math.sin
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.yield
 import local.ringleader.core.ConnectionProfile
 import local.ringleader.core.DEFAULT_PASSWORD_USER
 import local.ringleader.core.DIRECT_PVE_KIND
 import local.ringleader.core.DeskState
+import local.ringleader.core.VaultStatus
 import local.ringleader.core.completeLoginUser
 import local.ringleader.core.passwordUserAfterSwitch
 import local.ringleader.core.OpenSession
@@ -270,6 +273,8 @@ private val ConnectPanelWidth = 520.dp
             }
         }
         if (profile.sha256Pin != null) NeutralTag("Pinned", help = "A SHA-256 certificate pin is saved. RingMASTER checks the server certificate against it.")
+        // The browser host never uses the safe, so it does not advertise what is in it either.
+        if (!LocalAppHost.current.web && profile.id in deskState.remembered) NeutralTag("Remembered", help = "Its secret is kept in ${deskState.vaultName}. Forget it from the Connect form.")
         if (connected) HealthyTag("Connected", help = "A connection opened from this profile is in use.")
         MiniAction("Connect", primary = true) { desk.selectProfile(profile.id) }
         if (hovered || selected) {
@@ -304,7 +309,7 @@ private val ConnectPanelWidth = 520.dp
 @Composable private fun DeleteConfirmation(profile: ConnectionProfile, active: Boolean, desk: ProfileDesk) {
     TechPanel(Modifier.widthIn(max = 560.dp).fillMaxWidth(), rail = Tech.Red) {
         Text("Delete ${profile.displayName}?", fontSize = Tech.Section)
-        Text("This removes the saved server and user or token ID from this computer. Passwords and token secrets are never stored in a profile.", color = Tech.Muted, fontSize = 13.sp)
+        Text("This removes the saved server and user or token ID from this computer, and forgets its remembered secret if it has one. Passwords and token secrets are never stored in a profile.", color = Tech.Muted, fontSize = 13.sp)
         if (active) Text("This session will disconnect, and its inventory will close.", color = Tech.Amber, fontSize = 13.sp)
         FlowRow(horizontalArrangement = Arrangement.spacedBy(Tech.Space12), verticalArrangement = Arrangement.spacedBy(Tech.Space8)) {
             TechAction("Delete profile", active = true) { desk.confirmDelete() }
@@ -332,6 +337,9 @@ private val ConnectPanelWidth = 520.dp
         CompactDeskField(draft.tokenId, { desk.updateDraft(draft.displayName, draft.origin, it, draft.sha256Pin) }, if (passwordMode) "User · user@realm, for example root@pam" else "API token ID · user@realm!token", identity = true, passwordUser = passwordMode && draft.kind == DIRECT_PVE_KIND)
         CompactDeskField(draft.sha256Pin, { desk.updateDraft(draft.displayName, draft.origin, draft.tokenId, it) }, "Trusted certificate SHA-256 · optional")
         Text("Passwords and token secrets are not part of a profile; you enter them when you connect. Saving a different server, user, token ID, certificate pin, or connection kind on the connection in use disconnects that session.", style = MaterialTheme.typography.bodySmall, color = Tech.Muted)
+        if (draft.id != null && draft.id in deskState.remembered) {
+            Text("Changing the server, kind, user or token ID, or pin forgets the remembered secret.", color = Tech.Muted, fontSize = 12.sp)
+        }
         if (active) Text("This profile is in use. A connection change will disconnect it instead of switching the open session.", color = Tech.Amber, fontSize = 13.sp)
         deskState.formError?.let { Text(it, color = Tech.Red, fontSize = 12.sp, fontFamily = Tech.Mono) }
         FlowRow(horizontalArrangement = Arrangement.spacedBy(Tech.Space12), verticalArrangement = Arrangement.spacedBy(Tech.Space8)) {
@@ -364,18 +372,58 @@ private val ConnectPanelWidth = 520.dp
         SectionLabel("Connect", suffix = profile.displayName)
         val password = profile.passwordLogin
         var otp by remember(profile.id, deskState.secretGeneration) { mutableStateOf("") }
+        val vaultReady = deskState.vaultStatus is VaultStatus.Available
+        val web = LocalAppHost.current.web
+        val remembered = !web && profile.id in deskState.remembered
+        val scope = rememberCoroutineScope()
         val submit = {
-            if (deskState.profileSecretPresent && desk.connectSelected(otp = otp.ifBlank { null })) onOpenWorkspace()
+            when {
+                deskState.profileSecretPresent -> { if (desk.connectSelected(otp = otp.ifBlank { null })) onOpenWorkspace() }
+                remembered && vaultReady && !deskState.vaultBusy -> { scope.launch { if (desk.connectRemembered(otp.ifBlank { null })) onOpenWorkspace() } }
+            }
         }
-        Text(if (password) "Enter the password for this user. It is cleared when you connect, cancel, choose another profile, or leave the desk."
-            else "Enter the token secret for this session. It is cleared when you connect, cancel, choose another profile, or leave the desk.", style = MaterialTheme.typography.bodySmall, color = Tech.Muted)
+        val explanation = when {
+            remembered && password -> "The password is remembered on this computer. Leave the field empty to use it, or type a new one."
+            remembered -> "The token secret is remembered on this computer. Leave the field empty to use it, or type a new one."
+            password -> "Enter the password for this user. It is cleared when you connect, cancel, choose another profile, or leave the desk."
+            else -> "Enter the token secret for this session. It is cleared when you connect, cancel, choose another profile, or leave the desk."
+        }
+        Text(explanation, style = MaterialTheme.typography.bodySmall, color = Tech.Muted)
         SecretField(deskState.secretGeneration, if (password) "Password" else "API token secret", focusRequester = secretFocus, onSubmit = submit, capsLock = password) { desk.setProfileSecret(it) }
         if (password) CompactDeskField(otp, { otp = it.filter { c -> !c.isWhitespace() }.take(64) }, "Two-factor code · only if the account uses one", onSubmit = submit)
+        if (!web) RememberRow(deskState, desk, profile.id, remembered)
+        if (deskState.vaultBusy) Text("Reading the remembered secret…", color = Tech.Muted, fontSize = 12.sp)
         FlowRow(horizontalArrangement = Arrangement.spacedBy(Tech.Space12), verticalArrangement = Arrangement.spacedBy(Tech.Space8)) {
-            TechAction("Connect", active = true, enabled = deskState.profileSecretPresent, onClick = submit)
+            TechAction("Connect", active = true, enabled = deskState.profileSecretPresent || (remembered && vaultReady && !deskState.vaultBusy), onClick = submit)
             TechAction("Clear secret", onClick = desk::discardSecrets)
         }
     }
+}
+
+@Composable private fun RememberRow(deskState: DeskState, desk: ProfileDesk, profileId: String, remembered: Boolean) {
+    val status = deskState.vaultStatus ?: return
+    when {
+        remembered -> Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Remembered in ${deskState.vaultName}.", color = Tech.Muted, fontSize = 12.sp)
+                MiniAction("Forget") { desk.forgetRemembered(profileId) }
+            }
+            if (status is VaultStatus.Unavailable) Text(status.reason, color = Tech.Muted, fontSize = 12.sp)
+        }
+        status is VaultStatus.Available -> Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            TechCheck(deskState.rememberChoice, desk::setRememberChoice, "Remember on this computer")
+            Text(rememberHelp(deskState.vaultName), Modifier.weight(1f, fill = false), color = Tech.Muted, fontSize = 12.sp, lineHeight = 16.sp)
+        }
+        status is VaultStatus.Unavailable -> Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            TechCheck(false, {}, "Remember on this computer", enabled = false)
+            Text(status.reason, color = Tech.Muted, fontSize = 12.sp)
+        }
+    }
+}
+
+private fun rememberHelp(vaultName: String): String = when {
+    vaultName.startsWith("Windows") -> "Kept in Windows Credential Manager for your Windows account, and only after the sign-in works. Programs you run can read it."
+    else -> "Kept in your password safe, and only after the sign-in works. Programs you run can read it while the safe is unlocked."
 }
 
 @Composable private fun ManualConnection(modifier: Modifier, anyOpen: Boolean, deskState: DeskState, desk: ProfileDesk, scanned: ScanHit?, motion: MotionPreferences, onOpenWorkspace: () -> Unit) {

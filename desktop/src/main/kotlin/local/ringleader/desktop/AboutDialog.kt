@@ -1,11 +1,14 @@
 package local.ringleader.desktop
 
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.ui.input.pointer.pointerHoverIcon
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -42,7 +45,7 @@ import java.nio.file.Path
         Place("Settings and connections", AppData.configDir, host.web)
         Place("Configuration backups", AppData.configDir.resolve("backups"), host.web)
         Place("Caches", AppData.cacheDir, host.web)
-        Text("Token secrets are never written to disk. Each connection asks for its secret when it opens.", fontSize = 11.sp, color = Tech.Muted)
+        Text("RingMASTER never writes a secret to disk. A connection asks for its secret when it opens, unless you chose Remember for it: then your password vault keeps it.", fontSize = 11.sp, color = Tech.Muted)
         HorizontalDivider(color = Tech.Edge)
         Row(verticalAlignment = Alignment.CenterVertically) {
             SectionLabel("Licences", Modifier.weight(1f))
@@ -111,16 +114,32 @@ import java.nio.file.Path
 @Composable private fun ClearEverythingDialog(onCancel: () -> Unit, onWiped: () -> Unit) {
     var typed by remember { mutableStateOf("") }
     var failed by remember { mutableStateOf<List<String>?>(null) }
-    TechDialog("Clear everything?", onCancel, width = 520.dp, subtitle = "RingMASTER quits afterwards and starts fresh next time.", actions = {
-        TechAction("Clear and quit", active = true, enabled = typed == "CLEAR" && failed == null) {
-            val left = AppData.clearAll()
-            if (left.isEmpty()) onWiped() else failed = left
+    var clearing by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    val lines = remember {
+        val name = runCatching { SystemVault.instance.name }.getOrNull()
+        AppData.removes.map { if (it == AppData.REMEMBERED) AppData.rememberedLine(name) else it }
+    }
+    val cancel = remember { androidx.compose.ui.focus.FocusRequester() }
+    // A confirmation over Settings: a click outside does nothing, and the first Escape closes only this dialog.
+    TechDialog("Clear everything?", onCancel, width = 520.dp, subtitle = "RingMASTER quits afterwards and starts fresh next time.", initialFocus = cancel, actions = {
+        TechAction("Clear and quit", active = true, enabled = typed == "CLEAR" && failed == null && !clearing) {
+            clearing = true
+            // Off the UI thread: forgetting remembered secrets can wait on the password safe.
+            scope.launch {
+                val left = withContext(Dispatchers.IO) { AppData.clearAll() }
+                if (left.isEmpty()) onWiped() else {
+                    failed = left
+                    clearing = false
+                }
+            }
         }
-        TechAction("Cancel", onClick = onCancel)
+        TechAction("Cancel", Modifier.focusRequester(cancel), onClick = onCancel)
     }) {
-        AppData.removes.forEach { Text("·  $it", fontSize = 13.sp, color = Tech.Ink) }
+        lines.forEach { Text("·  $it", fontSize = 13.sp, color = Tech.Ink) }
         Text(AppData.KEPT_NOTE, fontSize = 12.sp, color = Tech.Muted)
         TechField(typed, { typed = it.uppercase().take(5) }, "Type CLEAR to confirm", placeholder = "CLEAR")
+        if (clearing) Text("Clearing…", color = Tech.Muted, fontSize = 12.sp)
         failed?.let { left ->
             Text("Some items could not be removed. Close other RingMASTER windows and try again, or delete them by hand:", color = Tech.Red, fontSize = 12.sp)
             left.forEach { Text(it, Modifier.identity(), fontFamily = Tech.Mono, fontSize = 11.sp, color = Tech.Red) }

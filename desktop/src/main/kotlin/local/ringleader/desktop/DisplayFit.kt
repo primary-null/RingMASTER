@@ -211,6 +211,8 @@ fun applyMaximizedBounds(window: Window) {
         var lastKey: String? = null
         // A window that is maximised outside its maximised bounds (it came up maximised before they were set, or its
         // monitor changed) is maximised again, once for each new set of bounds so it can never loop.
+        // The native frame answers WM_GETMINMAXINFO itself, on the monitor the window is on now. Running this
+        // correction as well toggles normal then maximised and fights a system snap, so it stays off while that frame is in.
         var remaximizedFor: Rectangle? = null
         fun settle() {
             val display = displayOf(window.graphicsConfiguration)
@@ -222,7 +224,7 @@ fun applyMaximizedBounds(window: Window) {
             }
             val frame = window as? java.awt.Frame
             val maxBounds = frame?.maximizedBounds
-            if (onWindows && frame != null && maxBounds != null && state.placement == WindowPlacement.Maximized && !state.isMinimized && remaximizedFor != maxBounds &&
+            if (onWindows && !WindowsNativeFrame.isActive(window) && frame != null && maxBounds != null && state.placement == WindowPlacement.Maximized && !state.isMinimized && remaximizedFor != maxBounds &&
                 !Rectangle(maxBounds.x - 2, maxBounds.y - 2, maxBounds.width + 4, maxBounds.height + 4).contains(window.bounds)) {
                 remaximizedFor = Rectangle(maxBounds)
                 frame.extendedState = java.awt.Frame.NORMAL

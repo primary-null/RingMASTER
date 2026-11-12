@@ -1,5 +1,6 @@
 package local.ringleader.desktop
 
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.foundation.border
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.foundation.VerticalScrollbar
@@ -33,7 +34,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.DialogWindow
 import androidx.compose.ui.window.rememberDialogState
 import local.ringleader.core.*
 import java.time.Instant
@@ -168,10 +168,11 @@ internal fun guestHasPage(state: WorkspaceState, guest: Guest): Boolean = state.
                 sparks.ignite(motion, from, listOf(RowAnchor(confirmation.resource), TagAnchor(confirmation.resource), NamedAnchor("rail", "Activity")), hot) { motionBook?.land(confirmation.resource) }
             }
         }
+        val cancel = remember { androidx.compose.ui.focus.FocusRequester() }
         TechDialog("Confirm ${powerActionTitle(confirmation.action)}", { pendingPower = null }, width = 560.dp,
-            subtitle = "Closing this confirmation does not change the guest.", actions = {
-                // Cancel comes first. A destructive commit is red and never the suggested (amber) button.
-                TechAction("Cancel", active = destructive) { pendingPower = null }
+            subtitle = "Closing this confirmation does not change the guest.", initialFocus = cancel, actions = {
+                // Cancel comes first and takes the keyboard. A destructive commit is red and never the suggested (amber) button.
+                TechAction("Cancel", Modifier.focusRequester(cancel), active = destructive) { pendingPower = null }
                 val anchor = Modifier.pressDip().onGloballyPositioned { sendButton[0] = it }
                 if (destructive) DangerAction(commit, anchor, enabled = !state.powerBusy, onClick = send)
                 else TechAction(commit, anchor, active = true, enabled = !state.powerBusy, onClick = send)
@@ -753,7 +754,9 @@ private fun guestLockMark(guest: Guest): GuestMark? {
 
 @Composable private fun NodeInspector(state: WorkspaceState, member: RecordedMember, workspace: Workspace) {
     var shell by remember(member.name) { mutableStateOf(false) }
-    // Drawn inside the main window. Escape and outside clicks belong to the terminal, so only Close ends it.
+    // Drawn inside the main window. Escape and outside clicks belong to the terminal, so only Close ends it. It is still
+    // recorded as open, so window shortcuts do not act behind it; Escape is not offered to it.
+    if (shell) RegisterModal(ModalKind.Shell, null)
     if (shell) androidx.compose.ui.window.Dialog(onDismissRequest = { shell = false },
         properties = androidx.compose.ui.window.DialogProperties(dismissOnBackPress = false, dismissOnClickOutside = false, usePlatformDefaultWidth = false)) {
         Surface(Modifier.fillMaxWidth(.9f).fillMaxHeight(.88f).widthIn(max = 1400.dp), color = ringColors.surface, shape = Tech.Plate,

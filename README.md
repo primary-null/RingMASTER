@@ -91,7 +91,8 @@ The same command works for every release file.
 
 **Connect**
 - Saved connections to Proxmox VE and Proxmox Datacenter Manager, with an API token or a password, including TOTP and recovery codes for two-factor accounts.
-- Secrets are never written to disk: each connection asks for its secret when it opens.
+- Secrets are never written to disk by RingMASTER: each connection asks for its secret when it opens.
+- Remember on this computer, if you choose it for a saved connection: your operating system's password vault keeps the secret (Windows Credential Manager, or the Secret Service on Linux, such as GNOME Keyring or KeePassXC), and only after that sign-in has worked. It is off until you tick it, and there is no file fallback: with no vault you type the secret as before. Forget, changing the server or user, deleting the connection, or Clear everything removes it. Programs you run under the same account can read what the vault holds.
 - Quick sign-in: choosing Password fills in root@pam, and a name without a realm signs in as name@pam. Picking a saved connection puts the cursor in the password field and Enter connects. Password managers with auto-type can match the window title, which names the connection while its sign-in form is open.
 - Normal TLS validation, or a SHA-256 certificate pin you enter. There is no trust-on-first-use and no switch to ignore certificate errors.
 - Up to six connections open side by side, each with its own live data, tasks and secret.
@@ -115,6 +116,7 @@ The same command works for every release file.
 - In-app VNC console for VMs, and in-app terminals for containers, nodes and serial ports.
 - A guest list beside the console, with each guest's last screen, to click through consoles; Ctrl+Alt+PageUp and Ctrl+Alt+PageDown move through it. The keyboard-captured note fades after a moment and a toolbar chip shows where keys go.
 - Immersive console: Ctrl+Alt+Enter or F11 fills the screen with the guest and hides the rest of the app; the console bar returns when the pointer rests at the top edge.
+- A console you leave stays connected, paused, for a keep time you choose (Off to 1 hour, 10 minutes by default; at most 4 per connection). Switching back shows the live picture at once, without reconnecting.
 - SPICE through remote-viewer for VMs with a SPICE display.
 
 **Activity**
@@ -134,7 +136,7 @@ The same command works for every release file.
 *Network tools on Debian 13.*
 
 **The app**
-- Its own dark window frame; Light, Dark and Pitch Black themes (Pitch Black is true black for OLED screens), which crossfade when you switch; custom backgrounds, an interface size for each display, and Reduce motion (which follows the operating system unless you choose).
+- Its own dark window frame, which on Windows snaps like any other window (Snap Layouts, screen edges, Win+Arrow); Light, Dark and Pitch Black themes (Pitch Black is true black for OLED screens), which crossfade when you switch; custom backgrounds, an interface size for each display, and Reduce motion (which follows the operating system unless you choose).
 - Under the Hood: a live trace of every API call, socket, process, refresh and task poll, with latency, counts per source and the slowest and failed operations. Request bodies and secrets are never recorded.
 - Browser mode: started with `--web`, RingMASTER serves itself to a browser on this computer only, unless you allow remote access. Pass `--allow-host-actions` to let the browser run tools that act on the server host (JSON plug-ins, iperf's server and custom-path modes, VPN changes); without it the browser stays read-only for those. Pass `--public-origin` with an `https://` address when a reverse proxy or tunnel terminates TLS in front of the server. A network address needs `--allow-remote` and TLS: either `--tls-keystore` or `--public-origin`. `--bind 0.0.0.0` and `--bind ::` are accepted only with `--public-origin`. Each login link works once; press Enter in the terminal (or New link in Settings) for another. A fixed `RINGMASTER_WEB_KEY` of 24 or more characters can be reused and is never printed. Sessions end after 30 minutes idle or 12 hours, and the page has a Sign out button.
 - Showcase blur for screenshots (Ctrl+Shift+B; hold Alt to peek).
@@ -156,6 +158,8 @@ The same command works for every release file.
 ## Removing RingMASTER
 
 Uninstalling the app leaves the settings and cache folders in place. Remove `~/.config/ringmaster` and `~/.cache/ring-leader` yourself if you want them gone (on Windows, `%USERPROFILE%\.config\ringmaster` and `%USERPROFILE%\.cache\ring-leader`).
+
+Remembered secrets live in your password vault, not in those folders. Use Clear everything (Settings, About) before uninstalling, or delete the entries named `RingMASTER/...` in the vault.
 
 ## Building from source
 

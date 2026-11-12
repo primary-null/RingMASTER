@@ -1,5 +1,6 @@
 package local.ringleader.desktop
 
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
@@ -7,7 +8,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Switch
@@ -258,9 +258,10 @@ class ToolsSession(private val scope: CoroutineScope) {
     val command = session.confirmCommand
     val confirming = plugin
     if (command != null && confirming != null) {
-        TechDialog("Run ${confirming.name}?", { session.dismissCommand() }, subtitle = "RingMASTER does not use a shell. Each line is one argument. Line 1 is the program file that will run.", actions = {
+        val cancel = remember { androidx.compose.ui.focus.FocusRequester() }
+        TechDialog("Run ${confirming.name}?", { session.dismissCommand() }, subtitle = "RingMASTER does not use a shell. Each line is one argument. Line 1 is the program file that will run.", initialFocus = cancel, actions = {
             TechAction("Run", active = true) { session.acceptCommand() }
-            TechAction("Cancel") { session.dismissCommand() }
+            TechAction("Cancel", Modifier.focusRequester(cancel)) { session.dismissCommand() }
         }) {
             Column(Modifier.fillMaxWidth().border(1.dp, Tech.Edge, Tech.Control).padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 command.forEachIndexed { index, argument ->

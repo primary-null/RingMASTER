@@ -2,6 +2,10 @@ package local.ringleader.desktop
 
 import java.nio.file.Files
 import java.nio.file.Path
+import local.ringleader.core.NoVault
+import local.ringleader.core.SecretVault
+import local.ringleader.core.VaultException
+import local.ringleader.core.VaultStatus
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -21,7 +25,7 @@ class AppDataTest {
         Files.createDirectories(cache.resolve("chromium-profile/Default")).also { Files.writeString(it.resolve("Cookies"), "x") }
         Files.createDirectories(cache.resolve("jcef-152.0.6")).also { Files.writeString(it.resolve("engine"), "x") }
 
-        assertEquals(emptyList(), AppData.clearAll(config, cache))
+        assertEquals(emptyList(), AppData.clearAll(config, cache, NoVault("Remember is not set up.")))
 
         assertFalse(Files.exists(config.resolve("backups")))
         assertFalse(Files.exists(config.resolve("updates.properties")))
@@ -34,6 +38,32 @@ class AppDataTest {
         assertTrue(AppData.KEPT_NOTE.contains("plugins"))
         assertTrue(AppData.KEPT_NOTE.contains("older Chromium engine"))
         assertTrue(AppData.removes.any { it.contains("leftover console browser profile") })
+        assertTrue(AppData.removes.any { it.contains("password safe") })
+    }
+
+    @Test fun clearAllForgetsRememberedSecretsBeforeTheFiles() {
+        val root = Files.createTempDirectory("rm-wipe-vault")
+        val config = Files.createDirectories(root.resolve("config"))
+        val cache = Files.createDirectories(root.resolve("cache"))
+        Files.writeString(config.resolve("profiles.json"), "{}")
+        Files.writeString(config.resolve("remembered.json"), "{\"version\":1,\"profiles\":[]}")
+        val vault = RecordingVault()
+        assertEquals(emptyList(), AppData.clearAll(config, cache, vault))
+        assertEquals(1, vault.forgetAllCount)
+        assertFalse(Files.exists(config.resolve("profiles.json")))
+        assertFalse(Files.exists(config.resolve("remembered.json")))
+    }
+
+    @Test fun clearAllKeepsWipingFilesWhenTheVaultFails() {
+        val root = Files.createTempDirectory("rm-wipe-vault-fail")
+        val config = Files.createDirectories(root.resolve("config"))
+        val cache = Files.createDirectories(root.resolve("cache"))
+        Files.writeString(config.resolve("profiles.json"), "{}")
+        val vault = RecordingVault(fail = VaultException("the safe stayed locked"))
+        val failed = AppData.clearAll(config, cache, vault)
+        assertEquals(listOf("Remembered secrets in Windows Credential Manager (the safe stayed locked)"), failed)
+        assertEquals(1, vault.forgetAllCount)
+        assertFalse(Files.exists(config.resolve("profiles.json")))
     }
     @Test fun cacheDirectoryIgnoresBlankAndRelativeXdgCacheHome() {
         val home = Files.createTempDirectory("rm-home")
@@ -50,6 +80,19 @@ class AppDataTest {
 
     @Test fun clearAllOnAFreshComputerIsANoOp() {
         val root = Files.createTempDirectory("rm-wipe-empty")
-        assertEquals(emptyList(), AppData.clearAll(root.resolve("missing"), root.resolve("missing-cache")))
+        assertEquals(emptyList(), AppData.clearAll(root.resolve("missing"), root.resolve("missing-cache"), NoVault("Remember is not set up.")))
+    }
+}
+
+private class RecordingVault(private val fail: VaultException? = null) : SecretVault {
+    override val name = "Windows Credential Manager"
+    var forgetAllCount = 0
+    override fun status(): VaultStatus = VaultStatus.Available
+    override fun store(profileId: String, login: String, label: String, secret: CharArray) = Unit
+    override fun read(profileId: String): CharArray? = null
+    override fun forget(profileId: String) = Unit
+    override fun forgetAll() {
+        forgetAllCount++
+        fail?.let { throw it }
     }
 }

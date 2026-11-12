@@ -240,4 +240,81 @@ class VncSessionTest {
         assertTrue(failed is DataFormatException || inflater.remaining == chunks[1].size)
         inflater.end()
     }
+
+    private fun requests(writes: List<ByteArray>) = writes.filter { it.isNotEmpty() && (it[0].toInt() and 255) == 3 }
+
+    /** One raw update that paints every pixel the same colour. */
+    private fun solidUpdate(): ByteArray {
+        val raw = ByteArray(4 * 2 * 4)
+        repeat(8) { px(9, 8, 7).copyInto(raw, it * 4) }
+        return frame(rect(0, 0, 4, 2, 0, raw))
+    }
+
+    @Test fun pausedSessionAppliesTheInFlightUpdateAndStopsAsking() {
+        val channel = Script(handshake().raw.toByteArray() + solidUpdate())
+        val session = VncSession(channel)
+        session.handshake("password")
+        val atHandshake = requests(channel.writes).size
+        session.pause()
+        assertTrue(session.pump())
+        val pixels = IntArray(8)
+        assertTrue(session.readInto(pixels).copied)
+        assertEquals(argb(9, 8, 7), pixels[0])
+        assertEquals(atHandshake, requests(channel.writes).size, "a paused session sends no further framebuffer request")
+        session.close()
+    }
+
+    @Test fun resumeSendsExactlyOneFullFrameRequest() {
+        val channel = Script(handshake().raw.toByteArray() + solidUpdate())
+        val session = VncSession(channel)
+        session.handshake("password")
+        session.pause()
+        assertTrue(session.pump())
+        val before = channel.writes.size
+        session.resume()
+        val added = channel.writes.drop(before)
+        assertEquals(1, added.size)
+        assertEquals(3, added[0][0].toInt() and 255)
+        assertEquals(0, added[0][1].toInt() and 255, "resume asks for a full frame")
+        session.close()
+    }
+
+    @Test fun resumeWithoutPauseSendsNothing() {
+        val channel = Script(handshake().raw.toByteArray())
+        val session = VncSession(channel)
+        session.handshake("password")
+        val before = channel.writes.size
+        session.resume()
+        assertEquals(before, channel.writes.size)
+        session.close()
+    }
+
+    @Test fun pauseThenResumeDuringAnUpdateNeverLeavesTheSessionWithNoRequest() {
+        // resume() writes the flag before it requests, and the reader requests only when it still sees the session
+        // running. Overlap sends two requests. The frozen picture would be zero requests, which this interleaving forbids.
+        lateinit var session: VncSession
+        val script = handshake().raw.toByteArray() + solidUpdate()
+        val channel = object : RfbChannel {
+            private val input = script.inputStream()
+            val writes = mutableListOf<ByteArray>()
+            override fun read(n: Int): ByteArray {
+                val got = input.readNBytes(n)
+                if (got.size != n) error(VNC_LOST)
+                if (n > 16) { session.pause(); session.resume() }
+                return got
+            }
+            override fun write(bytes: ByteArray) { writes += bytes.copyOf() }
+            override fun close() = Unit
+        }
+        session = VncSession(channel)
+        session.handshake("password")
+        assertTrue(session.pump())
+        val pixels = IntArray(8)
+        assertTrue(session.readInto(pixels).copied)
+        assertEquals(argb(9, 8, 7), pixels[0], "the in-flight update was applied")
+        val after = requests(channel.writes).drop(1)
+        assertTrue(after.isNotEmpty(), "pause then resume during the update left a request outstanding")
+        assertTrue(after.any { it.size > 1 && (it[1].toInt() and 255) == 0 }, "resume asked for a full frame")
+        session.close()
+    }
 }

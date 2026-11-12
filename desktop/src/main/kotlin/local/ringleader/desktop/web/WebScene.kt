@@ -39,10 +39,11 @@ class WebScene(private val hostActions: Boolean = false, private val onInput: ()
     override fun close() = dispatcher.close()
     suspend fun run(socket: WebSocketSession) = withContext(dispatcher) {
         val host = AppHost(true, hostActions)
+        val modals = ModalStack()
         var dpr by androidx.compose.runtime.mutableStateOf(1f)
         // Constraints can change without disposing the composition or its remembered Workspace/ProfileDesk.
         var width = 960; var height = 640
-        val scene = ImageComposeScene(3840,2160, density = Density(1f), coroutineContext = coroutineContext) { androidx.compose.runtime.CompositionLocalProvider(androidx.compose.ui.platform.LocalDensity provides Density(dpr)) { RingApp(host) } }
+        val scene = ImageComposeScene(3840,2160, density = Density(1f), coroutineContext = coroutineContext) { androidx.compose.runtime.CompositionLocalProvider(androidx.compose.ui.platform.LocalDensity provides Density(dpr)) { RingApp(host, modals = modals) } }
         scene.constraints = Constraints.fixed(width,height)
         val diff = TileDiff()
         var forceRender = true
@@ -82,7 +83,8 @@ class WebScene(private val hostActions: Boolean = false, private val onInput: ()
                                 fun mod(k: String) = mods?.get(k)?.jsonPrimitive?.booleanOrNull ?: false
                                 val key = browserKey(str("key"),str("code"))
                                 val event = KeyEvent(key, if(str("kind")=="up") KeyEventType.KeyUp else KeyEventType.KeyDown, isCtrlPressed=mod("ctrl"),isShiftPressed=mod("shift"),isAltPressed=mod("alt"),isMetaPressed=mod("meta"))
-                                if(host.shortcuts?.invoke(event) != true) scene.sendKeyEvent(event)
+                                // A browser has no platform back key: an Escape nothing in the scene used closes the top overlay.
+                                if(host.shortcuts?.invoke(event) != true && !scene.sendKeyEvent(event)) escapeFallback(event, modals)
                             }
                             "text" -> sendText(scene,str("text"))
                         }
@@ -103,6 +105,10 @@ class WebScene(private val hostActions: Boolean = false, private val onInput: ()
         } finally { scene.close() }
     }
 }
+/** Closes the top Escape-closable overlay for an unused plain Escape key-down. True when one was closed. */
+internal fun escapeFallback(event: KeyEvent, modals: ModalStack): Boolean =
+    event.type == KeyEventType.KeyDown && event.key == Key.Escape && !event.isCtrlPressed && !event.isAltPressed && !event.isShiftPressed && !event.isMetaPressed && modals.closeTop()
+
 fun sendText(scene: ImageComposeScene, text: String) {
     for(char in text.take(8192)) {
         val native = java.awt.event.KeyEvent(java.awt.Canvas(), java.awt.event.KeyEvent.KEY_TYPED, System.currentTimeMillis(), 0, java.awt.event.KeyEvent.VK_UNDEFINED, char)

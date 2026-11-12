@@ -1,9 +1,9 @@
 package local.ringleader.desktop
 
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.*
@@ -52,7 +52,8 @@ import local.ringleader.core.*
         if (scan != null || scanning) BtScanView(scan, scanning, Modifier.fillMaxWidth().height(520.dp), platform = "Guest agent · BlueZ")
 
     }
-    if (confirm) TechDialog("Scan inside ${guest.kind} ${guest.id}?", { confirm = false }, subtitle = guest.name, actions = {
+    val cancel = remember { androidx.compose.ui.focus.FocusRequester() }
+    if (confirm) TechDialog("Scan inside ${guest.kind} ${guest.id}?", { confirm = false }, subtitle = guest.name, initialFocus = cancel, actions = {
         TechAction("Scan", active = true) {
             confirm = false; scanning = true; error = null
             scope.launch {
@@ -62,7 +63,7 @@ import local.ringleader.core.*
                 finally { scanning = false }
             }
         }
-        TechAction("Cancel") { confirm = false }
+        TechAction("Cancel", Modifier.focusRequester(cancel)) { confirm = false }
     }) { Text("RingMASTER will listen for Bluetooth devices for ${BT_SCAN_SECONDS_DEFAULT} seconds using the VM's adapter, through the QEMU guest agent. Nothing is paired or connected.", fontSize = 13.sp, lineHeight = 19.sp) }
 }
 

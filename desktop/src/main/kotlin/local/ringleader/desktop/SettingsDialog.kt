@@ -13,8 +13,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.focus.focusRequester
 import local.ringleader.core.*
 
 internal enum class SettingsSection(val label: String) {
@@ -23,24 +22,38 @@ internal enum class SettingsSection(val label: String) {
 
 @Composable internal fun SettingsDialog(state: WorkspaceState, workspace: Workspace, section: SettingsSection,
     onSection: (SettingsSection) -> Unit, onClose: () -> Unit, onWiped: () -> Unit) {
-    Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-        // The dialog draws over the window, so it keeps its own picture for a theme change and fades with it.
-        ThemeCrossfade(Modifier.fillMaxSize()) {
-            BoxWithConstraints(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                SettingsSheet(state, workspace, section, onSection, onClose, onWiped,
-                    Modifier.size(minOf(900.dp, maxWidth * .92f), minOf(640.dp, maxHeight * .92f)))
+    // Instant-apply settings, so a click on the scrim closes like Done. The dialog's child is the sheet at its own size:
+    // with a full-window child there would be no outside to click. The active section tab takes the keyboard on open.
+    val first = remember { androidx.compose.ui.focus.FocusRequester() }
+    TechModal(onClose, Dismiss.Light, ModalKind.Settings, first) {
+        BoxWithConstraints {
+            val size = settingsSheetSize(maxWidth, maxHeight)
+            // The sheet keeps its own picture for a theme change and fades with it; the window behind has its own.
+            ThemeCrossfade(Modifier.size(size.width, size.height)) {
+                SettingsSheet(state, workspace, section, onSection, onClose, onWiped, Modifier.fillMaxSize(), modal = true, initialFocus = first)
             }
         }
     }
 }
 
+/** 900 x 640 at most and 92 % of the window at most: the cap always binds, the sheet never fills the window. */
+internal fun settingsSheetSize(maxWidth: androidx.compose.ui.unit.Dp, maxHeight: androidx.compose.ui.unit.Dp): androidx.compose.ui.unit.DpSize {
+    fun cap(limit: androidx.compose.ui.unit.Dp, available: androidx.compose.ui.unit.Dp) =
+        if (available == androidx.compose.ui.unit.Dp.Infinity || available.value.isNaN()) limit else minOf(limit, available * .92f)
+    return androidx.compose.ui.unit.DpSize(cap(900.dp, maxWidth), cap(640.dp, maxHeight))
+}
+
 /** Shared by the modal and the offline probe: no native window or live connection required. */
 @Composable internal fun SettingsSheet(state: WorkspaceState, workspace: Workspace, section: SettingsSection,
-    onSection: (SettingsSection) -> Unit, onClose: () -> Unit, onWiped: () -> Unit, modifier: Modifier = Modifier, initialScroll: Int = 0, updatesChecker: UpdateChecker? = null, updatePreview: UpdateState? = null) {
+    onSection: (SettingsSection) -> Unit, onClose: () -> Unit, onWiped: () -> Unit, modifier: Modifier = Modifier, initialScroll: Int = 0, updatesChecker: UpdateChecker? = null, updatePreview: UpdateState? = null,
+    modal: Boolean = false, initialFocus: androidx.compose.ui.focus.FocusRequester? = null) {
     val web = LocalAppHost.current.web
     val selected = if (web && section == SettingsSection.Browser) SettingsSection.Appearance else section
-    Surface(modifier, color = ringColors.surface, contentColor = Tech.Ink, shape = Tech.Plate, border = BorderStroke(1.dp, Tech.Edge)) {
-        Column {
+    // As a modal it carries TechDialog's 12dp shadow and amber rail, so it reads as above the page on Dark and Pitch Black.
+    Surface(modifier, color = ringColors.surface, contentColor = Tech.Ink, shape = Tech.Plate, border = BorderStroke(1.dp, Tech.Edge), shadowElevation = if (modal) 12.dp else 0.dp) {
+        Row {
+        if (modal) Box(Modifier.width(3.dp).fillMaxHeight().background(Tech.Amber))
+        Column(Modifier.weight(1f).fillMaxHeight()) {
             Row(Modifier.fillMaxWidth().background(Tech.Raised).padding(horizontal = 20.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                     Text("Settings", fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
@@ -55,7 +68,7 @@ internal enum class SettingsSection(val label: String) {
                         val interaction = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
                         val focused by interaction.collectIsFocusedAsState()
                         // Keyboard focus draws a ring 2dp outside the row, so it shows on the amber active row too.
-                        Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min).focusRing(focused, Tech.Control, gap = 2.dp).border(1.dp, if (active) Tech.Amber else Tech.Edge, Tech.Control)
+                        Row(Modifier.then(if (active && initialFocus != null) Modifier.focusRequester(initialFocus) else Modifier).fillMaxWidth().height(IntrinsicSize.Min).focusRing(focused, Tech.Control, gap = 2.dp).border(1.dp, if (active) Tech.Amber else Tech.Edge, Tech.Control)
                             .background(if (active) Tech.AmberWash else Tech.Panel, Tech.Control)
                             .selectable(active, interactionSource = interaction, indication = androidx.compose.foundation.LocalIndication.current, role = Role.Tab, onClick = { onSection(item) }).heightIn(min = 52.dp)) {
                             Box(Modifier.width(3.dp).fillMaxHeight().background(if (active) Tech.Amber else Tech.Edge))
@@ -79,6 +92,7 @@ internal enum class SettingsSection(val label: String) {
                 }
             }
         }
+        }
     }
 }
 
@@ -99,6 +113,17 @@ internal enum class SettingsSection(val label: String) {
         }
     }
     Text("Choosing an interval enables live data. Refresh pauses while the window is minimised.", fontSize = 12.sp, color = Tech.Muted)
+    SectionLabel("Keep consoles open")
+    val keep = ConsoleKeepPreference.minutes
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        listOf(0 to "Off", 5 to "5 min", 10 to "10 min", 30 to "30 min", 60 to "1 hour").forEach { (value, label) ->
+            MiniAction(label, primary = keep == value) {
+                ConsoleKeepPreference.choose(value)
+                workspace.consoleKeepMinutes = value
+            }
+        }
+    }
+    Text("A console you leave stays connected this long, so coming back is instant. It is paused meanwhile, and at most 4 are kept per connection.", fontSize = 12.sp, color = Tech.Muted)
 }
 
 @Composable private fun SettingsToggle(title: String, description: String, value: Boolean, onChange: (Boolean) -> Unit) {

@@ -6,6 +6,8 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import java.io.ByteArrayOutputStream
+import java.io.DataOutputStream
 import java.net.URI
 import java.net.URLEncoder
 import java.net.http.HttpClient
@@ -227,6 +229,7 @@ class VncSession internal constructor(rawChannel: RfbChannel) : AutoCloseable {
         override fun close() = rawChannel.close()
     }
     private val closed = AtomicBoolean(false)
+    @Volatile private var paused = false
     @Volatile private var lost = false
     private val writeLock = Any()
     private val frameLock = Any()
@@ -313,6 +316,28 @@ class VncSession internal constructor(rawChannel: RfbChannel) : AutoCloseable {
         held.pointer(0, held.x, held.y)
         send(vncPointerEvent(0, held.x, held.y))
     }
+
+    /**
+     * Stops asking the server for screen updates. An update already on its way is still applied. Websocket pings go on,
+     * so the session stays open. Input is the caller's job: call [releaseInput] first.
+     */
+    fun pause() { paused = true }
+
+    /**
+     * Asks for one full frame and goes on from there. Safe to call when not paused.
+     * A full request is sent whenever this call observed the session paused, and the reader also requests when it
+     * observes the session running. Both can fire if they overlap; neither firing would freeze the picture, so the
+     * volatile flag is written before the request and the follow-up request is skipped only while it still reads paused.
+     */
+    fun resume() {
+        if (closed.get()) return
+        val was = paused
+        paused = false
+        if (was && ready) request(false)
+    }
+
+    internal fun isPaused(): Boolean = paused
+    internal fun isClosed(): Boolean = closed.get()
 
     private fun keyMessage(down: Boolean, key: VncHeldInput.Key): ByteArray =
         if (extendedKeys && key.keycode != 0) vncQemuKeyEvent(down, key.keysym, key.keycode) else vncKeyEvent(down, key.keysym)
@@ -422,7 +447,7 @@ class VncSession internal constructor(rawChannel: RfbChannel) : AutoCloseable {
             }
         }
         if (dirty || count == 0) publish()
-        if (!closed.get()) request(true)
+        if (!closed.get() && !paused) request(true)
     }
 
     private fun raw(x: Int, y: Int, w: Int, h: Int) {
@@ -602,6 +627,43 @@ class VncSession internal constructor(rawChannel: RfbChannel) : AutoCloseable {
     }
 
     override fun toString() = "VncSession(${width}x$height)"
+}
+
+/**
+ * A ready session filled with [argb]. Desktop tests hand it back from a fake gateway. The app opens sessions through
+ * [openVncSession] and never calls this.
+ */
+fun solidFrameSession(width: Int = 8, height: Int = 4, argb: Int = 0xFFCC3344.toInt()): VncSession {
+    require(width in 1..64 && height in 1..64)
+    val red = (argb ushr 16) and 255
+    val green = (argb ushr 8) and 255
+    val blue = argb and 255
+    val raw = ByteArray(width * height * 4)
+    var i = 0
+    repeat(width * height) {
+        raw[i++] = blue.toByte(); raw[i++] = green.toByte(); raw[i++] = red.toByte(); raw[i++] = 0
+    }
+    val bin = ByteArrayOutputStream()
+    val data = DataOutputStream(bin)
+    data.writeBytes("RFB 003.008\n")
+    data.writeByte(1); data.writeByte(2); data.write(ByteArray(16)); data.writeInt(0)
+    data.writeShort(width); data.writeShort(height); data.write(ByteArray(16)); data.writeInt(4); data.writeBytes("test")
+    data.writeByte(0); data.writeByte(0); data.writeShort(1)
+    data.writeShort(0); data.writeShort(0); data.writeShort(width); data.writeShort(height); data.writeInt(0); data.write(raw)
+    data.flush()
+    val session = VncSession(object : RfbChannel {
+        private val input = bin.toByteArray().inputStream()
+        override fun read(n: Int): ByteArray {
+            val got = input.readNBytes(n)
+            if (got.size != n) error(VNC_LOST)
+            return got
+        }
+        override fun write(bytes: ByteArray) = Unit
+        override fun close() = Unit
+    })
+    session.handshake("password")
+    check(session.pump())
+    return session
 }
 
 private fun plain(e: Exception): String {
