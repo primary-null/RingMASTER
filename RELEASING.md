@@ -23,7 +23,18 @@ Linux packages are built on their own distribution because jpackage writes the b
 3. `.github/workflows/release.yml` runs the tests on Windows, Debian, Ubuntu, Fedora and Arch, builds the five packages, writes `SHA256SUMS`, records a build provenance attestation for each file and creates a **draft** release. (Run the workflow by hand from the Actions tab to build without releasing.)
 4. Download the draft's files, install each package on its system and check that it starts and connects.
 5. Write the update manifest with the real sizes and hashes, sign it offline and verify it (below).
-6. Upload `ringmaster-update.json` and `ringmaster-update.json.sig` to the draft, replace the draft text with the release notes, and publish it as the latest release, not a pre-release: the app reads the feed from the latest release.
+6. Finalize the release with the command below. It checks the signed feed against the app's own verifier, downloads every installer and matches its size/hash, verifies GitHub build attestations against the exact tag/source, and checks that all five platforms are present. With `--publish`, it uploads the two feed files, publishes the complete release as latest, then downloads every installer and the update feed without credentials. A draft is not a completed release and has no public user download.
+
+```sh
+python packaging/finalize_release.py --tag v<version> --manifest ringmaster-update.json --notes release-notes.txt --publish --receipt release-receipt.json
+```
+
+This needs Python 3.11+, JDK 21, an authenticated GitHub CLI, and a source checkout of the matching version.
+The private signing key is never read by the finalizer or sent to GitHub. Omit `--publish` for read-only verification;
+it can also verify an already-published release. It never replaces an existing feed asset with different bytes.
+If a post-publication check fails, the command exits unsuccessfully; inspect the receipt/release and fix broken
+packages in a new version rather than overwriting published assets. GitHub's workflow summary explicitly marks
+its draft-only result as not yet published and links this finalization step.
 
 Checking a published file:
 

@@ -318,3 +318,14 @@ jobs:
           gh release create "$GITHUB_REF_NAME" dist/* --draft --verify-tag --repo "$GITHUB_REPOSITORY" \
             --title "RingMASTER ${GITHUB_REF_NAME#v}" \
             --notes "Draft. Before publishing: install and check each package, then add ringmaster-update.json and its .sig (see RELEASING.md)."
+      - name: Explain the remaining publication gate
+        run: |
+          {
+            echo '## Draft created; public downloads are not published yet'
+            echo 'The offline-signed update feed is required before publication.'
+            echo 'After the package checks and signing, run from the matching source checkout:'
+            echo '```text'
+            echo "python packaging/finalize_release.py --tag $GITHUB_REF_NAME --manifest ringmaster-update.json --notes release-notes.txt --publish --receipt release-receipt.json"
+            echo '```'
+            echo 'The finalizer verifies the signature, package hashes and GitHub attestations, publishes the complete release, then downloads it without credentials.'
+          } >> "$GITHUB_STEP_SUMMARY"

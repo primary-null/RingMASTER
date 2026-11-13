@@ -4,6 +4,8 @@
 .idea/
 *.log
 .local/
+__pycache__/
+*.py[cod]
 
 # Rust helper build output; the exe is rebuilt by :desktop:buildBluetoothHelper
 native/*/target/
