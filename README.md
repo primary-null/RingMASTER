@@ -136,7 +136,7 @@ gh attestation verify RingMASTER-<version>.msi --repo primary-null/RingMASTER
 ![Network tools after a ping, with the latency chart and the ping output](docs/images/network-tools.png)
 
 **The app**
-- Its own window frame in place of the system title bar, in the colours of the theme you choose. On Windows it snaps like any other window: Snap Layouts, screen edges and Win+Arrow.
+- Its own title bar in the colours of the theme you choose, with dragging, resizing, minimize and maximize. Native Windows Snap Layouts integration is temporarily disabled while a window-restore rendering issue is investigated.
 - Dark, Pitch Black (true black for OLED screens) and Light themes, or follow the system. Switching crossfades the whole window. Custom backgrounds, an interface size for each display, and Reduce motion, which follows the operating system unless you set it.
 - Under the Hood: a live trace of every API call, socket, process, refresh and task poll, with latency, counts per source and the slowest and failed operations. Request bodies and secrets are never recorded.
 - Browser mode: start RingMASTER with `--web` and it serves itself to a browser on this computer. Each login link works once; press Enter in the terminal (or New link in Settings) for another. A fixed `RINGMASTER_WEB_KEY` of 24 or more characters can be reused and is never printed. Sessions end after 30 minutes idle or 12 hours, and the page has a Sign out button.

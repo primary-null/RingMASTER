@@ -29,6 +29,9 @@ class NativeTraySmokeTest {
         fun GetWindowThreadProcessId(hwnd: Pointer?, pid: IntArray): Int
         fun GetWindowTextW(hwnd: Pointer?, text: CharArray, max: Int): Int
         fun IsWindowVisible(hwnd: Pointer?): Boolean
+        fun IsIconic(hwnd: Pointer?): Boolean
+        fun ShowWindow(hwnd: Pointer?, command: Int): Boolean
+        fun SetWindowPos(hwnd: Pointer?, after: Pointer?, x: Int, y: Int, width: Int, height: Int, flags: Int): Boolean
         fun PostMessageW(hwnd: Pointer?, msg: Int, w: Pointer?, l: Pointer?): Boolean
     }
 
@@ -55,9 +58,12 @@ class NativeTraySmokeTest {
         error("Timed out: $what")
     }
 
-    private fun launch(config: Path, cache: Path, log: Path): Process {
+    private fun launch(config: Path, cache: Path, log: Path, nativeFrame: String? = null): Process {
         val java = Path.of(System.getProperty("java.home"), "bin", "java.exe").toString()
-        val pb = ProcessBuilder(java, "-Dskiko.data.path=" + System.getProperty("skiko.data.path"), "-cp", System.getProperty("java.class.path"), "local.ringleader.desktop.MainKt")
+        val command = mutableListOf(java, "-Dskiko.data.path=" + System.getProperty("skiko.data.path"))
+        nativeFrame?.let { command += "-Dringmaster.nativeFrame=$it" }
+        command += listOf("-cp", System.getProperty("java.class.path"), "local.ringleader.desktop.MainKt")
+        val pb = ProcessBuilder(command)
         pb.environment()["XDG_CONFIG_HOME"] = config.toString()
         pb.environment()["XDG_CACHE_HOME"] = cache.toString()
         pb.redirectErrorStream(true).redirectOutput(log.toFile())
@@ -89,6 +95,63 @@ class NativeTraySmokeTest {
             assertTrue(first.isAlive)
             assertEquals(null, window(second.pid()), "the second launch never opened a window")
             println("NATIVE-TRAY-SMOKE OK first=${first.pid()} second=${second.pid()} log=${root}")
+        } finally {
+            first.destroy()
+            if (!first.waitFor(10, TimeUnit.SECONDS)) first.destroyForcibly()
+        }
+    }
+
+    /** Actual application and actual display, not a retained WM_PRINT image or a standalone Compose scene. */
+    @Test fun maximizedAppRemainsPaintedAfterTrayAndMinimizeRestores() {
+        val output = System.getenv("RINGMASTER_NATIVE_RESTORE")?.let(Path::of)
+        org.junit.jupiter.api.Assumptions.assumeTrue(output != null && System.getProperty("os.name").startsWith("Windows"))
+        val root = output!!
+        Files.createDirectories(root)
+        val config = root.resolve("config"); val cache = root.resolve("cache")
+        val settings = config.resolve("ringmaster")
+        Files.createDirectories(settings)
+        Files.writeString(settings.resolve("appearance.properties"), "schema=1\ntheme=PitchBlack\n")
+        Files.writeString(settings.resolve("updates.properties"), "schema=1\nconsent=no\n")
+        val nativeFrame = System.getenv("RINGMASTER_NATIVE_RESTORE_FRAME")
+        val first = launch(config, cache, root.resolve("first.log"), nativeFrame)
+        fun restore(name: String) {
+            val second = launch(config, cache, root.resolve("$name-launch.log"), nativeFrame)
+            try {
+                assertTrue(second.waitFor(20, TimeUnit.SECONDS), "second launch exits")
+                assertEquals(0, second.exitValue())
+            } finally { if (second.isAlive) second.destroyForcibly() }
+        }
+        fun capture(hwnd: Pointer, name: String) {
+            assertTrue(user32.SetWindowPos(hwnd, Pointer(-1L), 0, 0, 0, 0, 0x0013)) // TOPMOST, no move/size/activate
+            Thread.sleep(800)
+            val gc = java.awt.GraphicsEnvironment.getLocalGraphicsEnvironment().defaultScreenDevice.defaultConfiguration
+            val image = java.awt.Robot(gc.device).createMultiResolutionScreenCapture(gc.bounds).resolutionVariants.last() as java.awt.image.BufferedImage
+            javax.imageio.ImageIO.write(image, "png", root.resolve("$name.png").toFile())
+            val pixels = image.getRGB(0, 0, image.width, image.height, null, 0, image.width)
+            val dark = pixels.count { val r = it ushr 16 and 255; val g = it ushr 8 and 255; val b = it and 255; r < 70 && g < 70 && b < 70 }
+            val amber = pixels.count { val r = it ushr 16 and 255; val g = it ushr 8 and 255; val b = it and 255; r > 140 && g in 60..210 && b < 90 }
+            Files.writeString(root.resolve("frames.tsv"), "$name\t${image.width}\t${image.height}\t$dark\t$amber\n", java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND)
+            assertTrue(dark > pixels.size * .70 && amber > 100, "$name is blank or obscured: dark=$dark amber=$amber")
+        }
+        try {
+            waitFor("the app window", 60) { window(first.pid())?.let { user32.IsWindowVisible(it) } == true }
+            val hwnd = window(first.pid())!!
+            Thread.sleep(3000)
+            user32.ShowWindow(hwnd, 3) // SW_MAXIMIZE
+            capture(hwnd, "initial")
+            repeat(6) { cycle ->
+                user32.PostMessageW(hwnd, 0x0010, null, null) // WM_CLOSE -> tray
+                waitFor("hidden", 10) { !user32.IsWindowVisible(hwnd) }
+                restore("$cycle-tray")
+                waitFor("tray restored", 10) { user32.IsWindowVisible(hwnd) && !user32.IsIconic(hwnd) }
+                capture(hwnd, "$cycle-tray")
+                user32.ShowWindow(hwnd, 6) // SW_MINIMIZE
+                waitFor("minimized", 10) { user32.IsIconic(hwnd) }
+                restore("$cycle-minimize")
+                waitFor("minimize restored", 10) { user32.IsWindowVisible(hwnd) && !user32.IsIconic(hwnd) }
+                capture(hwnd, "$cycle-minimize")
+                assertTrue(first.isAlive)
+            }
         } finally {
             first.destroy()
             if (!first.waitFor(10, TimeUnit.SECONDS)) first.destroyForcibly()

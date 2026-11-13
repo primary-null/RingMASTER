@@ -78,14 +78,17 @@ class WindowFrameHitTest {
         assertEquals(-400 to -20, unpackHitPoint(packed or -0x1_0000_0000L))
     }
 
-    @Test fun theKillSwitchLeavesTheComposeFrame() {
+    @Test fun theReliableComposeFrameIsDefaultAndNativeHooksRequireOptIn() {
         assertFalse(nativeFrameRequested(osName = "Windows 11", property = "false", environment = null, pointerBytes = 8))
         assertFalse(nativeFrameRequested(osName = "Windows 11", property = null, environment = "0", pointerBytes = 8))
         assertFalse(nativeFrameRequested(osName = "Windows 11", property = "true", environment = "0", pointerBytes = 8))
         assertFalse(nativeFrameRequested(osName = "Linux", property = null, environment = null, pointerBytes = 8))
         assertFalse(nativeFrameRequested(osName = "Windows 10", property = null, environment = null, pointerBytes = 4))
-        assertTrue(nativeFrameRequested(osName = "Windows 11", property = null, environment = null, pointerBytes = 8))
+        assertFalse(nativeFrameRequested(osName = "Windows 11", property = null, environment = null, pointerBytes = 8))
         assertTrue(nativeFrameRequested(osName = "Windows 11", property = "true", environment = null, pointerBytes = 8))
+        assertTrue(nativeFrameRequested(osName = "Windows 11", property = null, environment = "1", pointerBytes = 8))
+        assertFalse(nativeFrameRequested(osName = "Windows 11", property = "false", environment = "1", pointerBytes = 8))
+        assertFalse(nativeFrameRequested(osName = "Windows 11", property = "unexpected", environment = null, pointerBytes = 8))
     }
 
     @Test fun theAutoHideStripUsesTheWorkArea() {

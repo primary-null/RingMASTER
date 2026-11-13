@@ -37,8 +37,10 @@ internal data class FrameRegions(
 internal enum class FrameMode { Floating, Maximized, Fullscreen }
 
 /**
- * Whether this process should install the native frame. The property and the environment variable are each a kill
- * switch. Anything that is not 64-bit Windows keeps the Compose drag and resize path.
+ * Native frame hooks are opt-in until their maximized restore path is reliable. Windows can show a blank client
+ * after minimizing a restored tray window with these hooks installed. The Compose frame keeps the dark title bar,
+ * dragging, resizing and window controls without subclassing the native window procedure.
+ * An explicit false/0 still overrides an opt-in from the other source.
  */
 internal fun nativeFrameRequested(
     osName: String = System.getProperty("os.name").orEmpty(),
@@ -50,7 +52,7 @@ internal fun nativeFrameRequested(
     if (pointerBytes != 8) return false
     if (property == "false") return false
     if (environment == "0") return false
-    return true
+    return property == "true" || environment == "1"
 }
 
 /** Screen point packed into a WM_NCHITTEST lParam: two signed 16-bit values, x in the low half. */

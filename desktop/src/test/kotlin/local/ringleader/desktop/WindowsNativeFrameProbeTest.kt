@@ -51,6 +51,9 @@ class WindowsNativeFrameProbeTest {
     @Test fun probeNativeFrameOnARealWindow() {
         assumeTrue(!GraphicsEnvironment.isHeadless()) { "headless" }
         assumeTrue(System.getenv("RINGMASTER_NATIVE_FRAME_PROBE") == "1") { "probe off" }
+        val previousNativeFrame = System.getProperty("ringmaster.nativeFrame")
+        System.setProperty("ringmaster.nativeFrame", "true")
+        try {
         val failure = AtomicReference<Throwable>()
         val running = AtomicBoolean(true)
         val windowRef = AtomicReference<java.awt.Window>()
@@ -263,6 +266,10 @@ class WindowsNativeFrameProbeTest {
         }
         thread.join(2_000)
         failure.get()?.let { throw it }
+        } finally {
+            if (previousNativeFrame == null) System.clearProperty("ringmaster.nativeFrame")
+            else System.setProperty("ringmaster.nativeFrame", previousNativeFrame)
+        }
     }
 
     private suspend fun await(what: String, cond: () -> Boolean) {
