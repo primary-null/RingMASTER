@@ -144,7 +144,15 @@ internal fun consoleFrameToKeep(shown: Boolean, width: Int, height: Int, pixels:
         if (index >= 0) { if (reduce) listState.scrollToItem(index) else listState.animateScrollToItem(index) }
     }
     // A bordered column, not TechPanel: that panel sizes to its content, and a lazy list needs a bounded height.
-    Row(modifier.width(if (switcher.expanded) 232.dp else 44.dp).fillMaxHeight().background(Tech.Panel).border(1.dp, Tech.Edge, Tech.Plate)) {
+    // Keep the whole longest VMID beside both status dots, including at enlarged text sizes.
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    val measurer = androidx.compose.ui.text.rememberTextMeasurer()
+    val longestId = pool.maxByOrNull { it.id.toString().length }?.id?.toString().orEmpty()
+    val idWidth = measurer.measure(longestId, androidx.compose.ui.text.TextStyle(
+        fontFamily = Tech.Mono, fontSize = 10.sp, lineHeight = 12.sp,
+    ), maxLines = 1, softWrap = false).size.width
+    val folded = maxOf(60.dp * density.fontScale.coerceIn(1f, 1.5f), with(density) { idWidth.toDp() } + 44.dp)
+    Row(modifier.width(if (switcher.expanded) 232.dp else folded).fillMaxHeight().background(Tech.Panel).border(1.dp, Tech.Edge, Tech.Plate)) {
         Box(Modifier.width(3.dp).fillMaxHeight().background(Tech.Edge))
         Column(Modifier.weight(1f).fillMaxHeight().padding(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         if (switcher.expanded) {
@@ -192,7 +200,7 @@ internal fun consoleFrameToKeep(shown: Boolean, width: Int, height: Int, pixels:
         hovered -> Tech.Raised
         else -> Color.Transparent
     }
-    val row = Modifier.fillMaxWidth().height(if (expanded) 52.dp else 28.dp)
+    val row = Modifier.fillMaxWidth().then(if (expanded) Modifier.height(52.dp) else Modifier.heightIn(min = 28.dp))
         .background(background)
         .drawBehind { if (current) drawRect(Tech.Amber, size = androidx.compose.ui.geometry.Size(2.dp.toPx(), size.height)) }
         .hoverable(interactions)
@@ -205,7 +213,7 @@ internal fun consoleFrameToKeep(shown: Boolean, width: Int, height: Int, pixels:
             Row(row, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 StatusDot(guest.status)
                 if (kept) KeptDot()
-                Text("${guest.id}", fontFamily = Tech.Mono, fontSize = 10.sp, color = if (current) Tech.Amber else Tech.Muted, maxLines = 1)
+                Text("${guest.id}", fontFamily = Tech.Mono, fontSize = 10.sp, lineHeight = 12.sp, color = if (current) Tech.Amber else Tech.Muted, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
             }
         }
         return

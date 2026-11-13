@@ -10,6 +10,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.VerticalScrollbar
+import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.foundation.rememberScrollState
@@ -219,22 +221,23 @@ internal var guestHeaderProbe: (() -> Unit)? = null
                     hardware.disks.forEach { d ->
                         val change = hardware.pending.firstOrNull { it.key == d.key }
                         val volume = listOfNotNull(d.volume, mountCaption(d), change?.let { pendingCaption(it) }).joinToString("  ·  ").ifBlank { "—" }
-                        Row(Modifier.fillMaxWidth().height(32.dp).drawBehind { drawLine(Tech.Edge, Offset(0f, size.height), Offset(size.width, size.height), 1.dp.toPx()) }, verticalAlignment = androidx.compose.ui.Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Row(Modifier.fillMaxWidth().heightIn(min = 32.dp).drawBehind { drawLine(Tech.Edge, Offset(0f, size.height), Offset(size.width, size.height), 1.dp.toPx()) }, verticalAlignment = androidx.compose.ui.Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                             Text(d.key, Modifier.width(88.dp), fontFamily = Tech.Mono, fontSize = 11.sp, color = Tech.Amber)
                             Text(volume, Modifier.weight(1f), fontFamily = Tech.Mono, fontSize = 11.sp, color = if (change != null) Tech.Amber else Tech.Ink, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
-                            Text(d.storage ?: "—", Modifier.width(120.dp), fontFamily = Tech.Mono, fontSize = 11.sp, color = Tech.Muted, maxLines = 1)
-                            Text(d.size ?: "—", Modifier.width(64.dp), fontFamily = Tech.Mono, fontSize = 11.sp, textAlign = androidx.compose.ui.text.style.TextAlign.End)
+                            Text(d.storage ?: "—", Modifier.widthIn(min = 120.dp), fontFamily = Tech.Mono, fontSize = 11.sp, color = Tech.Muted, maxLines = 1, softWrap = false)
+                            Text(d.size ?: "—", Modifier.widthIn(min = 64.dp), maxLines = 1, softWrap = false, fontFamily = Tech.Mono, fontSize = 11.sp, textAlign = androidx.compose.ui.text.style.TextAlign.End)
                         }
                     }
                     if (hardware.nics.isNotEmpty()) SectionLabel("Network", suffix = "${hardware.nics.size}")
                     hardware.nics.forEach { n ->
                         val model = nicModel(n.properties)
                         val mac = nicAddress(n.properties)
-                        Row(Modifier.fillMaxWidth().height(32.dp).drawBehind { drawLine(Tech.Edge, Offset(0f, size.height), Offset(size.width, size.height), 1.dp.toPx()) }, verticalAlignment = androidx.compose.ui.Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Row(Modifier.fillMaxWidth().heightIn(min = 32.dp).drawBehind { drawLine(Tech.Edge, Offset(0f, size.height), Offset(size.width, size.height), 1.dp.toPx()) }, verticalAlignment = androidx.compose.ui.Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                             Text(n.key, Modifier.width(72.dp), fontFamily = Tech.Mono, fontSize = 11.sp, color = Tech.Amber)
                             Text(listOfNotNull(model ?: n.properties["name"], mac).joinToString("  ·  ").ifEmpty { "—" }, Modifier.weight(1f).identity(), fontFamily = Tech.Mono, fontSize = 11.sp, maxLines = 1)
-                            Text(n.properties["bridge"]?.let { "bridge $it" } ?: "—", Modifier.width(120.dp), fontFamily = Tech.Mono, fontSize = 11.sp, color = Tech.Muted)
-                            Text(n.properties["tag"]?.let { "VLAN $it" } ?: "", Modifier.width(64.dp), fontFamily = Tech.Mono, fontSize = 11.sp, color = Tech.Muted)
+                            // Minimum widths keep the columns aligned; at large text they grow instead of cutting "VLAN 10" to "VLAN".
+                            Text(n.properties["bridge"]?.let { "bridge $it" } ?: "—", Modifier.widthIn(min = 120.dp), fontFamily = Tech.Mono, fontSize = 11.sp, color = Tech.Muted, maxLines = 1, softWrap = false)
+                            Text(n.properties["tag"]?.let { "VLAN $it" } ?: "", Modifier.widthIn(min = 64.dp), fontFamily = Tech.Mono, fontSize = 11.sp, color = Tech.Muted, maxLines = 1, softWrap = false)
                             Text(nicExtras(n.properties), Modifier.width(150.dp).identity(), fontFamily = Tech.Mono, fontSize = 10.sp, color = Tech.Muted, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
                             if (n.properties["link_down"] == "1") AttentionTag("Unplugged", help = "The virtual cable is unplugged (link_down=1): the guest sees no link on this NIC.")
                             if (n.properties["firewall"] == "1") HealthyTag("FW", help = "The Proxmox firewall is enabled on this NIC.")
@@ -271,12 +274,13 @@ internal var guestHeaderProbe: (() -> Unit)? = null
                     val depth = snapshotDepth(snapshot, rows)
                     val incomplete = !snapshot.snapstate.isNullOrBlank()
                     HelpTip(listOfNotNull(snapshot.description, snapshot.time?.let { dateAndAge(it) }, if (snapshot.current) "The guest is on this snapshot now." else null, if (snapshot.ram) "This snapshot includes the guest's memory." else null, snapshot.snapstate?.let { "Incomplete: $it" }).joinToString(" / ")) {
-                        Row(Modifier.fillMaxWidth().height(32.dp).drawBehind { drawLine(Tech.Edge, Offset(0f, size.height), Offset(size.width, size.height), 1.dp.toPx()) }.padding(start = (depth * 12).dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text(snapshot.name, Modifier.weight(1f), fontSize = 12.sp, maxLines = 1)
+                        Row(Modifier.fillMaxWidth().heightIn(min = 32.dp).drawBehind { drawLine(Tech.Edge, Offset(0f, size.height), Offset(size.width, size.height), 1.dp.toPx()) }.padding(start = (depth * 12).dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(snapshot.name, Modifier.weight(1f), fontSize = 12.sp, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
                             if (snapshot.current) HealthyTag("Now")
                             if (snapshot.ram) AttentionTag("RAM")
                             if (incomplete) Text("Incomplete: ${snapshot.snapstate}", Modifier.width(250.dp), fontFamily = Tech.Mono, fontSize = 10.sp, color = Tech.Amber, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
-                            else Text(snapshot.time?.let { dateAndAge(it) } ?: "Current state", Modifier.width(250.dp), fontFamily = Tech.Mono, fontSize = 10.sp, color = Tech.Muted, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                            // As wide as the time and age need (at least the old column): the name gives up room first, not the age.
+                            else Text(snapshot.time?.let { dateAndAge(it) } ?: "Current state", Modifier.widthIn(min = 250.dp), fontFamily = Tech.Mono, fontSize = 10.sp, color = Tech.Muted, maxLines = 1, softWrap = false)
                             if (!snapshot.current) {
                                 MiniAction("Rollback", enabled = ready && snapshotRollbackAllowed(snapshot)) { onAction(PowerAction.SnapshotRollback, SnapshotRequest(snapshot.name)) }
                                 MiniAction("Delete", enabled = ready) { onAction(PowerAction.SnapshotDelete, SnapshotRequest(snapshot.name)) }
@@ -354,6 +358,9 @@ internal var guestHeaderProbe: (() -> Unit)? = null
             }
         }
     }
+    // The page scrolls as a whole (the console tab has its own surface): show it, since in a short window the header
+    // and tabs can fill the first view.
+    if (tab != "Console" && !consoleImmersive) VerticalScrollbar(rememberScrollbarAdapter(scroll), Modifier.align(androidx.compose.ui.Alignment.CenterEnd).fillMaxHeight(), style = visibleScrollbarStyle())
 }
 }
 

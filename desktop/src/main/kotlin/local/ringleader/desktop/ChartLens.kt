@@ -239,7 +239,9 @@ fun Modifier.opensLens(request: () -> LensRequest): Modifier = composed {
                 }
             }) {
             Box(Modifier.fillMaxSize()) {
-            LayoutViewport(420.dp) {
+            // Larger text needs a taller working surface; below it the lens scrolls (with a visible bar) instead of
+            // squeezing the plot until its time axis falls outside the frame.
+            LayoutViewport(420.dp * androidx.compose.ui.platform.LocalDensity.current.fontScale.coerceIn(1f, 1.4f)) {
                 Column(Modifier.fillMaxSize().graphicsLayer { alpha = contentAlpha }.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     LensBody(request, state, workspace, onClose)
                 }
@@ -333,7 +335,9 @@ private fun lerpRect(a: Rect, b: Rect, t: Float) = Rect(
     val zoom = interaction.zoom
     val points = if (zoom == null) source else source.filter { it.time in zoom }
     BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
-        val plot = (maxHeight - 96.dp).coerceIn(64.dp, 460.dp)
+        // The header, statistics line and time axis around the plot are text: their room grows with the text size.
+        val reserve = 96.dp * androidx.compose.ui.platform.LocalDensity.current.fontScale.coerceIn(1f, 1.6f)
+        val plot = (maxHeight - reserve).coerceIn(64.dp, 460.dp)
         val empty = when {
             loading && points.isEmpty() -> "Loading history…"
             error != null && points.isEmpty() -> error

@@ -138,13 +138,15 @@ import java.nio.file.Path
             }
         }
         TechAction("Cancel", Modifier.focusRequester(cancel), onClick = onCancel)
+    }, footer = {
+        // Beside the action it unlocks: in a short window the list scrolls, and Clear and quit never looks disabled for no visible reason.
+        TechField(typed, { typed = it.uppercase().take(5) }, "Type CLEAR to confirm", placeholder = "CLEAR")
+        if (clearing) Text("Clearing…", color = Tech.Muted, fontSize = 12.sp)
+        if (failed != null) Text("Some items could not be removed. Close other RingMASTER windows and try again, or delete them by hand (listed above).", color = Tech.Red, fontSize = 12.sp)
     }) {
         lines.forEach { Text("·  $it", fontSize = 13.sp, color = Tech.Ink) }
         Text(AppData.KEPT_NOTE, fontSize = 12.sp, color = Tech.Muted)
-        TechField(typed, { typed = it.uppercase().take(5) }, "Type CLEAR to confirm", placeholder = "CLEAR")
-        if (clearing) Text("Clearing…", color = Tech.Muted, fontSize = 12.sp)
         failed?.let { left ->
-            Text("Some items could not be removed. Close other RingMASTER windows and try again, or delete them by hand:", color = Tech.Red, fontSize = 12.sp)
             left.forEach { Text(it, Modifier.identity(), fontFamily = Tech.Mono, fontSize = 11.sp, color = Tech.Red) }
         }
     }

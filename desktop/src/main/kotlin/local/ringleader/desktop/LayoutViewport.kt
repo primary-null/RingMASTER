@@ -17,6 +17,9 @@ import androidx.compose.ui.unit.dp
         Box(Modifier.fillMaxSize().then(if (short) Modifier.padding(end = 12.dp).verticalScroll(scroll) else Modifier)) {
             Box(Modifier.fillMaxWidth().height(if (short) minHeight else viewportHeight), content = content)
         }
-        if (short) VerticalScrollbar(rememberScrollbarAdapter(scroll), Modifier.align(Alignment.CenterEnd).fillMaxHeight(), style = LocalScrollbarStyle.current.copy(unhoverColor = Tech.Muted.copy(alpha=.7f), hoverColor = Tech.Amber))
+        if (short) VerticalScrollbar(rememberScrollbarAdapter(scroll), Modifier.align(Alignment.CenterEnd).fillMaxHeight(), style = visibleScrollbarStyle())
     }
 }
+
+/** A scrollbar that can be seen before it is hovered: the default resting colour is invisible on the dark panels. */
+@Composable internal fun visibleScrollbarStyle(): ScrollbarStyle = LocalScrollbarStyle.current.copy(unhoverColor = Tech.Muted.copy(alpha = .7f), hoverColor = Tech.Amber)

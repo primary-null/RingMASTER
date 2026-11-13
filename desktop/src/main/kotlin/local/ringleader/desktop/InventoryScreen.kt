@@ -216,9 +216,12 @@ internal fun guestHasPage(state: WorkspaceState, guest: Guest): Boolean = state.
     }
     BoxWithConstraints(Modifier.fillMaxSize()) {
     val compact = maxWidth < 900.dp
+    // A laptop at a large interface size leaves about 200 units under the heading: the summary folds to one line and
+    // the gaps tighten, so the filter, the table header and the first rows are in view without scrolling.
+    val short = maxHeight < 400.dp
     val pageScroll = rememberScrollState()
-    Column(Modifier.fillMaxSize().then(if (compact) Modifier.padding(end = 12.dp).verticalScroll(pageScroll) else Modifier), verticalArrangement = Arrangement.spacedBy(Tech.Space8)) {
-        TelemetryStrip(state, workspace, onDisconnect)
+    Column(Modifier.fillMaxSize().then(if (compact) Modifier.padding(end = 12.dp).verticalScroll(pageScroll) else Modifier), verticalArrangement = Arrangement.spacedBy(if (short) 4.dp else Tech.Space8)) {
+        TelemetryStrip(state, workspace, onDisconnect, short = short)
         if (state.loading) TechProgress()
         state.error?.let { Text(it, color = Tech.Red, fontSize = 13.sp) }
         if (state.connected && state.lostPowerResults.isNotEmpty()) LostPowerResults(state, workspace)
@@ -238,14 +241,14 @@ internal fun guestHasPage(state: WorkspaceState, guest: Guest): Boolean = state.
                 val alongside = maxWidth >= 900.dp; val wide = maxWidth >= 1600.dp
                 if (alongside) {
                     Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(20.dp)) {
-                        GuestList(guests, overview, state.selected, state.selectedNode, search, onSearch, filter, onFilter, workspace::select, { name -> proofResource = null; workspace.selectMember(name) }, Modifier.weight(1f).fillMaxHeight(),state.history, openGuest)
+                        GuestList(guests, overview, state.selected, state.selectedNode, search, onSearch, filter, onFilter, workspace::select, { name -> proofResource = null; workspace.selectMember(name) }, Modifier.weight(1f).fillMaxHeight(),state.history, openGuest, dense = short)
                         Surface(Modifier.width(if (wide) 400.dp else 340.dp).fillMaxHeight(), color = Tech.Panel, border = BorderStroke(1.dp, Tech.Edge), shape = Tech.Plate) {
                             GuestDetailsPanel(state, workspace, { detailTab = "Summary"; detailResource = state.selected?.resource; detailOpen = true; workspace.inspectGuest() }, { detailTab = "Console"; detailResource = state.selected?.resource; detailOpen = true; workspace.inspectGuest() }, { action -> workspace.capturePower(action, profileLabel)?.let { pendingPower = it } }, pins, connectionKey) { proofResource = it.resource }
                         }
                     }
                 } else {
                     Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(Tech.Space12)) {
-                        GuestList(guests, overview, state.selected, state.selectedNode, search, onSearch, filter, onFilter, workspace::select, { name -> proofResource = null; workspace.selectMember(name) }, Modifier.weight(1.15f).fillMaxWidth(),state.history, openGuest)
+                        GuestList(guests, overview, state.selected, state.selectedNode, search, onSearch, filter, onFilter, workspace::select, { name -> proofResource = null; workspace.selectMember(name) }, Modifier.weight(1.15f).fillMaxWidth(),state.history, openGuest, dense = short)
                         Surface(Modifier.weight(0.85f).fillMaxWidth(), color = Tech.Panel, border = BorderStroke(1.dp, Tech.Edge), shape = Tech.Plate) {
                             GuestDetailsPanel(state, workspace, { detailTab = "Summary"; detailResource = state.selected?.resource; detailOpen = true; workspace.inspectGuest() }, { detailTab = "Console"; detailResource = state.selected?.resource; detailOpen = true; workspace.inspectGuest() }, { action -> workspace.capturePower(action, profileLabel)?.let { pendingPower = it } }, pins, connectionKey) { proofResource = it.resource }
                         }
@@ -254,14 +257,14 @@ internal fun guestHasPage(state: WorkspaceState, guest: Guest): Boolean = state.
             }
         }
     }
-    if (compact) VerticalScrollbar(rememberScrollbarAdapter(pageScroll), Modifier.align(Alignment.CenterEnd).fillMaxHeight())
+    if (compact) VerticalScrollbar(rememberScrollbarAdapter(pageScroll), Modifier.align(Alignment.CenterEnd).fillMaxHeight(), style = visibleScrollbarStyle())
     }
 }
 
 @Composable private fun GuestList(
     guests: List<Guest>, overview: Overview, selected: Guest?, selectedNode: String?, search: String, onSearch: (String) -> Unit,
     filter: String, onFilter: (String) -> Unit, onSelectGuest: (Guest) -> Unit, onSelectMember: (String) -> Unit, modifier: Modifier, history: FleetHistory=FleetHistory(),
-    onOpen: (Guest) -> Unit = {},
+    onOpen: (Guest) -> Unit = {}, dense: Boolean = false,
 ) {
     var sort by remember { mutableStateOf("ID") }; var descending by remember { mutableStateOf(false) }
     // One click selects a row; a second click on the same row within the system's double-click time opens the guest.
@@ -278,9 +281,10 @@ internal fun guestHasPage(state: WorkspaceState, guest: Guest): Boolean = state.
     val total = overview.guests.size
     val steadyOrder = remember { SteadyGuestOrder() }
     val grouped = guests.groupBy { it.node }.entries.sortedBy { it.key }.map { (node, members) -> node to steadyOrder.order("node:$node", sort, descending, members, history) }
-    BoxWithConstraints(modifier) { CompositionLocalProvider(LocalCols provides colsFor(maxWidth)) {
+    val textScale = androidx.compose.ui.platform.LocalDensity.current.fontScale
+    BoxWithConstraints(modifier) { CompositionLocalProvider(LocalCols provides colsFor(maxWidth, textScale)) {
     val TableCols = LocalCols.current
-    Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(Tech.Space12)) {
+    Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(if (dense) 6.dp else Tech.Space12)) {
 
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.weight(1f)) { CompactSearchField(search, onSearch) }
@@ -427,6 +431,18 @@ private val LocalCols = staticCompositionLocalOf { Cols() }
  * is what a row is for: the uptime goes first, then the memory column, so the name column keeps at least about 120 units.
  * The number of chips beside the name follows the room that is left.
  */
+private fun colsFor(width: Dp, textScale: Float): Cols {
+    // Large text needs wider cells: choose the layout for the width the text effectively has, then widen each fixed
+    // column by the text scale. Otherwise 150 % text dropped "KiB/s" from the network column and cut uptimes.
+    val scale = textScale.coerceIn(1f, 1.5f)
+    val base = colsFor(width / scale)
+    if (scale == 1f) return base
+    val cols = base.copy(tile = base.tile * scale, id = base.id * scale, cpu = base.cpu * scale, mem = base.mem * scale, net = base.net * scale,
+        disk = base.disk * scale, up = base.up * scale, status = base.status * scale, node = base.node * scale)
+    val room = width - cols.fixed
+    return cols.copy(chips = when { room >= 330.dp -> 3; room >= 250.dp -> 2; room >= 190.dp -> 1; else -> 0 })
+}
+
 private fun colsFor(width: Dp): Cols {
     val cols = when {
         width >= 1250.dp -> Cols(cpu = 210.dp, mem = 170.dp, net = 100.dp, disk = 96.dp)
@@ -577,7 +593,7 @@ private fun guestLockMark(guest: Guest): GuestMark? {
     val fraction = memoryFraction(mem, memMax)
     Column(modifier.alpha(reveal).offset { IntOffset(0, ((1f-reveal)*motion.travel(6f).dp.toPx()).toInt()) }) {
         Row(Modifier.phosphorRow(guest.resource, failedEdge = failedEdge)
-            .fillMaxWidth().height(36.dp).background(background).hoverable(interactions).clickable(interactionSource = interactions, indication = null) { onSelect(guest) }
+            .fillMaxWidth().heightIn(min = 36.dp).background(background).hoverable(interactions).clickable(interactionSource = interactions, indication = null) { onSelect(guest) }
             .drawBehind { if (isSelected) drawRect(Tech.Amber, size = androidx.compose.ui.geometry.Size(2.dp.toPx(), size.height)); if (focused) focusRing() }.padding(horizontal = 10.dp),
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(TableCols.gap)) {
             Box(Modifier.width(TableCols.tile)) { IdentityTile(if (guest.kind == "VM") "VM" else "CT", guest.template) }
@@ -635,8 +651,12 @@ private fun guestLockMark(guest: Guest): GuestMark? {
     val guest = state.selected
     val member = selectedRecordedMember(state)
     // The body scrolls; the power actions of a guest are pinned under it, so they are in reach at any window height.
+    val bodyScroll = rememberScrollState()
     Column(Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(Tech.Space8)) {
-    Column(Modifier.weight(1f).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(Tech.Space8)) {
+    Box(Modifier.weight(1f).fillMaxWidth()) {
+    // The scrollbar sits in the panel's right padding, so a short inspector shows that more lies below.
+    if (bodyScroll.maxValue > 0) VerticalScrollbar(rememberScrollbarAdapter(bodyScroll), Modifier.align(Alignment.CenterEnd).fillMaxHeight().offset(x = 10.dp), style = visibleScrollbarStyle())
+    Column(Modifier.fillMaxSize().verticalScroll(bodyScroll), verticalArrangement = Arrangement.spacedBy(Tech.Space8)) {
         SectionLabel("Inspector")
         if (member != null && guest == null) {
             NodeInspector(state, member, workspace)
@@ -701,10 +721,11 @@ private fun guestLockMark(guest: Guest): GuestMark? {
                 Sparkline(live, Modifier.opensLens { guestLens(guest, LiveMetric.Memory) }.fillMaxWidth().height(32.dp).background(Tech.Black.copy(alpha = .35f)), floor = .1, pulse = false, ease = true, readout = SparkReadout.Memory) { memoryFraction(it.mem, it.memMax) }
                 MiniHeading("NETWORK", "IN green · OUT amber")
                 NetSparkline(live, Modifier.opensLens { guestLens(guest, LiveMetric.Network) }.fillMaxWidth().height(32.dp).background(Tech.Black.copy(alpha = .35f)), pulse = false, ease = true)
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Column(Modifier.weight(1f)) { Text("NET IN", fontSize = 9.sp, color = Tech.Muted, fontFamily = Tech.Mono); Text(formatRate(sample?.netInRate), fontSize = 12.sp, fontFamily = Tech.Mono) }
-                    Column(Modifier.weight(1f)) { Text("NET OUT", fontSize = 9.sp, color = Tech.Muted, fontFamily = Tech.Mono); Text(formatRate(sample?.netOutRate), fontSize = 12.sp, fontFamily = Tech.Mono) }
-                    Column(Modifier.weight(1f)) { Text("UPTIME", fontSize = 9.sp, color = Tech.Muted, fontFamily = Tech.Mono); Text(shortUptime(guest.metrics?.uptimeSeconds), fontSize = 12.sp, fontFamily = Tech.Mono) }
+                // Each fact is as wide as its value and the row wraps: equal thirds split "77.9 KiB/s" before its "s" at large text.
+                FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf("NET IN" to formatRate(sample?.netInRate), "NET OUT" to formatRate(sample?.netOutRate), "UPTIME" to shortUptime(guest.metrics?.uptimeSeconds)).forEach { (label, value) ->
+                        Column { Text(label, fontSize = 9.sp, color = Tech.Muted, fontFamily = Tech.Mono, maxLines = 1, softWrap = false); Text(value, fontSize = 12.sp, fontFamily = Tech.Mono, maxLines = 1, softWrap = false) }
+                    }
                 }
             }
             if (state.demo) Text("SAMPLE DETAILS", fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = Tech.Amber)
@@ -732,6 +753,7 @@ private fun guestLockMark(guest: Guest): GuestMark? {
             details?.provenance?.let { Text(it, fontSize = 11.sp, color = Tech.Muted); if (guest.kind == "VM") Text(PDM_DISK_NOTE, fontSize = 11.sp, color = Tech.Muted) }
 
         }
+    }
     }
     if (guest != null) {
         HorizontalDivider(color = Tech.Edge)
@@ -779,7 +801,7 @@ private fun guestLockMark(guest: Guest): GuestMark? {
     cpuRanking.rank(running.associate { it.resource to (steadyValue(state.history.guests[it.resource], it.metrics?.cpuFraction) { s -> s.cpu } ?: 0.0) }).take(5).mapNotNull(byResource::get).forEach { row ->
         val series = state.history.guests[row.resource]
         val cpuNow = latestCpu(series, row.metrics?.cpuFraction)
-        Row(Modifier.fillMaxWidth().height(24.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(Modifier.fillMaxWidth().heightIn(min = 24.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(row.name.ifBlank { "Guest ${row.id}" }, Modifier.weight(1f).identity(), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Sparkline(series ?: Series(), Modifier.opensLens { guestLens(row, LiveMetric.Cpu) }.size(96.dp, 16.dp), pulse = false)
             Text(percent(cpuNow), Modifier.width(40.dp), fontFamily = Tech.Mono, fontSize = 11.sp, textAlign = TextAlign.End, color = if (cpuNow != null) ramp(cpuNow) else Tech.Muted)
@@ -792,7 +814,7 @@ private fun guestLockMark(guest: Guest): GuestMark? {
         val series = state.history.guests[row.resource]
         Triple(row, latestMemory(series, row.metrics?.memoryBytes), series?.samples?.lastOrNull()?.memMax ?: row.metrics?.memoryLimitBytes)
     }.forEach { (row, used, cap) ->
-        Row(Modifier.fillMaxWidth().height(24.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(Modifier.fillMaxWidth().heightIn(min = 24.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(row.name.ifBlank { "Guest ${row.id}" }, Modifier.weight(1f).identity(), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             UsageBar(memoryFraction(used, cap), Modifier.width(96.dp))
             Text(if (used != null && cap != null) "${gib(used)}/${gib(cap)}G" else "—", Modifier.width(64.dp), fontFamily = Tech.Mono, fontSize = 10.sp, textAlign = TextAlign.End, color = Tech.Muted, maxLines = 1)
@@ -954,9 +976,9 @@ private fun guestLockMark(guest: Guest): GuestMark? {
 
 /** Dense label/value row for the node inspector. */
 @Composable private fun FactLine(label: String, value: String) {
-    Row(Modifier.fillMaxWidth().height(22.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text(label.uppercase(), fontSize = 9.sp, letterSpacing = .8.sp, color = Tech.Muted, fontFamily = Tech.Mono, maxLines = 1, softWrap = false)
-        Text(value, Modifier.weight(1f), fontFamily = Tech.Mono, fontSize = 11.sp, textAlign = TextAlign.End, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    Row(Modifier.fillMaxWidth().heightIn(min = 22.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(label.uppercase(), fontSize = 9.sp, lineHeight = 12.sp, letterSpacing = .8.sp, color = Tech.Muted, fontFamily = Tech.Mono, maxLines = 1, softWrap = false)
+        Text(value, Modifier.weight(1f), fontFamily = Tech.Mono, fontSize = 11.sp, lineHeight = 14.sp, textAlign = TextAlign.End, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 

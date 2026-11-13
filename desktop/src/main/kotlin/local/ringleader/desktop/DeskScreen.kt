@@ -1,6 +1,7 @@
 package local.ringleader.desktop
 
 import androidx.compose.ui.draw.blur
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.animation.animateColorAsState
@@ -25,6 +26,8 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -144,7 +147,7 @@ private val ConnectPanelWidth = 520.dp
                 }
             }
         }
-        VerticalScrollbar(rememberScrollbarAdapter(scroll), Modifier.align(Alignment.CenterEnd).fillMaxHeight())
+        VerticalScrollbar(rememberScrollbarAdapter(scroll), Modifier.align(Alignment.CenterEnd).fillMaxHeight(), style = visibleScrollbarStyle())
     }
 }
 
@@ -266,15 +269,16 @@ private val ConnectPanelWidth = 520.dp
         tween(if (LocalReduceMotion.current) 0 else 120),
     )
     Row(
-        Modifier.fillMaxWidth().height(44.dp).hoverable(interaction).clip(Tech.Control).background(bg).border(1.dp, if (selected) Tech.Amber else Tech.Edge, Tech.Control).padding(horizontal = 8.dp),
+        // The row grows with the text size: a fixed 44 units clipped the kind badge and hid the address line at 150 % text.
+        Modifier.fillMaxWidth().heightIn(min = 44.dp).hoverable(interaction).clip(Tech.Control).background(bg).border(1.dp, if (selected) Tech.Amber else Tech.Edge, Tech.Control).padding(horizontal = 8.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         KindBadge(if (profile.kind == PDM_KIND) "PDM" else "PVE")
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
-            Text(profile.displayName, Modifier.identity(), fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(profile.displayName, Modifier.identity(), fontSize = 13.sp, lineHeight = 17.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             HelpTip("${profile.origin} · ${profile.tokenId} · ${if (profile.sha256Pin == null) "No pin" else "Pin saved"}") {
-                Text(profile.origin, Modifier.identity(), fontFamily = Tech.Mono, fontSize = 11.sp, color = Tech.Muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(profile.origin, Modifier.identity(), fontFamily = Tech.Mono, fontSize = 11.sp, lineHeight = 15.sp, color = Tech.Muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }
         if (profile.sha256Pin != null) NeutralTag("Pinned", help = "A SHA-256 certificate pin is saved. RingMASTER checks the server certificate against it.")
@@ -292,10 +296,10 @@ private val ConnectPanelWidth = 520.dp
 @Composable private fun KindBadge(label: String) {
     val pdm = label == "PDM"
     Box(
-        Modifier.height(18.dp).widthIn(min = 34.dp).background(Tech.Raised, Tech.Control).border(1.dp, if (pdm) Tech.Amber else Tech.Green, Tech.Control).padding(horizontal = 4.dp),
+        Modifier.heightIn(min = 18.dp).widthIn(min = 34.dp).background(Tech.Raised, Tech.Control).border(1.dp, if (pdm) Tech.Amber else Tech.Green, Tech.Control).padding(horizontal = 4.dp),
         contentAlignment = Alignment.Center,
     ) {
-        Text(label, fontFamily = Tech.Mono, fontSize = 9.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.4.sp, color = if (pdm) Tech.Amber else Tech.Green)
+        Text(label, fontFamily = Tech.Mono, fontSize = 9.sp, lineHeight = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.4.sp, color = if (pdm) Tech.Amber else Tech.Green)
     }
 }
 
@@ -326,7 +330,10 @@ private val ConnectPanelWidth = 520.dp
 @Composable private fun ProfileEditor(deskState: DeskState, desk: ProfileDesk) {
     val draft = deskState.draft
     val active = draft.id != null && draft.id == deskState.connectedProfileId
-    Column(Modifier.widthIn(max = 560.dp).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(Tech.Space8)) {
+    // Opening the editor brings it into view: below the saved list it started entirely under the fold in a short window.
+    val reveal = remember { androidx.compose.foundation.relocation.BringIntoViewRequester() }
+    LaunchedEffect(draft.id) { reveal.bringIntoView() }
+    Column(Modifier.widthIn(max = 560.dp).fillMaxWidth().bringIntoViewRequester(reveal), verticalArrangement = Arrangement.spacedBy(Tech.Space8)) {
         SectionLabel(if (deskState.profiles.any { it.id == draft.id }) "Edit profile" else "New profile")
         var passwordMode by remember(draft.id) { mutableStateOf(draft.tokenId.isNotEmpty() && !draft.tokenId.contains('!')) }
         KindChoice(draft.kind) { if (it == PDM_KIND) passwordMode = false; desk.updateDraft(draft.displayName, draft.origin, draft.tokenId, draft.sha256Pin, it) }
@@ -453,7 +460,7 @@ private fun rememberHelp(vaultName: String): String = when {
         Column(verticalArrangement = Arrangement.spacedBy(Tech.Space8)) {
             SectionLabel("Connect")
             HelpTip("A new connection opens beside the ones already open; nothing is replaced. Verify private certificate fingerprints with your administrator.") {
-                Text(if (anyOpen) "Opens beside the open connection · secrets stay in memory" else "Connect without saving a profile · secrets stay in memory", fontSize = 11.sp, color = Tech.Muted, fontFamily = Tech.Mono)
+                Text(if (anyOpen) "Opens beside the open connection · secrets stay in memory" else "Connect without saving a profile · secrets stay in memory", fontSize = 11.sp, lineHeight = 15.sp, color = Tech.Muted, fontFamily = Tech.Mono)
             }
             KindChoice(kind) { if (kind != it) { scanValid = false; scanOffer.invalidate(); fingerprint = "" }; kind = it }
             if (kind == DIRECT_PVE_KIND) AuthChoice(passwordMode) { chosen ->
@@ -526,7 +533,7 @@ private fun rememberHelp(vaultName: String): String = when {
 
 /** Direct PVE only: sign in with an API token or with a user name and password. */
 @Composable private fun AuthChoice(password: Boolean, onChange: (Boolean) -> Unit) {
-    Row(Modifier.fillMaxWidth().height(28.dp).clip(Tech.Control).border(1.dp, Tech.Edge, Tech.Control)) {
+    Row(Modifier.fillMaxWidth().heightIn(min = 28.dp).height(IntrinsicSize.Min).clip(Tech.Control).border(1.dp, Tech.Edge, Tech.Control)) {
         KindSegment("API token", !password, Modifier.weight(1f)) { onChange(false) }
         Box(Modifier.width(1.dp).fillMaxHeight().background(Tech.Edge))
         KindSegment("Password", password, Modifier.weight(1f)) { onChange(true) }
@@ -534,7 +541,7 @@ private fun rememberHelp(vaultName: String): String = when {
 }
 
 @Composable private fun KindChoice(kind: String, onKind: (String) -> Unit) {
-    Row(Modifier.fillMaxWidth().height(28.dp).clip(Tech.Control).border(1.dp, Tech.Edge, Tech.Control)) {
+    Row(Modifier.fillMaxWidth().heightIn(min = 28.dp).height(IntrinsicSize.Min).clip(Tech.Control).border(1.dp, Tech.Edge, Tech.Control)) {
         KindSegment("Direct PVE", kind == DIRECT_PVE_KIND, Modifier.weight(1f)) { onKind(DIRECT_PVE_KIND) }
         Box(Modifier.width(1.dp).fillMaxHeight().background(Tech.Edge))
         KindSegment("PDM", kind == PDM_KIND, Modifier.weight(1f)) { onKind(PDM_KIND) }
@@ -549,14 +556,14 @@ private fun rememberHelp(vaultName: String): String = when {
     val hovered by interaction.collectIsHoveredAsState()
     val tint = if (selected || focused) Tech.Amber else Tech.Edge
     Box(
-        modifier.fillMaxHeight().background(when {
+        modifier.fillMaxHeight().heightIn(min = 28.dp).background(when {
             selected -> Tech.AmberWash
             hovered -> Tech.Raised
             else -> Color.Transparent
         }).clickable(interactionSource = interaction, indication = null, role = Role.Button, onClick = onClick).border(1.dp, if (focused) tint else Color.Transparent),
         contentAlignment = Alignment.Center,
     ) {
-        Text(label.uppercase(), fontFamily = Tech.Mono, fontWeight = FontWeight.Bold, fontSize = 11.sp, letterSpacing = 0.6.sp, color = if (selected) Tech.Amber else Tech.Ink)
+        Text(label.uppercase(), Modifier.padding(vertical = 3.dp), fontFamily = Tech.Mono, fontWeight = FontWeight.Bold, fontSize = 11.sp, lineHeight = 14.sp, letterSpacing = 0.6.sp, color = if (selected) Tech.Amber else Tech.Ink)
     }
 }
 
@@ -627,7 +634,7 @@ internal fun submitOnEnter(event: KeyEvent, onSubmit: (() -> Unit)?): Boolean {
 @Composable private fun SecretToggle(label: String, onClick: () -> Unit) {
     val interaction = remember { MutableInteractionSource() }
     Box(
-        Modifier.height(26.dp).border(1.dp, Tech.Edge, Tech.Control)
+        Modifier.heightIn(min = 26.dp).border(1.dp, Tech.Edge, Tech.Control)
             .focusProperties { canFocus = false }
             .clickable(interactionSource = interaction, indication = null, role = Role.Button, onClick = onClick)
             .padding(horizontal = 10.dp),

@@ -590,8 +590,9 @@ internal fun shortRate(value: Double?): String = when {
 }
 
 @Composable fun RateLine(label: String, value: Double?, tint: Color, fontSize: TextUnit = 10.sp) = Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-    Text(label, Modifier.width(26.dp), fontSize = fontSize, lineHeight = fontSize * 1.2f, fontFamily = Tech.Mono, color = tint, maxLines = 1)
-    Text(formatRate(value), fontSize = fontSize, lineHeight = fontSize * 1.2f, fontFamily = Tech.Mono, color = Tech.Ink.copy(alpha = .85f), maxLines = 1)
+    // The label grows with the text size: a fixed 26 units cut "OUT" to "OU" at 150 % text.
+    Text(label, Modifier.widthIn(min = 26.dp), fontSize = fontSize, lineHeight = fontSize * 1.2f, fontFamily = Tech.Mono, color = tint, maxLines = 1, softWrap = false)
+    Text(formatRate(value), fontSize = fontSize, lineHeight = fontSize * 1.2f, fontFamily = Tech.Mono, color = Tech.Ink.copy(alpha = .85f), maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
 }
 
 /** 240° gauge that eases to new values without overshoot, number in the centre, caption and detail below. Hover names the exact value. */
@@ -773,94 +774,118 @@ internal fun syncedAgo(updatedAt: java.time.Instant?, now: java.time.Instant): S
 }
 
 @Composable private fun StripCell(label: String, modifier: Modifier = Modifier, identity: Boolean = false, content: @Composable ColumnScope.() -> Unit) {
-    Column(modifier.fillMaxHeight().padding(horizontal = 14.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(5.dp, Alignment.CenterVertically)) {
+    Column(modifier.padding(horizontal = 14.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(5.dp, Alignment.CenterVertically)) {
         Text(label, if (identity) Modifier.identity() else Modifier, fontSize = 9.sp, lineHeight = 11.sp, letterSpacing = 1.2.sp, color = Tech.Muted, fontFamily = Tech.Mono, maxLines = 1, overflow = TextOverflow.Ellipsis)
         content()
     }
 }
 @Composable private fun StripDivider() = Box(Modifier.width(1.dp).fillMaxHeight().padding(vertical = 10.dp).background(Tech.Edge))
 
-/** One-line fleet telemetry: link, nodes, guests split, cluster CPU, guest network, busiest guest, memory, actions. Wraps to two lines under 1450dp. */
-@Composable fun TelemetryStrip(state: WorkspaceState, workspace: Workspace, onDisconnect: () -> Unit) {
+/** The split under the guest count, with each count tied to its noun: a line may break between items, never inside one. */
+internal fun guestSplitDisplay(total: FleetTotals): String = guestSplitText(total).split(" · ").joinToString(" · ") { it.replace(' ', ' ') }
+
+/** One collapsed line for a short window: the headline counts. The full strip is one click away. */
+internal fun fleetDigest(state: WorkspaceState, total: FleetTotals?): String {
+    if (total == null) return if (state.loading) "Loading the fleet…" else "No fleet data yet"
+    val counted = if (state.overview?.remotes.isNullOrEmpty()) "${total.nodes} ${if (total.nodes == 1) "node" else "nodes"}" else "${state.overview!!.remotes.size} remotes"
+    return listOfNotNull(counted, "${total.guests} guests", total.cpuFraction?.let { "CPU ${percent(it)}" },
+        total.memoryBytes?.let { "MEM ${percent(memoryFraction(it, total.memoryLimitBytes))}" }).joinToString(" · ")
+}
+
+/**
+ * Fleet telemetry: link, nodes, guests split, cluster CPU, guest network, busiest guest, memory, actions. One line on a
+ * wide window. Narrower, the cells wrap onto further lines at a width that grows with the text size, so no fact is cut
+ * at the edge or hidden behind a scroller. In a [short] page (a laptop at a large interface size) the strip folds to
+ * one digest line with a Details control, so the inventory below stays in view; Details shows every cell and action.
+ */
+@Composable fun TelemetryStrip(state: WorkspaceState, workspace: Workspace, onDisconnect: () -> Unit, short: Boolean = false) {
     val total = state.overview?.let(::fleetTotals)
     val prefs = remember { MotionPreferences() }
     val reduce = LocalReduceMotion.current
     val phase = LocalMotionPhase.current
     val spinning = !reduce && phase.active.value && state.loading
+    var details by remember { mutableStateOf(false) }
     val host = if (state.demo) "DEMO · SAMPLE DATA" else state.address.substringAfter("://").trimEnd('/')
     // sp grows with the accessibility text size; dp does not. Widen the tight cells, and stop before the 960 and 1920 strips gain a line.
     val fontScale = androidx.compose.ui.platform.LocalDensity.current.fontScale.coerceIn(1f, 1.5f)
     fun textWidth(base: Dp, cap: Float) = base * fontScale.coerceAtMost(cap)
-    val link: @Composable () -> Unit = {
-        StripCell("LINK · $host", Modifier.width(textWidth(220.dp, 1.08f)), identity = true) {
+    val toggleLive: () -> Unit = { val next = !state.live; workspace.setLive(next); prefs.put("live", next) }
+    val linkCell: @Composable (Modifier) -> Unit = { modifier ->
+        StripCell("LINK · $host", modifier.width(textWidth(220.dp, 1.08f)), identity = true) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                LivePill(state) { val next = !state.live; workspace.setLive(next); prefs.put("live", next) }
+                LivePill(state, toggleLive)
                 Box(Modifier.weight(1f)) { SyncedAgeText(state.updatedAt) }
             }
         }
     }
-    val counts: @Composable () -> Unit = {
-        if (total != null) {
-            StripCell(if (state.overview?.remotes.isNullOrEmpty()) "NODES" else "REMOTES", Modifier.width(textWidth(76.dp, 1.25f)).height(76.dp * fontScale)) {
-                AnimatedCount(if (state.overview?.remotes.isNullOrEmpty()) total.nodes else state.overview!!.remotes.size)
+    val nodesCell: @Composable (Modifier) -> Unit = { modifier ->
+        if (total != null) StripCell(if (state.overview?.remotes.isNullOrEmpty()) "NODES" else "REMOTES", modifier.width(textWidth(76.dp, 1.25f))) {
+            AnimatedCount(if (state.overview?.remotes.isNullOrEmpty()) total.nodes else state.overview!!.remotes.size)
+        }
+    }
+    val guestsCell: @Composable (Modifier) -> Unit = { modifier ->
+        if (total != null) StripCell("GUESTS", modifier.width(textWidth(230.dp, 1.12f))) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                AnimatedCount(total.guests)
+                Text(guestSplitDisplay(total), fontSize = 10.sp, lineHeight = 12.sp, color = Tech.Muted, fontFamily = Tech.Mono,
+                    modifier = Modifier.weight(1f).padding(bottom = 3.dp), maxLines = 2, overflow = TextOverflow.Ellipsis)
             }
-            StripCell("GUESTS", Modifier.width(textWidth(230.dp, 1.12f)).height(76.dp * fontScale)) {
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    AnimatedCount(total.guests)
-                    Text(guestSplitText(total), fontSize = 10.sp, color = Tech.Muted, fontFamily = Tech.Mono,
-                        modifier = Modifier.weight(1f).padding(bottom = 3.dp), maxLines = 2, overflow = TextOverflow.Ellipsis)
-                }
-                SplitBar(listOf(total.running, total.stopped, total.templates, otherGuests(total)), Modifier.fillMaxWidth())
+            SplitBar(listOf(total.running, total.stopped, total.templates, otherGuests(total)), Modifier.fillMaxWidth())
+        }
+    }
+    val cpuMin = textWidth(160.dp, 1.15f)
+    val cpuCell: @Composable (Modifier) -> Unit = { modifier ->
+        if (total?.cpuFraction != null) StripCell("CLUSTER CPU", modifier) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Sparkline(state.history.cluster, Modifier.opensLens { clusterLens(LiveMetric.Cpu) }.weight(1f).height(26.dp))
+                AnimatedNumber(total.cpuFraction!!, Modifier.width(textWidth(54.dp, 1.5f)), fontSize = 16.sp)
             }
         }
     }
-    val usage: @Composable RowScope.() -> Unit = {
-        if (total?.cpuFraction != null) {
-            StripCell("CLUSTER CPU", Modifier.weight(1f).widthIn(min = textWidth(160.dp, 1.15f))) {
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Sparkline(state.history.cluster, Modifier.opensLens { clusterLens(LiveMetric.Cpu) }.weight(1f).height(26.dp))
-                    AnimatedNumber(total.cpuFraction!!, Modifier.width(textWidth(54.dp, 1.5f)), fontSize = 16.sp)
-                }
-            }
-            StripDivider()
-        }
+    val rateWidth = textWidth(104.dp, 1.35f)
+    val netMin = textWidth(160.dp, 1.2f).coerceAtLeast(rateWidth + 92.dp)
+    val netCell: @Composable (Modifier) -> Unit = { modifier ->
         if (total != null) {
             val net = state.history.cluster.samples.lastOrNull()
-            StripCell("GUEST NETWORK", Modifier.weight(1f).widthIn(min = textWidth(160.dp, 1.2f))) {
+            StripCell("GUEST NETWORK", modifier) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     NetSparkline(state.history.cluster, Modifier.opensLens { clusterLens(LiveMetric.Network) }.weight(1f).height(26.dp))
-                    Column(Modifier.width(textWidth(104.dp, 1.35f)), verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                    Column(Modifier.width(rateWidth), verticalArrangement = Arrangement.spacedBy(1.dp)) {
                         RateLine("IN", net?.netInRate, Tech.Green)
                         RateLine("OUT", net?.netOutRate, Tech.Amber)
                     }
                 }
             }
-            StripDivider()
-            // The busiest guest by its last minute, and it keeps the title until another clearly leads: two guests
-            // with similar load used to swap the name here on every reading.
-            val busiest = remember(state.connectionEpoch) { SteadyRanking<ResourceId>() }
-            val running = state.overview?.guests.orEmpty().filter { it.status == "running" && !it.template }
-            val hot = busiest.rank(running.associate { it.resource to (steadyValue(state.history.guests[it.resource], it.metrics?.cpuFraction) { s -> s.cpu } ?: 0.0) })
-                .firstOrNull()?.let { top -> running.firstOrNull { it.resource == top } }
-            StripCell("BUSIEST GUEST", Modifier.width(textWidth(200.dp, 1.12f))) {
-                if (hot == null) Text("—", fontSize = 13.sp, fontFamily = Tech.Mono, color = Tech.Muted)
-                else {
-                    val series = state.history.guests[hot.resource]
-                    val cpu = latestCpu(series, hot.metrics?.cpuFraction)
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text(hot.name.ifBlank { "Guest ${hot.id}" }, Modifier.weight(1f).identity(), fontSize = 13.sp, fontFamily = Tech.Mono, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, softWrap = false)
-                        if (cpu != null) AnimatedNumber(cpu, Modifier.width(textWidth(44.dp, 1.5f)), fontSize = 13.sp)
-                    }
-                    Sparkline(series ?: Series(), Modifier.opensLens { guestLens(hot, LiveMetric.Cpu) }.fillMaxWidth().height(10.dp), grid = false, pulse = false, ease = true)
+        }
+    }
+    // The busiest guest by its last minute, and it keeps the title until another clearly leads: two guests
+    // with similar load used to swap the name here on every reading.
+    val busiest = remember(state.connectionEpoch) { SteadyRanking<ResourceId>() }
+    val running = state.overview?.guests.orEmpty().filter { it.status == "running" && !it.template }
+    val hot = if (total == null) null else busiest.rank(running.associate { it.resource to (steadyValue(state.history.guests[it.resource], it.metrics?.cpuFraction) { s -> s.cpu } ?: 0.0) })
+        .firstOrNull()?.let { top -> running.firstOrNull { it.resource == top } }
+    val busiestWidth = textWidth(200.dp, 1.12f)
+    val busiestCell: @Composable (Modifier) -> Unit = { modifier ->
+        if (total != null) StripCell("BUSIEST GUEST", modifier) {
+            if (hot == null) Text("—", fontSize = 13.sp, fontFamily = Tech.Mono, color = Tech.Muted)
+            else {
+                val series = state.history.guests[hot.resource]
+                val cpu = latestCpu(series, hot.metrics?.cpuFraction)
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(hot.name.ifBlank { "Guest ${hot.id}" }, Modifier.weight(1f).identity(), fontSize = 13.sp, fontFamily = Tech.Mono, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, softWrap = false)
+                    if (cpu != null) AnimatedNumber(cpu, Modifier.width(textWidth(44.dp, 1.5f)), fontSize = 13.sp)
                 }
+                Sparkline(series ?: Series(), Modifier.opensLens { guestLens(hot, LiveMetric.Cpu) }.fillMaxWidth().height(10.dp), grid = false, pulse = false, ease = true)
             }
-            StripDivider()
-        } else Spacer(Modifier.weight(1f))
+        }
+    }
+    // The percentage is the first thing to drop: the bar still shows the fraction, and the gib line keeps its width.
+    val showPercent = fontScale < 1.25f
+    val memoryWidth = textWidth(190.dp, if (showPercent) 1.25f else 1.15f)
+    val memoryCell: @Composable (Modifier) -> Unit = { modifier ->
         if (total?.memoryBytes != null) {
             val f = memoryFraction(total.memoryBytes, total.memoryLimitBytes)
-            // The percentage is the first thing to drop: the bar still shows the fraction, and the gib line keeps its width.
-            val showPercent = fontScale < 1.25f
-            StripCell("MEMORY", Modifier.width(textWidth(190.dp, if (showPercent) 1.25f else 1.15f))) {
+            StripCell("MEMORY", modifier) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("${gib(total.memoryBytes)} / ${gib(total.memoryLimitBytes)} GiB", fontSize = 13.sp, fontFamily = Tech.Mono,
                         modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis, softWrap = false)
@@ -868,11 +893,10 @@ internal fun syncedAgo(updatedAt: java.time.Instant?, now: java.time.Instant): S
                 }
                 UsageBar(f, Modifier.fillMaxWidth())
             }
-            StripDivider()
         }
     }
-    val actions: @Composable RowScope.() -> Unit = {
-        Row(Modifier.fillMaxHeight().padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+    val actions: @Composable (Modifier) -> Unit = { modifier ->
+        Row(modifier.padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             HelpTip("Sync now (F5)") {
                 Box(Modifier.size(28.dp).border(1.dp, Tech.Edge, Tech.Control).clickable(enabled = (state.connected || state.demo) && !state.loading, onClick = workspace::refresh), contentAlignment = Alignment.Center) {
                     Canvas(Modifier.size(14.dp)) {
@@ -890,32 +914,67 @@ internal fun syncedAgo(updatedAt: java.time.Instant?, now: java.time.Instant): S
                 TechAction("Done", active = true) { permissions = false }
             }) { PermissionsPanel(state, workspace, framed = false) }
             MiniAction("Disconnect", enabled = state.connected || state.demo, onClick = onDisconnect)
+            if (short) HelpTip("Fold the summary to one line so the inventory stays in view") { MiniAction("Hide details") { details = false } }
         }
     }
     Surface(color = Tech.Panel, shape = Tech.Plate, border = BorderStroke(1.dp, Tech.Edge), modifier = Modifier.fillMaxWidth()) {
+        if (short && !details) {
+            val digest = fleetDigest(state, total)
+            Row(Modifier.fillMaxWidth().heightIn(min = 36.dp).padding(horizontal = 10.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                LivePill(state, toggleLive)
+                Box(Modifier.weight(1f)) {
+                    HelpTip(listOfNotNull("LINK · $host", digest, total?.let(::guestSplitText)).joinToString("\n"), identity = true) {
+                        Text(digest, fontSize = 11.sp, fontFamily = Tech.Mono, color = Tech.Ink, maxLines = 1, overflow = TextOverflow.Ellipsis, softWrap = false)
+                    }
+                }
+                HelpTip("Show the whole summary: link, guest split, CPU and network trends, busiest guest, memory, Sync, Permissions and Disconnect") {
+                    MiniAction("Details") { details = true }
+                }
+            }
+            return@Surface
+        }
         val wideHeight = 76.dp * fontScale.coerceAtMost(1.2f)
         val narrowHeight = 72.dp * fontScale.coerceAtMost(1.2f)
         BoxWithConstraints {
             val availableWidth = maxWidth
             if (availableWidth >= 1450.dp * fontScale) {
-                Row(Modifier.fillMaxWidth().height(wideHeight), verticalAlignment = Alignment.CenterVertically) { link(); StripDivider(); counts(); StripDivider(); usage(); actions() }
-            } else {
-                Column {
-                    if (availableWidth >= 900.dp * fontScale) {
-                        Row(Modifier.fillMaxWidth().height(narrowHeight), verticalAlignment = Alignment.CenterVertically) { link(); StripDivider(); counts(); Spacer(Modifier.weight(1f)); actions() }
-                    } else {
-                        // Keep every action reachable when an expanded rail or large text reduces the available width.
-                        FlowRow(Modifier.fillMaxWidth(), horizontalArrangement=Arrangement.spacedBy(4.dp), verticalArrangement=Arrangement.spacedBy(4.dp)) {
-                            Box(Modifier.height(narrowHeight)) { link() }
-                            counts()
-                        }
-                        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).height(40.dp * fontScale), verticalAlignment = Alignment.CenterVertically) { actions() }
+                Row(Modifier.fillMaxWidth().height(wideHeight), verticalAlignment = Alignment.CenterVertically) {
+                    linkCell(Modifier.fillMaxHeight()); StripDivider(); nodesCell(Modifier.fillMaxHeight()); guestsCell(Modifier.fillMaxHeight()); StripDivider()
+                    if (total?.cpuFraction != null) { cpuCell(Modifier.fillMaxHeight().weight(1f).widthIn(min = cpuMin)); StripDivider() }
+                    if (total != null) {
+                        netCell(Modifier.fillMaxHeight().weight(1f).widthIn(min = netMin)); StripDivider()
+                        busiestCell(Modifier.fillMaxHeight().width(busiestWidth)); StripDivider()
+                    } else Spacer(Modifier.weight(1f))
+                    if (total?.memoryBytes != null) { memoryCell(Modifier.fillMaxHeight().width(memoryWidth)); StripDivider() }
+                    actions(Modifier.fillMaxHeight())
+                }
+            } else Column {
+                if (availableWidth >= 900.dp * fontScale) {
+                    Row(Modifier.fillMaxWidth().height(narrowHeight), verticalAlignment = Alignment.CenterVertically) {
+                        linkCell(Modifier.fillMaxHeight()); StripDivider(); nodesCell(Modifier.fillMaxHeight()); guestsCell(Modifier.fillMaxHeight()); Spacer(Modifier.weight(1f)); actions(Modifier.fillMaxHeight())
                     }
-                    Box(Modifier.fillMaxWidth().height(1.dp).background(Tech.Edge))
-                    val usageScroll = rememberScrollState()
-                    Column {
-                        Row(Modifier.fillMaxWidth().horizontalScroll(usageScroll).widthIn(min = 820.dp * fontScale).height(narrowHeight), verticalAlignment = Alignment.CenterVertically) { usage() }
-                        HorizontalScrollbar(rememberScrollbarAdapter(usageScroll), Modifier.fillMaxWidth().height(8.dp))
+                } else {
+                    // An expanded rail or large text reduces the width: the cells and every action wrap, each kept whole.
+                    FlowRow(Modifier.fillMaxWidth(), itemVerticalAlignment = Alignment.CenterVertically) {
+                        linkCell(Modifier.heightIn(min = narrowHeight)); nodesCell(Modifier.heightIn(min = narrowHeight)); guestsCell(Modifier.heightIn(min = narrowHeight))
+                        actions(Modifier.heightIn(min = 44.dp))
+                    }
+                }
+                Box(Modifier.fillMaxWidth().height(1.dp).background(Tech.Edge))
+                if (availableWidth >= 820.dp * fontScale) {
+                    Row(Modifier.fillMaxWidth().height(narrowHeight), verticalAlignment = Alignment.CenterVertically) {
+                        if (total?.cpuFraction != null) { cpuCell(Modifier.fillMaxHeight().weight(1f).widthIn(min = cpuMin)); StripDivider() }
+                        if (total != null) {
+                            netCell(Modifier.fillMaxHeight().weight(1f).widthIn(min = netMin)); StripDivider()
+                            busiestCell(Modifier.fillMaxHeight().width(busiestWidth)); StripDivider()
+                        } else Spacer(Modifier.weight(1f))
+                        if (total?.memoryBytes != null) { memoryCell(Modifier.fillMaxHeight().width(memoryWidth)); StripDivider() }
+                    }
+                } else {
+                    // Too narrow for one usage line: whole cells on as many lines as needed. Nothing waits behind a scroller.
+                    FlowRow(Modifier.fillMaxWidth()) {
+                        val cell = Modifier.heightIn(min = narrowHeight)
+                        cpuCell(cell.width(cpuMin + 40.dp)); netCell(cell.width(netMin + 20.dp)); busiestCell(cell.width(busiestWidth)); memoryCell(cell.width(memoryWidth))
                     }
                 }
             }

@@ -3,6 +3,8 @@ package local.ringleader.desktop
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CutCornerShape
@@ -28,7 +30,8 @@ import androidx.compose.ui.unit.sp
 @Composable private fun TechTagChip(label: String, tint: Color, modifier: Modifier) {
     // Fixed line height: the default for 9sp overflowed the box and the label sat on the border.
     // The extra end padding keeps the last letter clear of the cut bottom-right corner.
-    Box(modifier.height(16.dp).border(1.dp, tint.copy(alpha = .75f), Tech.Control).padding(start = 4.dp, end = 7.dp), contentAlignment = Alignment.Center) {
+    // At least 16 units, and taller with large text: a fixed height clipped labels at the chip bottom at 150 %.
+    Box(modifier.heightIn(min = 16.dp).border(1.dp, tint.copy(alpha = .75f), Tech.Control).padding(start = 4.dp, end = 7.dp), contentAlignment = Alignment.Center) {
         Text(label.uppercase(), fontFamily = Tech.Mono, fontSize = 9.sp, lineHeight = 11.sp, fontWeight = FontWeight.Bold, color = tint, maxLines = 1, softWrap = false)
     }
 }
@@ -40,7 +43,7 @@ import androidx.compose.ui.unit.sp
 
 /** Network interface type. Fixed 78dp so the column lines up; text starts clear of the cut corner. */
 @Composable fun TechTypeTag(label: String, tint: Color, modifier: Modifier = Modifier) {
-    Box(modifier.width(78.dp).height(16.dp).border(1.dp, tint.copy(alpha = .7f), Tech.Control).padding(start = 4.dp, end = 7.dp), contentAlignment = Alignment.CenterStart) {
+    Box(modifier.widthIn(min = 78.dp).heightIn(min = 16.dp).border(1.dp, tint.copy(alpha = .7f), Tech.Control).padding(start = 4.dp, end = 7.dp), contentAlignment = Alignment.CenterStart) {
         Text(label.uppercase(), fontFamily = Tech.Mono, fontSize = 9.sp, lineHeight = 11.sp, fontWeight = FontWeight.Bold, color = tint, maxLines = 1, softWrap = false)
     }
 }

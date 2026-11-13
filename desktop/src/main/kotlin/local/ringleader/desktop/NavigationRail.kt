@@ -32,6 +32,7 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.*
@@ -174,7 +175,7 @@ private fun DrawScope.railIcon(kind: String, c: Color) {
             }
             AnimatedVisibility(expanded, enter = fadeIn(tween(if (reduce) 0 else 160, delayMillis = if (reduce) 0 else 120)), exit = fadeOut(tween(if (reduce) 0 else 60))) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(label, fontSize = 13.sp, color = if (active) Tech.Ink else tint, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(label, fontSize = 13.sp, lineHeight = 16.sp, color = if (active) Tech.Ink else tint, modifier = Modifier.weight(1f), maxLines = 2, overflow = TextOverflow.Ellipsis)
                     if (badge > 0) Box(Modifier.background(Tech.Amber, Tech.Control).padding(horizontal = 5.dp, vertical = 1.dp)) { Text("$badge", fontSize = 9.sp, color = Tech.OnAccent, fontWeight = FontWeight.Bold, fontFamily = Tech.Mono) }
                     hint?.let { Text(it, fontSize = 9.sp, color = Tech.Muted.copy(alpha = .7f), fontFamily = Tech.Mono) }
                 }
@@ -198,7 +199,9 @@ private fun DrawScope.railIcon(kind: String, c: Color) {
     val reduce = LocalReduceMotion.current
     val motion = LocalMotion.current
     // Width and the active mark are movement: spatial springs, which snap under Reduce motion.
-    val width by animateDpAsState(if (expanded) 208.dp else 60.dp, motion.spatial(MotionSpring.SpatialDefault))
+    // Expanded labels are text: at large text sizes the rail widens a little (up to 30 %) instead of cutting "Bluetooth" to "Blueto…".
+    val labelScale = LocalDensity.current.fontScale.coerceIn(1f, 1.3f)
+    val width by animateDpAsState(if (expanded) 208.dp * labelScale else 60.dp, motion.spatial(MotionSpring.SpatialDefault))
     val pages = pagesFor(LocalAppHost.current)
     val index = pages.indexOf(page)
     val offset by animateDpAsState(((index.coerceAtLeast(0)) * ITEM_HEIGHT + 8).dp, motion.spatial(MotionSpring.SpatialFast))
@@ -231,7 +234,7 @@ private fun DrawScope.railIcon(kind: String, c: Color) {
             if (entries.isNotEmpty() && pins != null && connectionKey != null) {
                 Spacer(Modifier.height(4.dp))
                 Box(Modifier.padding(horizontal = 16.dp).fillMaxWidth().height(1.dp).background(Tech.Edge))
-                if (expanded) Text("PINNED", Modifier.padding(start = 20.dp, top = 2.dp).height(16.dp), fontSize = 9.sp, letterSpacing = 1.2.sp, color = Tech.Muted, fontFamily = Tech.Mono)
+                if (expanded) Text("PINNED", Modifier.padding(start = 20.dp, top = 2.dp).heightIn(min = 16.dp), fontSize = 9.sp, letterSpacing = 1.2.sp, color = Tech.Muted, fontFamily = Tech.Mono)
                 entries.take(shown).forEachIndexed { index, pin ->
                     // Keyed by pin, so hover, the open menu and keyboard focus follow the pin when the list reorders.
                     key(pin.id) { PinRailRow(state, pin, index, entries.size, expanded, pins, connectionKey, onPin) }
@@ -241,7 +244,7 @@ private fun DrawScope.railIcon(kind: String, c: Color) {
             Spacer(Modifier.heightIn(min = 8.dp).weight(1f))
             if (sessions.size > 1) {
                 Box(Modifier.fillMaxWidth().height(1.dp).background(Tech.Edge))
-                if (expanded) Text("SESSIONS", Modifier.padding(start = 20.dp, top = 2.dp).height(16.dp), fontSize = 9.sp, letterSpacing = 1.2.sp, color = Tech.Muted, fontFamily = Tech.Mono)
+                if (expanded) Text("SESSIONS", Modifier.padding(start = 20.dp, top = 2.dp).heightIn(min = 16.dp), fontSize = 9.sp, letterSpacing = 1.2.sp, color = Tech.Muted, fontFamily = Tech.Mono)
                 else Spacer(Modifier.height(4.dp))
                 sessions.forEachIndexed { index, open ->
                     key(open.id) { SessionRailRow(open, index + 1, open.id == activeSession, expanded, profiles.find { it.id == open.profileId }) { onSession(open.id) } }
@@ -260,7 +263,7 @@ private fun DrawScope.railIcon(kind: String, c: Color) {
                 .clickable(onClick = onAbout), fontSize = 9.sp, color = if (updateAvailable) Tech.Amber else Tech.Muted.copy(alpha = .7f), fontFamily = Tech.Mono, maxLines = 1,
                 textAlign = if (expanded) null else androidx.compose.ui.text.style.TextAlign.Center)
         }
-        VerticalScrollbar(rememberScrollbarAdapter(railScroll), Modifier.align(Alignment.CenterEnd).fillMaxHeight())
+        VerticalScrollbar(rememberScrollbarAdapter(railScroll), Modifier.align(Alignment.CenterEnd).fillMaxHeight(), style = visibleScrollbarStyle())
         if (moreOpen && pins != null && connectionKey != null) PinMoreDialog(state, pins, connectionKey, entries.drop(shown), { moreOpen = false }, onPin)
     }
 }
@@ -286,7 +289,7 @@ private fun DrawScope.railIcon(kind: String, c: Color) {
     var editing by remember { mutableStateOf(false) }
     val bg by animateColorAsState(if (hovered || focused) Tech.Raised.copy(alpha = .6f) else Color.Transparent, LocalMotion.current.fade(MotionDur.Quick))
     val row = @Composable {
-        Row(Modifier.fillMaxWidth().height(PIN_ROW.dp).background(bg)
+        Row(Modifier.fillMaxWidth().heightIn(min = PIN_ROW.dp).background(bg)
             .drawBehind { if (focused) drawRect(Tech.Amber, style = Stroke(1.dp.toPx())) }
             .alpha(if (missing) .45f else 1f)
             .hoverable(interaction)
@@ -361,7 +364,7 @@ internal fun pinRowKey(key: androidx.compose.ui.input.key.Key, alt: Boolean, shi
     val focused by interaction.collectIsFocusedAsState()
     val bg by animateColorAsState(if (active) Tech.Raised else if (hovered || focused) Tech.Raised.copy(alpha = .6f) else Color.Transparent, LocalMotion.current.fade(MotionDur.Quick))
     val row = @Composable {
-        Row(Modifier.fillMaxWidth().height(SESSION_ROW.dp).background(bg)
+        Row(Modifier.fillMaxWidth().heightIn(min = SESSION_ROW.dp).background(bg)
             .drawBehind {
                 if (active) drawRect(Tech.Amber, Offset(0f, size.height * .18f), Size(3.dp.toPx(), size.height * .64f))
                 if (focused) drawRect(Tech.Amber, style = Stroke(1.dp.toPx()))
@@ -386,7 +389,7 @@ internal fun pinRowKey(key: androidx.compose.ui.input.key.Key, alt: Boolean, shi
 @Composable private fun PinMoreRow(hidden: Int, expanded: Boolean, onClick: () -> Unit) {
     val label = "+$hidden more"
     val row = @Composable {
-        Row(Modifier.fillMaxWidth().height(PIN_MORE.dp).clickable(onClick = onClick).padding(start = 20.dp, end = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxWidth().heightIn(min = PIN_MORE.dp).clickable(onClick = onClick).padding(start = 20.dp, end = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(if (expanded) label else "+$hidden", fontSize = 11.sp, color = Tech.Amber, fontFamily = Tech.Mono, maxLines = 1)
         }
     }
@@ -447,14 +450,14 @@ private fun DrawScope.pinGlyph(kind: String, c: Color) {
     val phase = LocalMotionPhase.current
     val beaconText = when { !state.connected && !state.demo -> "Offline"; backoff != null -> "Retrying in ${backoff}s"; state.live -> "Live ${liveIntervalLabel(state.liveIntervalSeconds)} · $ago"; else -> "Paused · $ago" }
     val beaconRow = @Composable {
-        Row(Modifier.fillMaxWidth().height(48.dp).padding(start = 22.dp, end = 12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(start = 22.dp, end = 12.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             Canvas(Modifier.size(16.dp)) {
                 val alpha = if (pulseOn) phase.pulse.floatValue else 0.25f
                 drawCircle(beacon, size.minDimension / 2, alpha = alpha); drawCircle(beacon, 3.dp.toPx())
             }
             if (expanded) Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text(if (state.demo) "Demonstration" else state.address.removePrefix("https://").ifBlank { "Not connected" }, Modifier.identity(), fontSize = 11.sp, fontFamily = Tech.Mono, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(beaconText, fontSize = 10.sp, color = if (backoff != null) Tech.Amber else Tech.Muted, fontFamily = Tech.Mono, maxLines = 1)
+                Text(if (state.demo) "Demonstration" else state.address.removePrefix("https://").ifBlank { "Not connected" }, Modifier.identity(), fontSize = 11.sp, lineHeight = 14.sp, fontFamily = Tech.Mono, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(beaconText, fontSize = 10.sp, lineHeight = 13.sp, color = if (backoff != null) Tech.Amber else Tech.Muted, fontFamily = Tech.Mono, maxLines = 1)
             }
         }
     }

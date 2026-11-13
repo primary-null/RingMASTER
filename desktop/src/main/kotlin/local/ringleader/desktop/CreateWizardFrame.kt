@@ -18,6 +18,7 @@ import local.ringleader.core.*
 data class WizardStep(val id: String, val title: String, val problems: Int, val loading: Boolean)
 internal val LocalCreateTaskLogAvailable = staticCompositionLocalOf<Boolean?> { null }
 internal val LocalCreatePreviewScroll = staticCompositionLocalOf { 0 }
+internal val LocalCreateCompact = staticCompositionLocalOf { false }
 
 enum class ResultAction { CheckId, OpenGuest, ViewLog, Edit, Close }
 
@@ -30,6 +31,7 @@ enum class ResultAction { CheckId, OpenGuest, ViewLog, Edit, Close }
     content: @Composable ColumnScope.(columns: Int) -> Unit) {
     var discard by remember { mutableStateOf(false) }
     var parameters by remember { mutableStateOf(false) }
+    var options by remember { mutableStateOf(false) }
     val cancel = { if (dirty && result == null) discard = true else onCancel() }
     // Own our entry so a nested dialog or picker owns shortcuts until it closes.
     val stack = LocalModalStack.current ?: remember { ModalStack() }
@@ -71,13 +73,17 @@ enum class ResultAction { CheckId, OpenGuest, ViewLog, Edit, Close }
                 if (index < steps.lastIndex) move(1) else if (canCreate) onCreate()
                 true
             } else false
-        }.padding(16.dp)) {
-        val wide = maxWidth >= 1180.dp
-        val narrow = maxWidth < 900.dp
-        Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        }) {
+        // Short windows keep navigation on one row; secondary display controls open in Options.
+        val short = maxHeight < 420.dp
+        val pad = if (short) 6.dp else 16.dp
+        val gap = if (short) 4.dp else 12.dp
+        val wide = maxWidth - 32.dp >= 1180.dp
+        val narrow = maxWidth - 32.dp < 900.dp
+        Column(Modifier.fillMaxSize().padding(pad), verticalArrangement = Arrangement.spacedBy(gap)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Box(Modifier.weight(1f)) { HelpTip(title) {
-                    Text(title.uppercase(), color = Tech.Amber, fontFamily = Tech.Mono, fontSize = 18.sp, maxLines=1, overflow=androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                    Text(title.uppercase(), color = Tech.Amber, fontFamily = Tech.Mono, fontSize = if (short) 14.sp else 18.sp, lineHeight = if (short) 18.sp else 24.sp, maxLines=1, overflow=androidx.compose.ui.text.style.TextOverflow.Ellipsis)
                 } }
                 HelpTip("$headerNode \u00b7 $headerId", identity=true) {
                     Text("$headerNode \u00b7 $headerId", Modifier.widthIn(max=180.dp).identity(), color = Tech.Muted, fontFamily = Tech.Mono, fontSize = 12.sp, maxLines=1, overflow=androidx.compose.ui.text.style.TextOverflow.Ellipsis)
@@ -102,7 +108,7 @@ enum class ResultAction { CheckId, OpenGuest, ViewLog, Edit, Close }
                         }
                     }
                 }
-                BoxWithConstraints(Modifier.weight(1f).fillMaxHeight().border(1.dp, Tech.Edge, Tech.Plate).padding(16.dp)) {
+                BoxWithConstraints(Modifier.weight(1f).fillMaxHeight().border(1.dp, Tech.Edge, Tech.Plate).padding(if (short) 6.dp else 16.dp)) {
                     val columns = if (maxWidth >= 760.dp) 2 else 1
                     val previewScroll = LocalCreatePreviewScroll.current
                     val scroll = rememberScrollState(previewScroll)
@@ -110,23 +116,37 @@ enum class ResultAction { CheckId, OpenGuest, ViewLog, Edit, Close }
                     Column(Modifier.fillMaxSize().padding(end = 12.dp).verticalScroll(scroll).graphicsLayer {
                         alpha = entrance.value
                         translationY = (1f - entrance.value) * motion.travel(8f) * density
-                    }, verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                    }, verticalArrangement = Arrangement.spacedBy(if (short) 6.dp else 14.dp)) {
                         if (result != null) CreateResultView(result, onResultAction)
                         else if (parameters && !wide) ParametersPanel(params)
-                        else content(columns)
+                        else androidx.compose.material3.ProvideTextStyle(
+                            androidx.compose.material3.LocalTextStyle.current.let { if (short) it.copy(lineHeight = 16.sp) else it }
+                        ) { CompositionLocalProvider(LocalCreateCompact provides short) { content(columns) } }
                     }
-                    VerticalScrollbar(rememberScrollbarAdapter(scroll), Modifier.align(Alignment.CenterEnd).fillMaxHeight())
+                    VerticalScrollbar(rememberScrollbarAdapter(scroll), Modifier.align(Alignment.CenterEnd).fillMaxHeight(), style = visibleScrollbarStyle())
                 }
                 if (wide) Column(Modifier.width(280.dp).fillMaxHeight().verticalScroll(rememberScrollState())) { ParametersPanel(params) }
             }
             @OptIn(ExperimentalLayoutApi::class)
             FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                TechCheck(advanced, { if (editing && ownsKeys()) onAdvanced(it) }, "Show advanced", enabled = editing)
-                if (!wide) MiniAction(if (parameters) "Form" else "Parameters") { parameters = !parameters }
+                if (short) MiniAction("Options") { options = true }
+                else {
+                    TechCheck(advanced, { if (editing && ownsKeys()) onAdvanced(it) }, "Show advanced", enabled = editing)
+                    if (!wide) MiniAction(if (parameters) "Form" else "Parameters") { parameters = !parameters }
+                }
                 MiniAction("Back", enabled = index > 0 && result == null) { move(-1) }
                 MiniAction("Next", enabled = index < steps.lastIndex && result == null) { move(1) }
                 TechAction(createLabel, Modifier.identity(), active = true, enabled = canCreate && result == null, onClick = { if (editing && ownsKeys() && canCreate) onCreate() })
                 MiniAction("Cancel", onClick = cancel)
+            }
+        }
+        if (options) TechDialog("Wizard options", onDismiss = { options = false }, actions = {
+            MiniAction("Done") { options = false }
+        }) {
+            TechCheck(advanced, { if (editing) onAdvanced(it) }, "Show advanced", enabled = editing)
+            if (!wide) MiniAction(if (parameters) "Show form" else "Show parameters") {
+                parameters = !parameters
+                options = false
             }
         }
         if (discard) TechDialog("Discard this new ${kind.guestKind.lowercase()}?", onDismiss = { discard = false }, dismiss = Dismiss.Confirm) {

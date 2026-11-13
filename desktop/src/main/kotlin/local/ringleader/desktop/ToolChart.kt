@@ -30,14 +30,15 @@ data class ToolChartSample(val series: String, val x: Double, val y: Double, val
     val minX = shown.minOfOrNull { it.x } ?: 0.0
     val span = ((shown.maxOfOrNull { it.x } ?: minX) - minX).takeIf { it > 0.0 } ?: 1.0
     Column(modifier) {
-        Row(Modifier.fillMaxWidth().height(18.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(if (unit.isBlank()) "SAMPLES" else unit.uppercase(), fontFamily = Tech.Mono, fontSize = 10.sp, letterSpacing = 1.sp, color = Tech.Muted)
+        // The caption grows with the text size; a fixed 18 units let the chart overdraw it at 150 % text.
+        Row(Modifier.fillMaxWidth().heightIn(min = 18.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(if (unit.isBlank()) "SAMPLES" else unit.uppercase(), fontFamily = Tech.Mono, fontSize = 10.sp, lineHeight = 12.sp, letterSpacing = 1.sp, color = Tech.Muted)
             names.forEachIndexed { index, name ->
                 val values = shown.filter { it.series == name }.map { it.y }
-                Text(name, color = colors[index % colors.size], fontFamily = Tech.Mono, fontSize = 10.sp, maxLines = 1)
+                Text(name, color = colors[index % colors.size], fontFamily = Tech.Mono, fontSize = 10.sp, lineHeight = 12.sp, maxLines = 1)
                 if (values.isNotEmpty()) Text(
                     "min ${chartNumber(values.min())} · avg ${chartNumber(values.average())} · max ${chartNumber(values.max())}",
-                    color = Tech.Muted, fontFamily = Tech.Mono, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    color = Tech.Muted, fontFamily = Tech.Mono, fontSize = 10.sp, lineHeight = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
                 )
             }
         }

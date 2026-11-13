@@ -80,7 +80,7 @@ private fun statusColor(outcome: TaskOutcome) = when (outcome) {
     val tracedProgress = remember(openLog?.lines) { openLog?.lines?.let(::taskProgress) }
     BoxWithConstraints(Modifier.fillMaxSize()) {
         // The 960-wide window leaves this pane under 900dp, so each task stacks. 1600dp keeps one row.
-        val compact = maxWidth < 900.dp
+        val compact = maxWidth < 550.dp * androidx.compose.ui.platform.LocalDensity.current.fontScale.coerceIn(1f, 1.5f)
         // Wide panes keep the table at 760dp and put the log beside it. Narrow panes cover the table.
         val split = state.taskLog != null && maxWidth >= 1280.dp
         Row(Modifier.fillMaxSize()) {
@@ -165,7 +165,7 @@ private fun statusColor(outcome: TaskOutcome) = when (outcome) {
                     }
                     }
                     }
-                    item { Row(Modifier.fillMaxWidth().height(28.dp).padding(horizontal=10.dp), verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(12.dp)) {
+                    if (!compact) item { Row(Modifier.fillMaxWidth().heightIn(min = 28.dp).padding(horizontal=10.dp), verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(12.dp)) {
                         Spacer(Modifier.width(18.dp))
                         Text("TYPE",Modifier.width(activityCols().type),fontSize=10.sp,color=Tech.Muted,fontFamily=Tech.Mono)
                         Text("TARGET",Modifier.weight(1f),fontSize=10.sp,color=Tech.Muted,fontFamily=Tech.Mono)
@@ -250,17 +250,33 @@ internal fun taskTypeName(type: String): String = taskTypeNames[type] ?: type
     Column {
         // Success blooms once; a failed task keeps a red edge; a task whose log reports a percentage traces it along the outline.
         Row(Modifier.phosphorRow(null, source, failedEdge = task.outcome == TaskOutcome.Unsuccessful).progressTrace(progress, 8f)
-            .fillMaxWidth().height(36.dp).background(background).hoverable(interaction)
+            .fillMaxWidth().heightIn(min = 36.dp).background(background).hoverable(interaction)
             .clickable(interactionSource = interaction, indication = null) { workspace.openTaskLog(task) }
             .pointerHoverIcon(PointerIcon.Hand)
             .padding(horizontal=10.dp), verticalAlignment=Alignment.CenterVertically, horizontalArrangement=Arrangement.spacedBy(12.dp)) {
             TaskPip(task.outcome, source)
+            if (compact) Column(Modifier.weight(1f).padding(vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(taskTypeName(task.type), Modifier.weight(1f), fontSize = 13.sp, lineHeight = 17.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(status, Modifier.widthIn(max = 160.dp), color = color, fontFamily = Tech.Mono, fontSize = 10.sp, lineHeight = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                Text("$subject · $node", Modifier.identity(), fontFamily = Tech.Mono, fontSize = 11.sp, lineHeight = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                @OptIn(ExperimentalLayoutApi::class)
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    TaskStarted(task)
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("Duration", color = Tech.Muted, fontSize = 10.sp, lineHeight = 14.sp)
+                        TaskDurationText(task, color)
+                    }
+                }
+            } else {
             HelpTip(task.type) { Text(taskTypeName(task.type),Modifier.width(activityCols().type),color=if(task.outcome == TaskOutcome.Unsuccessful) Tech.Red else Tech.Ink,fontSize=13.sp,maxLines=1,overflow=TextOverflow.Ellipsis) }
             Text("$subject · $node",Modifier.weight(1f).identity(),fontFamily=Tech.Mono,fontSize=11.sp,maxLines=1,overflow=TextOverflow.Ellipsis)
             HelpTip(status) { Text(status,Modifier.width(activityCols().status),fontFamily=Tech.Mono,fontSize=10.sp,color=if(task.outcome == TaskOutcome.Succeeded && !taskHasWarnings(task)) Tech.Muted else color,maxLines=1,overflow=TextOverflow.Ellipsis) }
             if (!activityCols().compact) Text(user,Modifier.width(activityCols().user).identity(),fontFamily=Tech.Mono,fontSize=10.sp,color=Tech.Muted,maxLines=1,overflow=TextOverflow.Ellipsis)
             TaskStarted(task)
             TaskDurationText(task, color)
+            }
         }
         // The breathing pip is the one working indicator, so the line under a running task is a still hairline.
         if(task.outcome==TaskOutcome.Running) Box(Modifier.fillMaxWidth().height(2.dp).background(Tech.Amber.copy(alpha = .35f)))
@@ -269,11 +285,11 @@ internal fun taskTypeName(type: String): String = taskTypeNames[type] ?: type
 }
 @Composable private fun TaskStarted(task: ClusterTask) {
     val now = LocalNow.current ?: Instant.now()
-    HelpTip(taskSpan(task)) { Text(local.ringleader.core.dateAndAge(task.startedAt?.epochSecond, now).let { if (activityCols().compact) it.substringAfter(" · ") else it },Modifier.width(activityCols().started),fontFamily=Tech.Mono,fontSize=10.sp,color=Tech.Muted,maxLines=1) }
+    HelpTip(taskSpan(task)) { Text(local.ringleader.core.dateAndAge(task.startedAt?.epochSecond, now).let { if (activityCols().compact) it.substringAfter(" · ") else it },Modifier.width(activityCols().started),fontFamily=Tech.Mono,fontSize=10.sp,lineHeight=14.sp,color=Tech.Muted,maxLines=1) }
 }
 
 @Composable private fun TaskDurationText(task: ClusterTask, color: androidx.compose.ui.graphics.Color) {
-    Text(activityElapsed(task.startedAt, task.endedAt, LocalNow.current ?: Instant.now()),Modifier.width(activityCols().duration),fontFamily=Tech.Mono,fontSize=10.sp,color=color,maxLines=1)
+    Text(activityElapsed(task.startedAt, task.endedAt, LocalNow.current ?: Instant.now()),Modifier.width(activityCols().duration),fontFamily=Tech.Mono,fontSize=10.sp,lineHeight=14.sp,color=color,maxLines=1)
 }
 
 /**
@@ -319,6 +335,11 @@ private val CompactActivity = ActivityColumns(150.dp, 110.dp, 0.dp, 96.dp, 60.dp
 private val LocalActivitySplit = androidx.compose.runtime.staticCompositionLocalOf { false }
 
 @Composable private fun activityCols(): ActivityColumns {
-    val width = with(androidx.compose.ui.platform.LocalDensity.current) { androidx.compose.ui.platform.LocalWindowInfo.current.containerSize.width.toDp() }
-    return if (width < 1300.dp || LocalActivitySplit.current) CompactActivity else WideActivity
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    val width = with(density) { androidx.compose.ui.platform.LocalWindowInfo.current.containerSize.width.toDp() }
+    // The columns hold text: at large text sizes they widen with it (DURATION was cut to "DURATI" at 150 %), and the
+    // wide layout is chosen by the room the text effectively has.
+    val scale = density.fontScale.coerceIn(1f, 1.5f)
+    val base = if (width / scale < 1300.dp || LocalActivitySplit.current) CompactActivity else WideActivity
+    return if (scale == 1f) base else base.copy(type = base.type * scale, status = base.status * scale, user = base.user * scale, started = base.started * scale, duration = base.duration * scale)
 }

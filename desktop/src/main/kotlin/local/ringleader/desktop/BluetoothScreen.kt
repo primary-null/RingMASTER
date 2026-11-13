@@ -234,7 +234,9 @@ private fun scanStatus(scan: BtScan?, scanning: Boolean): String {
                         }
                         table(Modifier.weight(1f).fillMaxHeight())
                     } else Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Row(Modifier.fillMaxWidth().height(if (tall) 220.dp else 180.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        // The summary, key and strongest list beside the radar are text: their row grows with the text size
+                        // (the page scrolls), so the strongest entries are not hidden below the pane's fold at 150 %.
+                        Row(Modifier.fillMaxWidth().height((if (tall) 220.dp else 180.dp) * LocalDensity.current.fontScale.coerceIn(1f, 1.5f)), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             FieldPlate(Modifier.fillMaxHeight().aspectRatio(1f)) { field(Modifier.fillMaxSize()) }
                             BtScrollPane(Modifier.weight(1f).fillMaxHeight(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                 KindRingsSummary(devices, clock)
@@ -333,7 +335,9 @@ internal fun sortBtDevices(devices: List<BtDevice>, sort: String, descending: Bo
                 SegmentedFilter(listOf("All" to devices.size, "Paired" to devices.count { it.paired == true }, "Nearby" to devices.count { it.rssi != null }), filter) { filter=it }
             }
             Box(Modifier.weight(1f).fillMaxWidth()) {
-                Box(Modifier.fillMaxSize().padding(bottom=12.dp).horizontalScroll(horizontal)) {
+                // The bar sits above the column headers: below the table it fell under the page fold at large text,
+                // so the columns beyond the edge had no visible route.
+                Box(Modifier.fillMaxSize().padding(top=12.dp).horizontalScroll(horizontal)) {
                     Column(Modifier.width(tableWidth).fillMaxHeight(), verticalArrangement=Arrangement.spacedBy(6.dp)) {
             val onSort: (String) -> Unit = { key -> if (sort == key) descending = !descending else { sort = key; descending = false } }
             Row(Modifier.fillMaxWidth().heightIn(min = 22.dp).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(cols.gap)) {
@@ -359,7 +363,7 @@ internal fun sortBtDevices(devices: List<BtDevice>, sort: String, descending: Bo
             }
                     }
                 }
-                HorizontalScrollbar(rememberScrollbarAdapter(horizontal),Modifier.align(Alignment.BottomStart).fillMaxWidth(),style=btScrollbarStyle())
+                HorizontalScrollbar(rememberScrollbarAdapter(horizontal),Modifier.align(Alignment.TopStart).fillMaxWidth(),style=btScrollbarStyle())
             }
         }
     }

@@ -190,9 +190,7 @@ fun CreateCtWizard(
                 onResultAction = { if (it == ResultAction.Edit) { dismissedResult = true; current = serverErrors.keys.firstOrNull()?.let(CreateFields::step) ?: current } else onResultAction(it) },
             ) { columns ->
                 preview.problem?.let { Text(it, color = Tech.Red) }
-                errors.filterKeys { CreateFields.step(it) == current }.values.distinct().forEach { Text(it, color = Tech.Red) }
-                if (session.sample) Text("Demo mode. Nothing is sent.", color = Tech.Amber)
-                SwitchLine("Start after created", "The server starts the new container as part of creation.", start) { start = it }
+                if (session.sample) Text("Demo mode. Nothing is sent.", color = Tech.Amber, fontSize = 11.sp)
                 when (current) {
                     CreateFields.GENERAL -> CtGeneralStep(draft, ::update, session, errors, advanced, password, confirmation, sshKeys, fileError, { fileError = it }, onRead, nodes) { node -> wipeEditors(); onNode(node) }
                     CreateFields.TEMPLATE -> CtTemplateStep(draft, ::update, session, context, errors, onRead, onGetMedia?.let { request -> { n,s,k -> mediaBaseline=draft.templateStorage to draft.template;request(n,s,k) } })
@@ -202,6 +200,8 @@ fun CreateCtWizard(
                     CreateFields.NETWORK -> CtNetworkStep(draft, ::update, session, context, errors, advanced, columns, onRead)
                     CreateFields.DNS -> CtDnsStep(draft, ::update, errors, columns)
                 }
+                SwitchLine("Start after created", "The server starts the new container as part of creation.", start) { start = it }
+                errors.filterKeys { CreateFields.step(it) == current }.values.distinct().forEach { Text(it, color = Tech.Red) }
             } }
         }
     }
@@ -455,6 +455,10 @@ private fun CtDnsStep(draft: CtDraft, update: (CtDraft) -> Unit, errors: Map<Fie
 
 @Composable
 private fun StepHeading(title: String, subtitle: String) {
+    if (LocalCreateCompact.current) {
+        HelpTip(subtitle) { SectionLabel(title) }
+        return
+    }
     Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
         Text(title.uppercase(), color = Tech.Ink, fontFamily = Tech.Mono, fontSize = 17.sp, fontWeight = FontWeight.Bold, letterSpacing = .7.sp)
         Text(subtitle, color = Tech.Muted, fontSize = 12.sp)

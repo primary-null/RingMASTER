@@ -25,6 +25,7 @@ import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.drawOutline
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.platform.testTag
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.geometry.Offset
@@ -35,6 +36,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.foundation.focusable
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.input.key.key
@@ -272,7 +274,8 @@ internal const val ARRIVAL_FADE_MS = 700
 }
 
 @Composable fun IdentityTile(label: String, template: Boolean = false) {
-    Box(Modifier.height(22.dp).widthIn(min = 26.dp).background(Tech.Raised, Tech.Control).border(1.dp, Tech.Edge, Tech.Control).padding(start = 3.dp, end = 5.dp), contentAlignment = Alignment.Center) {
+    // Grows with the text size: a fixed 22 units cut "VM" to its top half ("VI") at 150 % text.
+    Box(Modifier.heightIn(min = 22.dp).widthIn(min = 26.dp).background(Tech.Raised, Tech.Control).border(1.dp, Tech.Edge, Tech.Control).padding(start = 3.dp, end = 5.dp), contentAlignment = Alignment.Center) {
         Text(if(template) "$label*" else label, fontFamily=Tech.Mono, fontSize=9.sp, lineHeight=11.sp, color=Tech.Muted, maxLines=1, softWrap=false)
     }
 }
@@ -445,23 +448,62 @@ internal fun techDialogProperties(dismiss: Dismiss, reduce: Boolean) = androidx.
  */
 @Composable fun TechDialog(title: String, onDismiss: () -> Unit, width: androidx.compose.ui.unit.Dp = 520.dp, subtitle: String? = null,
     dismiss: Dismiss = Dismiss.Confirm, initialFocus: androidx.compose.ui.focus.FocusRequester? = null,
-    actions: @Composable RowScope.() -> Unit = {}, content: @Composable ColumnScope.() -> Unit) {
+    actions: @Composable RowScope.() -> Unit = {},
+    /** Kept in view above [actions] while the body scrolls: an input an action depends on, such as a typed confirmation. */
+    footer: (@Composable ColumnScope.() -> Unit)? = null,
+    content: @Composable ColumnScope.() -> Unit) {
     TechModal(onDismiss, dismiss, ModalKind.Dialog, initialFocus) {
-        Surface(Modifier.width(width).heightIn(max = 760.dp), color = ringColors.surface, shape = Tech.Plate, border = BorderStroke(1.dp, Tech.Edge), shadowElevation = 12.dp) {
-            Row(Modifier.height(IntrinsicSize.Min)) {
-                Box(Modifier.width(3.dp).fillMaxHeight().background(Tech.Amber))
-                Column(Modifier.weight(1f).padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                        Text(title, fontSize = Tech.Title, fontWeight = FontWeight.SemiBold, color = Tech.Ink)
-                        if (subtitle != null) Text(subtitle, fontSize = Tech.Label, color = Tech.Muted)
-                    }
-                    Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp), content = content)
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(Tech.Space8, Alignment.End), verticalAlignment = Alignment.CenterVertically, content = actions)
+        BoxWithConstraints {
+            // A short window (a laptop at a large interface size, or large text): the title scrolls with the body and the
+            // frame widens where the window allows, so the fields get the height; the actions and footer stay in view.
+            val textScale = androidx.compose.ui.platform.LocalDensity.current.fontScale.coerceIn(1f, 1.5f)
+            val short = maxHeight < 440.dp * textScale
+            val frameWidth = if (short && maxWidth > width + 48.dp) minOf(maxWidth - 48.dp, width * 1.35f) else width
+            val pad = if (short) 14.dp else 20.dp
+            val body = rememberScrollState()
+            val scope = rememberCoroutineScope()
+            val heading: @Composable () -> Unit = {
+                Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Text(title, fontSize = Tech.Title, fontWeight = FontWeight.SemiBold, color = Tech.Ink)
+                    // The theme's body line height is loose for an 11-point subtitle; a short window cannot spare it.
+                    if (subtitle != null) Text(subtitle, fontSize = Tech.Label, color = Tech.Muted, lineHeight = if (short) 15.sp else TextUnit.Unspecified)
+                }
+            }
+            Surface(Modifier.width(frameWidth).heightIn(max = 760.dp), color = ringColors.surface, shape = Tech.Plate, border = BorderStroke(1.dp, Tech.Edge), shadowElevation = 12.dp) {
+                // The amber edge is drawn, not measured: an intrinsic-height row cannot hold the body's scrollbar.
+                Column(Modifier.drawBehind { drawRect(Tech.Amber, size = androidx.compose.ui.geometry.Size(3.dp.toPx(), size.height)) }
+                    .padding(start = 3.dp + pad, top = pad, end = pad, bottom = pad), verticalArrangement = Arrangement.spacedBy(if (short) 10.dp else 12.dp)) {
+                        if (!short) heading()
+                        Box(Modifier.weight(1f, fill = false)) {
+                            Column(Modifier.verticalScroll(body), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                if (short) heading()
+                                content()
+                            }
+                            if (body.maxValue > 0) {
+                                // Visible before it is hovered, in the frame's padding, so it never covers the content.
+                                androidx.compose.foundation.VerticalScrollbar(androidx.compose.foundation.rememberScrollbarAdapter(body),
+                                    Modifier.matchParentSize().wrapContentWidth(Alignment.End).offset(x = pad - 4.dp), style = visibleScrollbarStyle())
+                            }
+                        }
+                        if (body.canScrollForward) {
+                            // More lies below: say so under the body (never over it), and let a click move it on. Gone at the end.
+                            Row(Modifier.fillMaxWidth().drawBehind { drawLine(Tech.Edge, Offset(0f, 0f), Offset(size.width, 0f), 1f) }
+                                .clickable { scope.launch { body.animateScrollTo(body.value + (body.viewportSize * 3 / 4).coerceAtLeast(1)) } }
+                                .then(Modifier.testTag(DIALOG_MORE_TAG)).padding(top = 3.dp),
+                                horizontalArrangement = Arrangement.End) {
+                                Text("MORE BELOW ▾", fontFamily = Tech.Mono, fontSize = 10.sp, lineHeight = 12.sp, letterSpacing = .8.sp, color = Tech.Amber, maxLines = 1)
+                            }
+                        }
+                        if (footer != null) Column(verticalArrangement = Arrangement.spacedBy(8.dp), content = footer)
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(Tech.Space8, Alignment.End), verticalAlignment = Alignment.CenterVertically, content = actions)
                 }
             }
         }
     }
 }
+
+/** Test tag of a dialog's "more below" cue, present only while its body can scroll further. */
+internal const val DIALOG_MORE_TAG = "dialog-more-below"
 
 /** A tab strip in the Tech language: mono capitals, an amber underline under the chosen tab, a hairline under the rest. */
 @Composable fun TechTabs(tabs: List<String>, selected: String, onSelect: (String) -> Unit, modifier: Modifier = Modifier) {

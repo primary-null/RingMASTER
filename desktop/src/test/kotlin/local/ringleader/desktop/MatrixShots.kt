@@ -80,7 +80,8 @@ internal fun matrixShots(scope: CoroutineScope, lab: MatrixLab, env: MatrixEnv):
     shots += deskShot("desk-selected") { it.selectProfile(profiles[0].id) }
     shots += deskShot("desk-empty", withProfiles = false)
     shots += deskShot("desk-manual", end = true)
-    shots += deskShot("desk-new-profile", end = true) { it.beginCreate() }
+    // No end-scroll: at single-column sizes the page end lies below the editor. The desk brings an opened editor into view.
+    shots += deskShot("desk-new-profile") { it.beginCreate() }
     shots += deskShot("desk-editor") { it.selectProfile(profiles[2].id); it.beginEdit() }
     shots += deskShot("desk-connected", connected = true) { it.selectProfile(profiles[0].id) }
 
