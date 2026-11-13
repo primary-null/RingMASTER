@@ -37,14 +37,15 @@ internal fun trayLine(status: TrayStatus, closeToTray: Boolean): String = when (
     is TrayStatus.Failed -> "Closing the window quits RingMASTER. ${status.reason}"
 }
 
-@Composable internal fun SchedulesScreen(resident: ResidentRuntime?, onSettings: () -> Unit) {
+@Composable internal fun SchedulesScreen(resident: ResidentRuntime?, onSettings: () -> Unit, requestedRun: String? = null, onRunOpened: () -> Unit = {}) {
     SchedulesContent(resident?.engine, resident?.engineProblem ?: if (resident == null) "Schedules are available in the desktop app." else null,
-        resident?.trayStatus ?: TrayStatus.Unsupported("No notification area in this mode."), resident?.closeToTray ?: false, onSettings)
+        resident?.trayStatus ?: TrayStatus.Unsupported("No notification area in this mode."), resident?.closeToTray ?: false, onSettings,
+        requestedRun = requestedRun, onRunOpened = onRunOpened)
 }
 
 /** The page body, separate from the runtime so scene tests can drive it with a synthetic engine. */
 @Composable internal fun SchedulesContent(engine: ScheduleEngine?, engineProblem: String?, tray: TrayStatus, closeToTray: Boolean, onSettings: () -> Unit,
-    now: () -> Instant = { Instant.now() }, initialEditor: Boolean = false) {
+    now: () -> Instant = { Instant.now() }, initialEditor: Boolean = false, requestedRun: String? = null, onRunOpened: () -> Unit = {}) {
     val scope = rememberCoroutineScope()
     val state = engine?.state?.collectAsState()?.value ?: SchedulerState()
     var editing by remember { mutableStateOf<String?>(if (initialEditor) "" else null) } // "" = new
@@ -53,6 +54,17 @@ internal fun trayLine(status: TrayStatus, closeToTray: Boolean): String = when (
     var logFor by remember { mutableStateOf<ScheduleRun?>(null) }
     var expanded by remember { mutableStateOf(setOf<String>()) }
     val scroll = rememberScrollState()
+    LaunchedEffect(requestedRun, state.loaded) {
+        if (!state.loaded || requestedRun == null) return@LaunchedEffect
+        val run = state.document.runs.firstOrNull { it.id == requestedRun }
+        if (run == null) notice = "This run is no longer in schedule history."
+        else {
+            expanded = expanded + run.planId
+            if (run.upid != null) logFor = run
+            else notice = "${run.action.title}: ${run.phase}. ${run.detail}"
+        }
+        onRunOpened()
+    }
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize().verticalScroll(scroll).padding(end = 12.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             val off = engine == null || state.problem != null

@@ -180,6 +180,7 @@ internal class ResidentRuntime(
     private val preferences: MotionPreferences = MotionPreferences(),
     private val trayFactory: (onOpen: () -> Unit, onSchedules: () -> Unit, onQuit: () -> Unit) -> TrayPort = ::TrayHost,
     private val consoles: () -> Unit = { ConsoleHost.close() },
+    val alerts: DesktopAlerts? = null,
 ) {
     var windowVisible by mutableStateOf(true); private set
     /** Bumped to raise the window over others. */
@@ -188,6 +189,8 @@ internal class ResidentRuntime(
     var pageRequest by mutableStateOf<String?>(null)
     var trayStatus by mutableStateOf<TrayStatus>(TrayStatus.Starting); private set
     var closeToTray by mutableStateOf(preferences.option("closeToTray", defaultCloseToTray())); private set
+    var keepWatching by mutableStateOf(preferences.option("keepWatching", false)); private set
+    fun chooseKeepWatching(on: Boolean) { keepWatching = on; preferences.put("keepWatching", on) }
     /** The in-window "Quit?" prompt, shown when closing would stop enabled schedules. */
     var quitPrompt by mutableStateOf(false)
     private var tray: TrayPort? = null
@@ -282,16 +285,15 @@ internal class ResidentRuntime(
     suspend fun prepareForClear(timeout: Duration = Duration.ofSeconds(5)): Boolean {
         val stopped = engine?.shutdown(timeout) ?: true
         if (stopped) engineScope?.cancel()
-        return stopped
+        return stopped && (alerts?.shutdown(timeout) ?: true)
     }
 
     suspend fun clearData(clear: () -> List<String>, timeout: Duration = Duration.ofSeconds(5)): List<String> =
         if (prepareForClear(timeout)) clear()
-        else listOf("A scheduled run is still stopping. Nothing was cleared. Quit RingMASTER and retry after it stops.")
+        else listOf("Background work is still stopping. Nothing was cleared. Quit RingMASTER and retry after it stops.")
 
     private fun stopEngine(timeout: Duration) {
-        val e = engine ?: return
-        runCatching { runBlocking { e.shutdown(timeout) } }
+        runCatching { runBlocking { engine?.shutdown(timeout); alerts?.shutdown(timeout) } }
         runCatching { engineScope?.cancel() }
     }
 
@@ -326,7 +328,10 @@ internal class ResidentRuntime(
                         scope = scope,
                     )
                     engine.start()
-                    ResidentRuntime(engine, null, outcome.lock, scope).also { it.serve(dir) }
+                    ResidentRuntime(engine, null, outcome.lock, scope, alerts = DesktopAlerts(dir, engine.state)).also { runtime ->
+                        runtime.alerts?.onOpen = { runtime.show() }
+                        runtime.serve(dir)
+                    }
                 }
             }
         }

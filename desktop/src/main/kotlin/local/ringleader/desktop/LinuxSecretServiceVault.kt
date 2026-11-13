@@ -159,15 +159,7 @@ internal class LinuxSecretServiceVault(private val schemaName: String = "local.r
     }
 
     private inline fun <reified T : Library> loadFirst(vararg names: String): T {
-        var last: UnsatisfiedLinkError? = null
-        for (library in names) {
-            try {
-                return Native.load(library, T::class.java)
-            } catch (e: UnsatisfiedLinkError) {
-                last = e
-            }
-        }
-        throw last ?: UnsatisfiedLinkError(names.first())
+        return GnomeLibraries.load(T::class.java, *names)
     }
 
     /** GError is { domain, code, message } with the message pointer at offset 8 on 64-bit. The text is not a secret. */

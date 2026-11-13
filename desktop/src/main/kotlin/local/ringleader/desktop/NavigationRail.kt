@@ -52,6 +52,9 @@ internal val ringPages = listOf("Desk", "Fleet", "Storage", "Activity", "Scan", 
 /** Pages this host is allowed to show. The browser drops Under the Hood so Ctrl+1-8 keep their meaning. */
 internal fun pagesFor(host: AppHost): List<String> = if (host.traceView) ringPages else ringPages - "Under the Hood" - "Schedules"
 
+/** The rail's pages: [pagesFor], then the Watcher when the parent provides one. It has no Ctrl number, so 1-9 keep their pages. */
+internal fun railPagesFor(host: AppHost, watcher: Boolean): List<String> = pagesFor(host) + if (watcher) listOf(WATCHER_PAGE) else emptyList()
+
 /** Line icons drawn on a 20dp canvas, 1.5dp stroke, round caps. */
 private fun DrawScope.railIcon(kind: String, c: Color) {
     val st = Stroke(1.5.dp.toPx(), cap = StrokeCap.Round)
@@ -123,6 +126,25 @@ private fun DrawScope.railIcon(kind: String, c: Color) {
             }
             drawPath(beat, c, style = st)
         }
+        WATCHER_PAGE -> { // eye: two lids and a pupil
+            val lids = Path().apply {
+                moveTo(w * .04f, h * .5f); quadraticTo(w * .5f, h * .02f, w * .96f, h * .5f)
+                quadraticTo(w * .5f, h * .98f, w * .04f, h * .5f); close()
+            }
+            drawPath(lids, c, style = st)
+            drawCircle(c, w * .15f, center, style = st)
+            drawCircle(c, 1.3.dp.toPx(), center)
+        }
+        "Notifications" -> { // bell with a clapper
+            val bell = Path().apply {
+                moveTo(w * .16f, h * .74f); lineTo(w * .26f, h * .6f); lineTo(w * .26f, h * .4f)
+                quadraticTo(w * .26f, h * .12f, w * .5f, h * .12f); quadraticTo(w * .74f, h * .12f, w * .74f, h * .4f)
+                lineTo(w * .74f, h * .6f); lineTo(w * .84f, h * .74f); close()
+            }
+            drawPath(bell, c, style = st)
+            drawLine(c, Offset(w * .5f, h * .02f), Offset(w * .5f, h * .12f), st.width, StrokeCap.Round)
+            drawLine(c, Offset(w * .42f, h * .88f), Offset(w * .58f, h * .88f), st.width, StrokeCap.Round)
+        }
         "Schedules" -> { // clock face with hands
             drawCircle(c, w * .38f, center, style = st)
             drawLine(c, center, center + Offset(0f, -h * .24f), st.width, StrokeCap.Round)
@@ -170,13 +192,13 @@ private fun DrawScope.railIcon(kind: String, c: Color) {
             Box {
                 Canvas(Modifier.size(20.dp)) { railIcon(icon, tint) }
                 if (badge > 0 && !expanded) Box(Modifier.align(Alignment.TopEnd).offset(x = 8.dp, y = (-6).dp).heightIn(min = 14.dp).background(Tech.Amber, Tech.Control).padding(horizontal = 4.dp), contentAlignment = Alignment.Center) {
-                    Text("$badge", fontSize = 9.sp, color = Tech.OnAccent, fontWeight = FontWeight.Bold, fontFamily = Tech.Mono)
+                    Text(noticeBadgeText(badge) ?: "", fontSize = 9.sp, color = Tech.OnAccent, fontWeight = FontWeight.Bold, fontFamily = Tech.Mono)
                 }
             }
             AnimatedVisibility(expanded, enter = fadeIn(tween(if (reduce) 0 else 160, delayMillis = if (reduce) 0 else 120)), exit = fadeOut(tween(if (reduce) 0 else 60))) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(label, fontSize = 13.sp, lineHeight = 16.sp, color = if (active) Tech.Ink else tint, modifier = Modifier.weight(1f), maxLines = 2, overflow = TextOverflow.Ellipsis)
-                    if (badge > 0) Box(Modifier.background(Tech.Amber, Tech.Control).padding(horizontal = 5.dp, vertical = 1.dp)) { Text("$badge", fontSize = 9.sp, color = Tech.OnAccent, fontWeight = FontWeight.Bold, fontFamily = Tech.Mono) }
+                    if (badge > 0) Box(Modifier.background(Tech.Amber, Tech.Control).padding(horizontal = 5.dp, vertical = 1.dp)) { Text(noticeBadgeText(badge) ?: "", fontSize = 9.sp, color = Tech.OnAccent, fontWeight = FontWeight.Bold, fontFamily = Tech.Mono) }
                     hint?.let { Text(it, fontSize = 9.sp, color = Tech.Muted.copy(alpha = .7f), fontFamily = Tech.Mono) }
                 }
             }
@@ -190,9 +212,14 @@ private fun DrawScope.railIcon(kind: String, c: Color) {
     onSettings: () -> Unit = {}, onAbout: () -> Unit = {}, pins: PinStore? = null, connectionKey: String? = null, onPin: (Pin) -> Unit = {},
     updateAvailable: Boolean = false,
     sessions: List<OpenSession> = emptyList(), activeSession: Long = 0, profiles: List<ConnectionProfile> = emptyList(), onSession: (Long) -> Unit = {},
+    /** Opens the notification center; the bell shows only when the parent provides notifications. */
+    onNotifications: (() -> Unit)? = null,
     onPage: (String) -> Unit,
 ) {
     val prefs = remember { MotionPreferences() }
+    val alerts = LocalAlerts.current
+    val bell = onNotifications != null && alerts?.notices != null
+    val unreadNotices = rememberNoticeBadge(alerts)
     var expanded by remember { mutableStateOf(initialExpanded ?: prefs.option("expanded", false)) }
     LaunchedEffect(toggle) { if (toggle > 0) { expanded = !expanded; prefs.put("expanded", expanded) } }
     LaunchedEffect(state.connectionEpoch) { if (state.connected || state.demo) workspace.setLive(prefs.option("live", true), prefs.number("liveInterval", LIVE_INTERVAL_DEFAULT)) }
@@ -202,7 +229,7 @@ private fun DrawScope.railIcon(kind: String, c: Color) {
     // Expanded labels are text: at large text sizes the rail widens a little (up to 30 %) instead of cutting "Bluetooth" to "Blueto…".
     val labelScale = LocalDensity.current.fontScale.coerceIn(1f, 1.3f)
     val width by animateDpAsState(if (expanded) 208.dp * labelScale else 60.dp, motion.spatial(MotionSpring.SpatialDefault))
-    val pages = pagesFor(LocalAppHost.current)
+    val pages = railPagesFor(LocalAppHost.current, alerts?.watcher != null)
     val index = pages.indexOf(page)
     val offset by animateDpAsState(((index.coerceAtLeast(0)) * ITEM_HEIGHT + 8).dp, motion.spatial(MotionSpring.SpatialFast))
     val running = state.tasks.orEmpty().count { it.outcome == TaskOutcome.Running }
@@ -216,7 +243,7 @@ private fun DrawScope.railIcon(kind: String, c: Color) {
         val rule = if (entries.isNotEmpty()) PIN_RULE else 0
         // Open sessions are listed above Settings once there is more than one; pins get the room that is left.
         val sessionBlock = if (sessions.size > 1) 1 + (if (expanded) SESSION_HEAD else 4) + sessions.size * SESSION_ROW + 4 else 0
-        val room = (maxHeight.value - (8 + pages.size * ITEM_HEIGHT) - (1 + ITEM_HEIGHT + 48 + ITEM_HEIGHT + 24) - head - rule - 4 - sessionBlock).toInt()
+        val room = (maxHeight.value - (8 + pages.size * ITEM_HEIGHT) - (1 + ITEM_HEIGHT + 48 + ITEM_HEIGHT + 24) - (if (bell) ITEM_HEIGHT else 0) - head - rule - 4 - sessionBlock).toInt()
         val shown = visiblePinCount(entries.size, room, PIN_ROW, PIN_MORE)
         val hidden = (entries.size - shown).coerceAtLeast(0)
         val railScroll = rememberScrollState()
@@ -225,7 +252,8 @@ private fun DrawScope.railIcon(kind: String, c: Color) {
             Box {
                 Column { pages.forEachIndexed { i, item ->
                     val label = if (item == "Tools") "Network tools" else item
-                    val keys = if (i < 9) "Ctrl ${i + 1}" else null
+                    // The Watcher has no number: Ctrl 1-9 map onto pagesFor only.
+                    val keys = if (i < 9 && item != WATCHER_PAGE) "Ctrl ${i + 1}" else null
                     RailRow(item, label, expanded, active = page == item, hint = keys, badge = if (item == "Activity") running else 0,
                         tooltip = label + (keys?.let { "  ·  $it" } ?: "") + if (item == "Activity" && running > 0) "  ·  $running running" else "") { onPage(item) }
                 } }
@@ -252,6 +280,9 @@ private fun DrawScope.railIcon(kind: String, c: Color) {
                 Spacer(Modifier.height(4.dp))
             }
             Box(Modifier.fillMaxWidth().height(1.dp).background(Tech.Edge))
+            // The bell: a plain count, no pulse. It opens the center like any other button (Tab, then Enter or Space).
+            if (bell) onNotifications?.let { open -> RailRow("Notifications", "Notifications", expanded, badge = unreadNotices,
+                tooltip = "Notifications" + if (unreadNotices > 0) "  ·  $unreadNotices unread" else "", onClick = open) }
             Box {
             RailRow("Settings", "Settings", expanded, tooltip = "Settings · Ctrl ,", onClick = onSettings)
                 if (updateAvailable) Box(Modifier.align(Alignment.TopEnd).padding(6.dp).size(5.dp).background(Tech.Amber, androidx.compose.foundation.shape.CircleShape))

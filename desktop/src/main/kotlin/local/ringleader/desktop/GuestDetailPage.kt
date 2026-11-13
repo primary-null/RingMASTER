@@ -122,6 +122,7 @@ internal var guestHeaderProbe: (() -> Unit)? = null
                     Text("+${hidden.size}", fontSize = 9.sp, color = Tech.Muted, fontFamily = Tech.Mono)
                 }
             }
+            WatchGuestButton(guest.resource, guest.name)
             if (pins != null && connectionKey != null) {
                 PinGuestButton(pins, connectionKey, guest)
                 Box {

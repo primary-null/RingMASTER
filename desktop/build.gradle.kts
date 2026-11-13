@@ -71,6 +71,46 @@ val buildBluetoothHelper by tasks.registering {
 }
 tasks.matching { it.name == "prepareAppResources" }.configureEach { dependsOn(buildBluetoothHelper) }
 
+// Windows notification helper (Rust, native/ringmaster-notify): WinRT app notifications under RingMASTER's own
+// AppUserModelID. Built the same way as the Bluetooth helper and shipped beside it. Without it the app reports
+// Windows notifications as unsupported; the in-app notification center is unaffected.
+val notifyHelper = layout.projectDirectory.file("resources/windows/ringmaster-notify.exe")
+val buildNotifyHelper by tasks.registering {
+    val crate = rootProject.layout.projectDirectory.dir("native/ringmaster-notify").asFile
+    val home = System.getProperty("user.home")
+    val cargo = File(home, ".cargo/bin/cargo.exe").takeIf { it.isFile }
+        ?: System.getenv("PATH").orEmpty().split(File.pathSeparator).map { File(it, "cargo.exe") }.firstOrNull { it.isFile }
+    val windowsHost = System.getProperty("os.name").startsWith("Windows")
+    val out = notifyHelper.asFile
+    inputs.dir(File(crate, "src")); inputs.file(File(crate, "Cargo.toml")); inputs.file(File(crate, "Cargo.lock"))
+    outputs.file(out)
+    onlyIf("Windows host with cargo") { windowsHost && cargo != null }
+    doLast {
+        // Unlike the Bluetooth task, the GNU "self-contained" folders are not put on PATH: a linker found on PATH
+        // makes rustc assume an external MinGW and drop its own CRT objects, which fails to link ("cannot find
+        // crt2.o") when more than one toolchain is installed. rustc finds its self-contained linker by itself.
+        // Output is drained into the Gradle log; inheriting the daemon's stdio stalled on a full pipe.
+        val pb = ProcessBuilder(cargo!!.path, "build", "--release", "--locked", "--manifest-path", File(crate, "Cargo.toml").path)
+            .redirectErrorStream(true)
+            .redirectInput(ProcessBuilder.Redirect.from(File(if (windowsHost) "NUL" else "/dev/null")))
+        pb.environment()["PATH"] = (listOf(cargo.parentFile.path) + System.getenv("PATH")).joinToString(File.pathSeparator)
+        pb.environment()["CARGO_TERM_PROGRESS_WHEN"] = "never"
+        pb.environment()["CARGO_TERM_COLOR"] = "never"
+        // Same reasons as the Bluetooth helper: static CRT, and no build-host paths (account name) in the shipped exe.
+        pb.environment()["CARGO_ENCODED_RUSTFLAGS"] = listOf(
+            "-Ctarget-feature=+crt-static",
+            "--remap-path-prefix=$home=~",
+            "--remap-path-prefix=${crate.path}=ringmaster-notify",
+        ).joinToString("\u001f")
+        val process = pb.start()
+        process.inputStream.bufferedReader().useLines { lines -> lines.forEach { logger.lifecycle("cargo: {}", it.take(400)) } }
+        check(process.waitFor() == 0) { "cargo build failed for native/ringmaster-notify" }
+        out.parentFile.mkdirs()
+        File(crate, "target/release/ringmaster-notify.exe").copyTo(out, overwrite = true)
+    }
+}
+tasks.matching { it.name == "prepareAppResources" }.configureEach { dependsOn(buildNotifyHelper) }
+
 compose.desktop {
     application {
         mainClass = "local.ringleader.desktop.MainKt"

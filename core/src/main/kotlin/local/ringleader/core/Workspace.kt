@@ -178,6 +178,8 @@ data class WorkspaceState(
     /** The storage view's configuration and history reads ([StorageWorkbench]). Dropped with the session. */
     val storageView: StorageViewState = StorageViewState(),
     val storageActions: StorageActionsState = StorageActionsState(),
+    /** Immutable non-secret Watcher identity, published atomically with the connection epoch. */
+    val watchIdentity: WatchScope? = null,
 )
 
 fun requireActiveRemote(remote: String, overview: Overview, kind: String = DIRECT_PVE_KIND): Overview {
@@ -231,6 +233,14 @@ class Workspace(
 ) : AutoCloseable {
     private val mutableState = MutableStateFlow(WorkspaceState())
     val state = mutableState.asStateFlow()
+
+    /**
+     * Where this session is connected and as whom, for the Watcher: kind, origin, account and certificate pin. No secret.
+     * Null when not connected. Pair it with [WorkspaceState.connectionEpoch] read before and after the call.
+     */
+    fun watchScope(profileId: String? = null): WatchScope? {
+        return watchScopeOf(mutableState.value, profileId)
+    }
     private val storageWorkbench = StorageWorkbench(scope, mutableState, storageGateway, clock, { connection },
         { epoch -> if (mutableState.value.connectionEpoch == epoch) expire() })
     @Volatile private var storageSendOwner: String? = null
@@ -349,6 +359,7 @@ class Workspace(
         connection = value
         mutableState.value = WorkspaceState(
             connected = true, address = value.address, kind = value.kind, connectionEpoch = ++epochCounter,
+            watchIdentity = WatchScope.of(null, value.kind, value.address, value.tokenId, value.fingerprint.ifEmpty { null }),
             live = true, liveIntervalSeconds = LIVE_INTERVAL_DEFAULT,
             lostPowerResults = lostResults.forRemote(value.address),
         )

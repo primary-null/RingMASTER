@@ -47,6 +47,7 @@ jobs:
           grep '^JAVA_VERSION=' "$runtime_release"
           # The Rust Bluetooth helper must be inside the installer; without cargo the build would quietly leave it out.
           test -f desktop/resources/windows/ringmaster-bt.exe || { echo "::error::Bluetooth helper was not built"; exit 1; }
+          test -f desktop/resources/windows/ringmaster-notify.exe || { echo "::error::Notification helper was not built"; exit 1; }
           mkdir dist
           cp "desktop/build/compose/binaries/main/msi/ringmaster-$VERSION.msi" "dist/RingMASTER-$VERSION.msi"
       - uses: actions/upload-artifact@v6

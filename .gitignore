@@ -8,6 +8,7 @@
 # Rust helper build output; the exe is rebuilt by :desktop:buildBluetoothHelper
 native/*/target/
 desktop/resources/windows/ringmaster-bt.exe
+desktop/resources/windows/ringmaster-notify.exe
 
 # makepkg working copies next to the PKGBUILD
 packaging/arch/src/

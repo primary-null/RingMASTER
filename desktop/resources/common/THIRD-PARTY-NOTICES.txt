@@ -36,3 +36,15 @@ Apache HttpComponents Core 5.4.4 (org.apache.httpcomponents.core5:httpcore5)
 Other libraries (Kotlin, kotlinx, Compose Multiplatform, Ktor, JCEF,
 Skiko) are distributed under the Apache License 2.0 or BSD-style
 licenses. See each project's repository for its notice.
+
+windows-rs (windows 0.58)
+  Windows API bindings used by the Bluetooth and notification helpers.
+  Copyright Microsoft Corporation and contributors.
+  License: MIT OR Apache-2.0.
+  https://github.com/microsoft/windows-rs
+
+serde_json (1.0.154)
+  JSON messages exchanged with the native helpers.
+  Copyright the serde_json contributors.
+  License: MIT OR Apache-2.0.
+  https://github.com/serde-rs/json

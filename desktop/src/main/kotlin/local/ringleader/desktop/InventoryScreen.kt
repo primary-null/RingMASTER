@@ -210,9 +210,13 @@ internal fun guestHasPage(state: WorkspaceState, guest: Guest): Boolean = state.
             if (state.demo) Text(SIMULATED_POWER_DETAIL, color = Tech.Amber, fontSize = 13.sp)
         }
     }
-    if (detailOpen && state.selected != null) {
+    // The guest page and the list share one transition host: opening a guest crossfades in from the right, going back from
+    // the left. Only one of them is ever composed (the other is a fading picture), so the console and its keys are never doubled.
+    // Moving the console to another guest keeps the page (the key stays true), as before.
+    PageTransitionHost(detailOpen && state.selected != null, Modifier.fillMaxSize(), direction = { from, to -> if (to && !from) 1 else if (from && !to) -1 else 0 }) { open ->
+    if (open && state.selected != null) {
         GuestDetailPage(state,workspace, { detailOpen = false }, { action, snapshot -> pendingPower = workspace.capturePower(action,profileLabel,snapshot) }, initialTab = detailTab, tabNonce = tabNonce, pins = pins, connectionKey = connectionKey, onSwitchGuest = switchConsole)
-        return
+        return@PageTransitionHost
     }
     BoxWithConstraints(Modifier.fillMaxSize()) {
     val compact = maxWidth < 900.dp
@@ -258,6 +262,7 @@ internal fun guestHasPage(state: WorkspaceState, guest: Guest): Boolean = state.
         }
     }
     if (compact) VerticalScrollbar(rememberScrollbarAdapter(pageScroll), Modifier.align(Alignment.CenterEnd).fillMaxHeight(), style = visibleScrollbarStyle())
+    }
     }
 }
 
@@ -681,6 +686,7 @@ private fun guestLockMark(guest: Guest): GuestMark? {
                 if (guest.kind == "VM" && state.kind != PDM_KIND && guest.scope.isEmpty()) ArrivalAction("Console", guest.resource, onClick = onOpenConsole)
                 HelpTip("Refresh details") { MiniAction("↻", enabled = !state.detailsLoading, width = 30.dp) { workspace.select(guest) } }
                 if (pins != null && connectionKey != null) PinGuestButton(pins, connectionKey, guest)
+                WatchGuestButton(guest.resource, guest.name)
                 Spacer(Modifier.weight(1f))
                 MiniAction("Close", onClick = workspace::clearSelection)
             }
@@ -862,6 +868,7 @@ private fun guestLockMark(guest: Guest): GuestMark? {
             Spacer(Modifier.weight(1f))
             if (state.kind != PDM_KIND && !state.demo && member.status == "online") MiniAction("Shell") { shell = true }
             WebUiAction(if (state.demo || state.kind == PDM_KIND) null else PveWebUi.node(state.address, member.name))
+            WatchNodeButton(member.name)
             MiniAction("Close", onClick = workspace::clearMember)
         }
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) { CreateGuestActions(state, workspace, member.name) }

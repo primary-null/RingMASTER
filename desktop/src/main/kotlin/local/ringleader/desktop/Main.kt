@@ -255,11 +255,21 @@ private var desktopShortcuts: ((KeyEvent) -> Boolean)? = null
     val reduceMotion = LocalReduceMotion.current
     val modals = LocalModalStack.current
     val scope = rememberCoroutineScope()
+    val resident = if (host.web) null else LocalResident.current
+    val residentAlerts = resident?.alerts
     // Several connections can be open at once. Each has its own workspace; one is in view and the desk is attached to it.
     val sessions = remember { Sessions(scope) { Workspace(scope) } }
     val desk = remember { ProfileDesk(sessions.state.value.active.workspace, ProfileStore(profileFile()).apply { onNewerSchema = SaveStatus::notice }, vault = SystemVault.forHost(host.web), rememberedProfiles = RememberedProfiles(profileFile().resolveSibling("remembered.json"))).also(sessions::bind) }
     DisposableEffect(sessions) { onDispose { desk.close(); sessions.close() } }
     val sessionsState by sessions.state.collectAsState()
+    DisposableEffect(residentAlerts, sessions) {
+        val job = residentAlerts?.attach(sessions)
+        onDispose { job?.cancel() }
+    }
+    val notificationState = residentAlerts?.center?.state?.collectAsState()?.value
+    val nativeDelivery = residentAlerts?.native?.state?.collectAsState()?.value
+    val nativeOpenId = residentAlerts?.openRequest?.collectAsState()?.value
+    SideEffect { residentAlerts?.native?.setShowcase(Appearance.showcase) }
     var scannedSelection by remember { mutableStateOf<ScanHit?>(null) }
     val scanSession = remember { ScanSession(scope) }
     val bluetoothScanner = remember { localBluetoothScanner() }
@@ -274,16 +284,18 @@ private var desktopShortcuts: ((KeyEvent) -> Boolean)? = null
     val toolsSession = remember { ToolsSession(scope) }
     var page by remember { mutableStateOf("Desk") }
     var fleetRequest by remember { mutableStateOf<FleetRequest?>(null) }
+    var scheduleRunRequest by remember { mutableStateOf<String?>(null) }
     val pins = remember { PinStore() }
     // The last pin key each open session used, so a manual connection that becomes its saved profile keeps its pins.
     val lastPinKeys = remember { mutableMapOf<Long, String?>() }
     var railToggle by remember { mutableStateOf(0) }
     var settingsOpen by remember { mutableStateOf(false) }
     var settingsSection by remember { mutableStateOf(SettingsSection.Appearance) }
+    var noticesOpen by remember { mutableStateOf(false) }
     // A minimised window stops every session's live reads; restoring it turns back on the ones that were on.
-    LaunchedEffect(minimized) {
-        if (minimized) sessions.pause()
-        else if (sessions.resume()) sessions.state.value.active.workspace.setLiveTasks(page == "Activity")
+    LaunchedEffect(minimized, resident?.keepWatching, notificationState?.preferences, sessionsState.open, sessionsState.activeId, page) {
+        configureAlertReads(sessions, minimized, resident?.keepWatching == true,
+            taskAlertsEnabled(notificationState?.preferences), page == "Activity")
     }
     // Everything below belongs to the session in view. The key gives each session its own remembered page state
     // (selection, open guest, search), so nothing from one connection is ever applied to another.
@@ -293,14 +305,33 @@ private var desktopShortcuts: ((KeyEvent) -> Boolean)? = null
     val state by workspace.state.collectAsState()
     val deskState by desk.state.collectAsState()
     SideEffect { desk.onWorkspace(state) }
+    // Notifications and the Watcher for the connection in view: LocalAlerts when the parent maps them itself, otherwise the
+    // engine from LocalAlertsSource, mapped here (AlertsAdapter.kt). With neither there is no bell and no Watcher page.
+    val inViewScope = remember(session.id, state.connectionEpoch, state.connected, state.demo, session.profileId) { watchScopeOf(state, session.profileId) }
+    val alertsSource = if (host.web) null else LocalAlertsSource.current ?: residentAlerts?.let { owner ->
+        remember(owner, resident?.keepWatching, nativeDelivery) {
+            AlertsSource(owner.center, owner.watcher, owner.io,
+                native = nativeDelivery ?: NativeDeliveryView(false, false, "Checking desktop notifications."),
+                keepWatchingInBackground = resident?.keepWatching == true,
+                onKeepWatchingInBackground = { resident?.chooseKeepWatching(it) },
+                onTestNative = owner.native::testDelivery,
+                onProblem = { message -> javax.swing.SwingUtilities.invokeLater { SaveStatus.notice(message) } })
+        }
+    }
+    LaunchedEffect(residentAlerts, deskState.profiles) {
+        residentAlerts?.let { owner -> withContext(kotlinx.coroutines.Dispatchers.IO) { owner.watcher.profilesChanged(deskState.profiles) } }
+    }
+    val alerts = LocalAlerts.current ?: alertsSource?.let { rememberAlertsUi(it, inViewScope, deskState.profiles) }
+    val watcherOn = alerts?.watcher != null
+    LaunchedEffect(watcherOn) { if (!watcherOn && page == WATCHER_PAGE) page = "Desk" }
+    LaunchedEffect(alerts?.notices != null) { if (alerts?.notices == null) noticesOpen = false }
     if (settingsOpen) SettingsDialog(state, workspace, settingsSection, { settingsSection = it }, { settingsOpen = false }) { host.windowControls?.quit?.invoke() }
-    val resident = if (host.web) null else LocalResident.current
     if (resident != null) {
         // Tray "Schedules" and a second launch can ask for a page.
         LaunchedEffect(resident.pageRequest) {
             val wanted = resident.pageRequest ?: return@LaunchedEffect
             resident.pageRequest = null
-            if (wanted in pagesFor(host)) page = wanted
+            if (wanted in pagesFor(host) || (wanted == WATCHER_PAGE && watcherOn)) page = wanted
         }
         if (resident.quitPrompt) QuitPrompt(resident)
     }
@@ -313,7 +344,7 @@ private var desktopShortcuts: ((KeyEvent) -> Boolean)? = null
         filter = "All"
     }
     LaunchedEffect(state.connectionEpoch) { if (!host.web) ConsoleHost.release() }
-    LaunchedEffect(page) { if (!minimized) workspace.setLiveTasks(page == "Activity"); if (page != "Desk") desk.leaveDesk() }
+    LaunchedEffect(page) { if (page != "Desk") desk.leaveDesk() }
     val searchFocus=remember { androidx.compose.ui.focus.FocusRequester() }
     CompositionLocalProvider(LocalSearchFocus provides searchFocus) {
     ProvideDeskClock(animations = !reduceMotion && focused && !minimized, tickSeconds = !minimized) {
@@ -374,15 +405,73 @@ private var desktopShortcuts: ((KeyEvent) -> Boolean)? = null
         page = "Fleet"
         fleetRequest = FleetRequest(guest.resource, if (pin.target == PIN_VIEW) pin.tab ?: "Summary" else "Summary", System.nanoTime())
     }
+    // Notice and Watcher targets route inside the window the way pins do; a guest must be in this connection's inventory.
+    val guestPresent: (ResourceId) -> Boolean = { resource -> state.overview?.guests?.any { it.resource == resource } == true }
+    fun routeTo(route: NoticeRoute): Boolean = when (route) {
+        is NoticeRoute.Guest -> {
+            val guest = state.overview?.guests?.firstOrNull { it.resource == route.resource }
+            if (guest != null) { page = "Fleet"; fleetRequest = FleetRequest(guest.resource, route.tab, System.nanoTime()) }
+            guest != null
+        }
+        is NoticeRoute.Node -> if (state.overview?.members?.any { it.name == route.name } == true) { page = "Fleet"; workspace.selectMember(route.name); true } else false
+        NoticeRoute.Activity -> { page = "Activity"; true }
+        is NoticeRoute.Task -> {
+            val parsed = parseServerUpid(route.upid)
+            if (parsed != null && inViewScope != null && state.kind != PDM_KIND) {
+                page = "Activity"
+                workspace.openTaskLog(ClusterTask(inViewScope.remote, route.upid, parsed.node, parsed.type, parsed.subjectId,
+                    parsed.user, null, null, null, TaskOutcome.Unknown))
+                true
+            } else false
+        }
+        NoticeRoute.Storage -> { page = "Storage"; true }
+        NoticeRoute.Schedules -> if ("Schedules" in pagesFor(host)) { page = "Schedules"; true } else false
+        is NoticeRoute.ScheduleRun -> if ("Schedules" in pagesFor(host)) { scheduleRunRequest = route.runId; page = "Schedules"; true } else false
+        NoticeRoute.Watcher -> if (watcherOn) { page = WATCHER_PAGE; true } else false
+        NoticeRoute.None -> false
+    }
+    // A target's session key is its connection binding (WatchScope.binding); only the connection in view can route.
+    val canOpenNotice: (NoticeView) -> Boolean = { notice -> noticeTargetOpenable(notice.target, guestPresent, inViewScope?.binding) }
+    val openNotice: (NoticeView) -> Unit = { notice ->
+        val target = notice.target
+        if (target != null && canOpenNotice(notice) && routeTo(target.route)) { noticesOpen = false; alerts?.noticeActions?.onOpenTarget?.invoke(notice) }
+    }
+    val openWatched: (WatchTargetView) -> Unit = { target ->
+        val routed = when (target.kind) {
+            WatchTargetKind.Guest -> target.resource?.let { routeTo(NoticeRoute.Guest(it)) } == true
+            WatchTargetKind.Node -> routeTo(NoticeRoute.Node(target.name))
+        }
+        if (routed) alerts?.watcherActions?.onOpened?.invoke(target)
+    }
+    LaunchedEffect(nativeOpenId, session.id, alerts?.notices) {
+        val id = nativeOpenId ?: return@LaunchedEffect
+        val item = residentAlerts?.center?.state?.value?.items?.firstOrNull { it.id == id }
+        val binding = when (val target = item?.target) {
+            is NotificationTarget.Resource -> target.binding
+            is NotificationTarget.Task -> target.binding
+            else -> null
+        }
+        if (binding != null && binding != inViewScope?.binding) {
+            val matching = sessionsState.open.firstOrNull { watchScopeOf(it.workspace.state.value, it.profileId)?.binding == binding }
+            if (matching != null) { sessions.show(matching.id); return@LaunchedEffect }
+        }
+        val notice = alerts?.notices?.items?.firstOrNull { it.id == id }
+        if (notice != null && canOpenNotice(notice)) openNotice(notice)
+        else noticesOpen = true
+        residentAlerts?.openRequest?.value = null
+    }
+    if (noticesOpen && alerts?.notices != null) NotificationCenterOverlay(alerts, canOpenNotice, openNotice) { noticesOpen = false }
     val consoleImmersive = LocalImmersive.current?.active == true
     // The route tag follows the session in view; it reads only while its heading is on screen.
     val routeContext = when { state.demo -> RouteContext.Demo; host.web -> RouteContext.Browser
         state.connected && state.address.isNotBlank() -> RouteContext.Server(session.id, state.connectionEpoch, state.address); else -> RouteContext.None }
     LaunchedEffect(routeContext, page, minimized, consoleImmersive) { routeObserver.update(routeContext, page in sessionPages && !minimized && !consoleImmersive) }
+    CompositionLocalProvider(LocalAlerts provides alerts) {
     Row(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         val updateState by DesktopUpdates.checker.state.collectAsState()
         if (!consoleImmersive) NavigationRail(state,page,platform,workspace,railToggle, updateAvailable = !host.web && updateState is UpdateState.Available, onSettings = { settingsOpen = true }, onAbout = { settingsSection = SettingsSection.About; settingsOpen = true }, pins = pins, connectionKey = connectionKey, onPin = ::openPin,
-            sessions = sessionsState.open, activeSession = session.id, profiles = deskState.profiles, onSession = sessions::show) { page=it }
+            sessions = sessionsState.open, activeSession = session.id, profiles = deskState.profiles, onSession = sessions::show,
+            onNotifications = { noticesOpen = true }) { page=it }
         Column(Modifier.weight(1f).fillMaxHeight().padding(if (consoleImmersive) 0.dp else 16.dp), verticalArrangement = Arrangement.spacedBy(if (consoleImmersive) 0.dp else Tech.Space8)) {
             if (!consoleImmersive) {
             WorkspaceHeading(page, state, if (several && page in sessionPages) sessionLabel(state, deskState.profiles.find { it.id == session.profileId }) else null,
@@ -399,13 +488,11 @@ private var desktopShortcuts: ((KeyEvent) -> Boolean)? = null
             }
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 val activeProfile = deskState.profiles.find { it.id == deskState.connectedProfileId }
-                // Fade plus a 12dp slide in the navigation direction; a fade only on Lite, nothing under Reduce motion.
-                val motion = LocalMotion.current
-                val pageMs = if (reduceMotion || motion.reduced) 0 else PAGE_TRANSITION_MS
-                val slidePx = with(androidx.compose.ui.platform.LocalDensity.current) { pageSlideDp(reduceMotion, motion).dp.roundToPx() }
+                // A picture crossfade (MotionPages.kt): the old page leaves the composition at once and fades out as a picture
+                // while the new one fades in, with a 12dp slide in the navigation direction on Full; an instant cut under Reduce motion.
                 // Hidden in the notification area: the page leaves composition like switching away (an open console is kept
                 // paused for the Keep consoles time, then closed), and nothing on it animates. Sessions and the scheduler stay.
-                if (!hidden) AnimatedContent(page,transitionSpec = { (fadeIn(tween(pageMs, easing = MotionEase.Standard)) + slideInHorizontally(tween(pageMs, easing = MotionEase.Standard)) { if(ringPages.indexOf(targetState)>ringPages.indexOf(initialState)) slidePx else -slidePx }) togetherWith fadeOut(tween(pageMs)) }) { targetPage ->
+                if (!hidden) PageTransitionHost(page, Modifier.fillMaxSize(), direction = ::pageDirection) { targetPage ->
                 when (targetPage) {
                     "Fleet" -> ChartLensHost(state, workspace) { InventoryScreen(state, workspace, activeProfile?.let { "${it.displayName} · ${it.origin}" }, search, { search = it }, filter, { filter = it }, { page = "Desk" }, disconnectInView, pins, connectionKey, fleetRequest) { fleetRequest = null } }
                     "Activity" -> ActivityScreen(state, workspace, activeProfile?.let { "${it.displayName} · ${it.origin}" }, { page = "Desk" }, disconnectInView)
@@ -415,7 +502,12 @@ private var desktopShortcuts: ((KeyEvent) -> Boolean)? = null
                     "Tools" -> ToolsScreen(toolsSession)
                     "Under the Hood" -> UnderTheHoodScreen(state)
                     "Storage" -> StoragePage(state, workspace,profileLabel=activeProfile?.displayName ?: "Manual connection")
-                    "Schedules" -> SchedulesScreen(resident, onSettings = { settingsSection = SettingsSection.Background; settingsOpen = true })
+                    "Schedules" -> SchedulesScreen(resident, onSettings = { settingsSection = SettingsSection.Background; settingsOpen = true },
+                        requestedRun = scheduleRunRequest, onRunOpened = { scheduleRunRequest = null })
+                    WATCHER_PAGE -> alerts?.watcher?.let { watcher ->
+                        WatcherScreen(watcher, alerts.watcherActions, guestPresent, openWatched, unreadNotices = rememberNoticeBadge(alerts),
+                            onNotifications = if (alerts.notices != null) ({ noticesOpen = true }) else null)
+                    }
                     else -> DeskScreen(state, deskState, desk, scannedSelection, onScan = { page = "Scan" }, sessions = sessionsState.open, activeSession = session.id, sessionNotice = sessionsState.notice,
                         onShowSession = sessions::show, onDisconnectSession = sessions::disconnect) { page = "Fleet" }
                 }
@@ -423,19 +515,22 @@ private var desktopShortcuts: ((KeyEvent) -> Boolean)? = null
                 CreateGuestHost(state, workspace, activeProfile?.displayName ?: "Manual connection",
                     onOpenGuest = { guest -> fleetRequest = FleetRequest(guest.resource, "Summary", System.nanoTime()); page = "Fleet" },
                     onViewLog = { page = "Activity" })
+                // New notifications as a short stack in the corner. Not over a full-screen console, not while the center is open.
+                alerts?.notices?.let { notices ->
+                    val toastsOff = alerts.prefs?.let { !it.enabled || it.inAppToasts == false } == true
+                    NotificationToasts(notices, privacy = notices.privacy || Appearance.showcase, suppressed = hidden || noticesOpen || consoleImmersive || toastsOff,
+                        canOpen = canOpenNotice, onOpen = openNotice, onOpenCenter = { noticesOpen = true },
+                        modifier = Modifier.align(Alignment.BottomEnd).padding(12.dp))
+                }
             }
         }
     }
     }
     }
+    }
 }
     }
 }
-
-internal const val PAGE_TRANSITION_MS = 180
-
-/** Page change slide in dp: 12 on the Full tier, none on Lite (fade only) and none under Reduce motion. */
-internal fun pageSlideDp(reduceMotion: Boolean, motion: RmMotion): Float = if (reduceMotion) 0f else motion.travel(12f)
 
 /** Pages that show one connection's data. The heading names the session in view on these when several are open. */
 private val sessionPages = setOf("Fleet", "Storage", "Activity", "Under the Hood")

@@ -54,6 +54,7 @@ object AppData {
         "Window placement, rail, live-refresh and update preferences",
         "Configuration backups",
         "Schedules, background access and run history",
+        "Watched resources, notification history and alert preferences",
         "A leftover console browser profile, if one is in the cache",
         REMEMBERED,
     )
