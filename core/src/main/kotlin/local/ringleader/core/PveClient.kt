@@ -170,6 +170,62 @@ class PveClient(
 ) {
     private val http = ProxmoxTransport(connectTimeoutMs, readTimeoutMs)
 
+    fun storageCatalogue(connection: Connection, node: String): List<AplTemplate> =
+        parseAplCatalogue(http.storageExchange(connection, "/api2/json/nodes/${encodePathSegment(pveNodeNameOrNull(node) ?: error("Invalid node."))}/aplinfo"))
+    fun storageUrlMetadata(connection: Connection, node: String, url: String, verifyCertificates: Boolean): UrlMetadata {
+        require(downloadUrlError(url) == null) { "Invalid URL." }
+        return parseUrlMetadata(http.storageExchange(connection, "/api2/json/nodes/${encodePathSegment(pveNodeNameOrNull(node) ?: error("Invalid node."))}/query-url-metadata?url=${encodePathSegment(url)}&verify-certificates=${if (verifyCertificates) 1 else 0}"))
+    }
+    fun storageAttributes(connection: Connection, key: StorageKey, volid: String): StorageAttributes {
+        require(connection.remoteKey == key.remote) { "The storage belongs to another connection." }
+        return parseStorageAttributes(http.storageExchange(connection, storageVolumePath(key, volid)))
+    }
+    fun submitStorage(connection: Connection, key: StorageKey, request: StorageRequest, progress: (Long) -> Unit = {}, cancel: UploadCancel = UploadCancel()): String? {
+        require(connection.remoteKey == key.remote)
+        require(storageRequestError(request) == null) { "Invalid storage request." }
+        val path = storageActionPath(key, request)
+        val raw = if (request is StorageRequest.Upload) {
+            val frame = uploadMultipart(java.util.UUID.randomUUID().toString().replace("-", ""), request.content, request.checksum, request.fileName)
+            http.storageExchange(connection, path, "POST", frame, request.source, progress, cancel)
+        } else {
+            val body = storageRequestBody(key, request)
+            try { http.storageExchange(connection, path, when(request) { is StorageRequest.RemoveVolume -> "DELETE"; is StorageRequest.EditNotes, is StorageRequest.SetProtection -> "PUT"; else -> "POST" }, body = body) }
+            finally { body.fill(0) }
+        }
+        if (request is StorageRequest.EditNotes || request is StorageRequest.SetProtection) {
+            if (runCatching { storageData(raw) == JsonNull }.getOrDefault(false)) return null
+            throw StorageUnclear()
+        }
+        return parseStorageUpid(raw, key, request)
+    }
+
+    private fun createRead(connection: Connection, path: String, readCreateErrors: Boolean = false): String {
+        requireDirectRequest(connection)
+        return http.direct(connection, path, readCreateErrors = readCreateErrors)
+    }
+    fun nextId(connection: Connection, vmid: Int? = null): NextIdReply = try {
+        NextIdReply.Free(parseNextId(createRead(connection, nextIdPath(vmid), readCreateErrors = true)))
+    } catch (e: CreateServerRefusal) { if (e.status == 403) throw GuestPermissionException(); if (e.status == 400 && vmid != null && "vmid" in e.fields) NextIdReply.Taken(vmid, "ID $vmid is in use.") else throw e }
+    fun pools(connection: Connection): List<PoolChoice> = parsePools(createRead(connection, POOLS_PATH))
+    fun bridges(connection: Connection, node: String): List<BridgeChoice> = parseBridges(createRead(connection, bridgesPath(node)))
+    fun cpuModels(connection: Connection, node: String, arch: String?): List<CpuModelChoice> = parseCpuModels(createRead(connection, cpuModelsPath(node, arch)))
+    fun cpuFlags(connection: Connection, node: String, arch: String?, accel: String): List<CpuFlagChoice> = parseCpuFlags(createRead(connection, cpuFlagsPath(node, arch, accel)))
+    fun clusterOptions(connection: Connection): ClusterTagRules = parseClusterTagRules(createRead(connection, CLUSTER_OPTIONS_PATH))
+    fun createGuest(connection: Connection, request: CreateRequest, secrets: CreateSecrets): CreateReply {
+        var body: ByteArray? = null
+        try {
+            requireDirectRequest(connection)
+            body = createBody(request, secrets)
+            secrets.close()
+            val response = http.direct(connection, createNodePath(request.node) + "/" + request.kind.apiSegment,
+                body, contentType = "application/x-www-form-urlencoded", readCreateErrors = true)
+            return CreateReply.Accepted(parseAcceptedUpid(response, request.node, request.vmid))
+        } catch (e: CreateServerRefusal) {
+            return CreateReply.Rejected(e.status, "The server refused the create request (HTTP ${e.status}).",
+                e.fields.associateWith { "The server refused this field. Check its value and permissions." })
+        } finally { body?.fill(0); secrets.close() }
+    }
+
     fun overview(address: String, tokenId: String, secret: String, fingerprint: String = ""): Overview {
         val remote = serverOrigin(address).toString()
         return parseOverview(http.direct(address, tokenId, secret, fingerprint, "/api2/json/cluster/resources"), remote)
@@ -437,6 +493,30 @@ class PveClient(
             }
         }
     }
+
+    /**
+     * The cluster's storage configuration: `GET /storage`, no parameters. It reads storage.cfg and activates nothing. The body
+     * can name servers, paths, exports and users; [parseStorageConfig] keeps only the allowlisted fields, and the raw body is
+     * neither stored nor traced (the trace records the path and the byte count only).
+     */
+    fun storageConfig(connection: Connection): List<StorageConfigRow> {
+        requireDirectRequest(connection)
+        return connection.withSecret {
+            parseStorageConfig(http.direct(connection, STORAGE_CONFIG_PATH, missing = STORAGE_CONFIG_NOT_FOUND, badRequest = STORAGE_CONFIG_REFUSED))
+        }
+    }
+
+    /**
+     * One storage's usage history: `GET /nodes/{node}/storage/{storage}/rrddata?timeframe=&cf=`. It reads the node's RRD file
+     * and activates nothing. Only `used` and `total` are kept ([parseStorageHistory]).
+     */
+    fun storageHistory(connection: Connection, node: String, storage: String, timeframe: String, cf: String): List<HistoryPoint> {
+        requireDirectRequest(connection)
+        val path = storageHistoryPath(node, storage, timeframe, cf)
+        return connection.withSecret {
+            parseStorageHistory(http.direct(connection, path, missing = STORAGE_HISTORY_NOT_FOUND, badRequest = STORAGE_HISTORY_REFUSED))
+        }
+    }
 }
 
 internal val PDM_READ_PATHS = setOf(
@@ -448,14 +528,15 @@ internal val PDM_READ_PATHS = setOf(
 internal class ProxmoxTransport(
     private val connectTimeoutMs: Int = 10_000,
     private val readTimeoutMs: Int = 20_000,
+    private val storageAfterHeaders: () -> Unit = {},
 ) {
     fun direct(connection: Connection, path: String, body: ByteArray? = null,
-        missing: String = GUEST_NOT_FOUND, badRequest: String? = null, method: String = "POST"): String {
+        missing: String = GUEST_NOT_FOUND, badRequest: String? = null, method: String = "POST", contentType: String = POWER_CONTENT_TYPE, readCreateErrors: Boolean = false): String {
         require(isDirectPath(path)) { DIRECT_REQUEST_REFUSAL }
-        require(!isForbiddenNodeRead(path)) { "The live node list and live storage index are not requested." }
+        require(!isForbiddenNodeRead(path)) { FORBIDDEN_NODE_READ }
         require(!isAptListRefresh(path, body != null)) { APT_REFRESH_REFUSAL }
         return connection.withSecret { exchange(connection.address, connection.tokenId, it, connection.fingerprint,
-            path, body, connection.kind, missing, badRequest, method, connection) }
+            path, body, connection.kind, missing, badRequest, method, connection, contentType = contentType, readCreateErrors = readCreateErrors) }
     }
 
     fun direct(
@@ -463,7 +544,7 @@ internal class ProxmoxTransport(
         missing: String = GUEST_NOT_FOUND, badRequest: String? = null, method: String = "POST",
     ): String {
         require(isDirectPath(path)) { DIRECT_REQUEST_REFUSAL }
-        require(!isForbiddenNodeRead(path)) { "The live node list and live storage index are not requested." }
+        require(!isForbiddenNodeRead(path)) { FORBIDDEN_NODE_READ }
         require(!isAptListRefresh(path, body != null)) { APT_REFRESH_REFUSAL }
         return exchange(address, tokenId, secret, fingerprint, path, body, DIRECT_PVE_KIND, missing, badRequest, method)
     }
@@ -473,12 +554,83 @@ internal class ProxmoxTransport(
         return exchange(address, tokenId, secret, fingerprint, path, null, PDM_KIND)
     }
 
+    /** Storage-only bounded, one-shot transport. Never replays authorization or follows a redirect. */
+    fun storageExchange(auth: Connection, path: String, method: String = "GET", frame: MultipartFrame? = null,
+        source: UploadSource? = null, progress: (Long) -> Unit = {}, cancel: UploadCancel = UploadCancel(), body: ByteArray? = null): String {
+        requireDirectRequest(auth)
+        require(isDirectPath(path) && !isForbiddenNodeRead(path))
+        require(method in setOf("GET", "POST", "PUT", "DELETE"))
+        require((source == null) == (frame == null))
+        require(source == null || (method == "POST" && body == null))
+        require(method != "DELETE" || body == null || body.isEmpty())
+        try { cancel.check() } catch (_: java.util.concurrent.CancellationException) { throw StorageCancelledBeforeSend() }
+        if (source != null) require(source.unchanged()) { "The file changed. Choose it again. Nothing was sent." }
+        return auth.withSecret { secret ->
+            val header = if (auth.passwordLogin) null else authorizationHeader(auth.kind, auth.tokenId, secret)
+            var sent = false
+            val trace = Trace.begin(TraceSource.PveApi, "$method ${path.substringBefore('?')}")
+            var status: Int? = null
+            try {
+                val headers = mutableMapOf<String,String>()
+                if(header != null) headers["Authorization"] = header
+                if (auth.passwordLogin) {
+                    val ticket = auth.tickets.get(auth)
+                    headers["Cookie"] = ticket.cookie
+                    if (method != "GET") headers["CSRFPreventionToken"] = ticket.csrf
+                }
+                cancel.check()
+                source?.open().use { input ->
+                val length = if(source != null && frame != null) frame.totalLength(source.size)
+                    else if(method == "GET") null else (body?.size ?: 0).toLong()
+                val contentType = if(frame != null) "multipart/form-data; boundary=${frame.boundary}" else POWER_CONTENT_TYPE
+                val write: ((java.io.OutputStream) -> Unit)? = if(method == "GET" || method == "DELETE") null else { out ->
+                    if(source != null && frame != null) {
+                        out.write(frame.head)
+                        streamUpload(input!!,out,source.size,progress,cancel)
+                        check(source.unchanged()) { "Selected file changed during upload." }
+                        out.write(frame.tail)
+                    } else out.write(body ?: byteArrayOf())
+                }
+                storageWire(serverOrigin(auth.address),auth.fingerprint,path,method,headers,
+                    if(method == "GET") null else contentType,length,write,connectTimeoutMs,
+                    if(source != null) 120000 else readTimeoutMs,cancel,
+                    beforeHeaders = {
+                        cancel.check()
+                        require(source == null || source.unchanged()) { "The file changed before send." }
+                        sent = method != "GET"
+                    }, afterHeaders = storageAfterHeaders) { code, response ->
+                status = code
+                when(code) {
+                    200 -> {
+                        val bytes = response.readNBytes(1024 * 1024 + 1)
+                        try { if (bytes.size > 1024 * 1024) { if (sent) throw StorageUnclear() else error("Storage response is too large.") }; String(bytes, Charsets.UTF_8) }
+                        finally { bytes.fill(0) }
+                    }
+                    401 -> { if (auth.passwordLogin) auth.tickets.clear(); throw SessionExpiredException() }
+                    400, 403 -> {
+                        val raw = response.readNBytes(65536)
+                        val fields = try { raw?.let { createErrorKeys(it) }.orEmpty().intersect(setOf("url", "filename", "content", "checksum", "checksum-algorithm", "notes", "protected", "storage", "template")) } catch (_: Exception) { emptySet() } finally { raw?.fill(0) }
+                        throw StorageRejected(code, fields)
+                    }
+                    else -> if (sent) throw StorageUnclear() else throw StorageRejected(code)
+                }
+                }
+                }
+            } catch (e: SessionExpiredException) { throw e }
+            catch (e: StorageRejected) { throw e }
+            catch (e: StorageUnclear) { throw e }
+            catch (_: java.util.concurrent.CancellationException) { if (sent) throw StorageUnclear() else throw StorageCancelledBeforeSend() }
+            catch (_: Exception) { if (sent) throw StorageUnclear() else throw java.io.IOException("Storage request stopped before its body was sent.") }
+            finally { cancel.detach(); trace.end(status = status) }
+        }
+    }
+
     private fun exchange(
         address: String, tokenId: String, secret: String, fingerprint: String, path: String, body: ByteArray?, kind: String,
-        missing: String = GUEST_NOT_FOUND, badRequest: String? = null, method: String = "POST", auth: Connection? = null, retry: Boolean = true,
+        missing: String = GUEST_NOT_FOUND, badRequest: String? = null, method: String = "POST", auth: Connection? = null, retry: Boolean = true, contentType: String = POWER_CONTENT_TYPE, readCreateErrors: Boolean = false,
     ): String {
         if (auth == null && '!' !in tokenId) return Connection(address, tokenId, secret, fingerprint, kind).use {
-            exchange(address, tokenId, secret, fingerprint, path, body, kind, missing, badRequest, method, it)
+            exchange(address, tokenId, secret, fingerprint, path, body, kind, missing, badRequest, method, it, contentType = contentType, readCreateErrors = readCreateErrors)
         }
         // Under the Hood: one span per direct PVE call (PdmClient traces its own). Path only, never headers or bodies.
         val trace = if (kind == PDM_KIND) null else Trace.begin(TraceSource.PveApi, "${if (body == null) "GET" else method} ${Redact.url(path)}",
@@ -507,11 +659,11 @@ internal class ProxmoxTransport(
                 connection.requestMethod = method
                 connection.doOutput = true
                 connection.setFixedLengthStreamingMode(body.size)
-                connection.setRequestProperty("Content-Type", POWER_CONTENT_TYPE)
+                connection.setRequestProperty("Content-Type", contentType)
                 if (header != null) connection.setRequestProperty("Authorization", header)
                 val output = connection.outputStream
                 sent = true
-                output.use { it.write(body); it.flush() }
+                try { output.use { it.write(body); it.flush() } } finally { if (readCreateErrors) body.fill(0) }
             }
             return when (val code = connection.responseCode.also { traceStatus = it }) {
                 200 -> connection.inputStream.bufferedReader().use { it.readText() }.also { traceBytesIn = it.length.toLong() }
@@ -521,13 +673,20 @@ internal class ProxmoxTransport(
                         // A sent mutation may have run before the 401; never replay it under a fresh ticket.
                         if (body != null && sent) throw SessionExpiredException()
                         try { auth.tickets.get(auth) } catch (e: LoginRefusedException) { throw SessionExpiredException() }
-                        return exchange(address, tokenId, secret, fingerprint, path, body, kind, missing, badRequest, method, auth, false)
+                        return exchange(address, tokenId, secret, fingerprint, path, body, kind, missing, badRequest, method, auth, false, contentType, readCreateErrors)
                     }
                     throw SessionExpiredException()
                 }
-                403 -> throw GuestPermissionException()
-                400 -> error(badRequest ?: "The server returned HTTP 400.")
-                404 -> error(if (kind == PDM_KIND) "The PDM read returned HTTP 404." else missing)
+                403 -> { if (readCreateErrors) throw CreateServerRefusal(403, emptySet()); throw GuestPermissionException() }
+                400 -> {
+                    if (readCreateErrors) {
+                        val raw = connection.errorStream?.use { it.readNBytes(65536) }
+                        val fields = try { raw?.let { createErrorKeys(it) }.orEmpty() } catch (_: Exception) { emptySet() } finally { raw?.fill(0) }
+                        throw CreateServerRefusal(400, fields)
+                    }
+                    error(badRequest ?: "The server returned HTTP 400.")
+                }
+                404 -> { if (readCreateErrors && sent) throw AmbiguousPowerResultException(); error(if (kind == PDM_KIND) "The PDM read returned HTTP 404." else missing) }
                 in 300..399 -> {
                     if (body != null && sent) throw AmbiguousPowerResultException()
                     error("The server redirected the request. Enter the server's direct HTTPS address.")
@@ -537,7 +696,7 @@ internal class ProxmoxTransport(
                     if (body != null && sent) throw AmbiguousPowerResultException()
                     error("The server returned HTTP $code.")
                 }
-                else -> error("The server returned HTTP ${connection.responseCode}.")
+                else -> { if (readCreateErrors && sent) throw AmbiguousPowerResultException(); error("The server returned HTTP ${connection.responseCode}.") }
             }
         } catch (e: AmbiguousPowerResultException) {
             throw e
@@ -571,6 +730,9 @@ internal class ProxmoxTransport(
         return connection
     }
 }
+
+/** The live node list, the storage index and a storage's status read are refused before HTTP ([isForbiddenNodeRead]). */
+internal const val FORBIDDEN_NODE_READ = "The live node list, the live storage index and live storage status are not requested."
 
 internal const val GUEST_NOT_FOUND = "This guest is no longer at that node. Refresh the inventory."
 
@@ -614,9 +776,10 @@ val demoOverview = Overview(
         RecordedMember(DEMO_REMOTE_KEY, "demo-node-b", "online", "maintenance", 0.0, 4.0, null, 8 * DEMO_GIB, 4 * DEMO_GIB, 32 * DEMO_GIB, 7200),
     ),
     storage = listOf(
-        RecordedStorage(DEMO_REMOTE_KEY, "demo-node-a", "local-lvm", false, 10 * DEMO_GIB, 40 * DEMO_GIB, "available", "lvmthin", "images"),
-        RecordedStorage(DEMO_REMOTE_KEY, "demo-node-a", "shared-data", true, 20 * DEMO_GIB, 100 * DEMO_GIB, "available", "directory", "images,backup"),
-        RecordedStorage(DEMO_REMOTE_KEY, "demo-node-b", "shared-data", true, 20 * DEMO_GIB, 100 * DEMO_GIB, "available", "directory", "images,backup"),
+        RecordedStorage(DEMO_REMOTE_KEY, "demo-node-a", "local", false, 2 * DEMO_GIB, 40 * DEMO_GIB, "available", "dir", "iso,vztmpl,import"),
+        RecordedStorage(DEMO_REMOTE_KEY, "demo-node-a", "local-lvm", false, 10 * DEMO_GIB, 40 * DEMO_GIB, "available", "lvmthin", "images,rootdir"),
+        RecordedStorage(DEMO_REMOTE_KEY, "demo-node-a", "shared-data", true, 20 * DEMO_GIB, 100 * DEMO_GIB, "available", "dir", "images,backup"),
+        RecordedStorage(DEMO_REMOTE_KEY, "demo-node-b", "shared-data", true, 20 * DEMO_GIB, 100 * DEMO_GIB, "available", "dir", "images,backup"),
     ),
 )
 
@@ -656,4 +819,38 @@ private fun newPinnedSslContext(pin: String): SSLContext {
         override fun checkClientTrusted(c: Array<out X509Certificate>?, a: String?, e: javax.net.ssl.SSLEngine?) = checkClientTrusted(c, a)
     }
     return SSLContext.getInstance("TLS").apply { init(null, arrayOf(trust), null) }
+}
+
+internal class CreateServerRefusal(val status: Int, val fields: Set<String>) : IllegalStateException("The server refused the request.")
+
+/** Inspect only JSON object keys; reflected error VALUES are never decoded to immutable Strings. */
+private fun createErrorKeys(bytes: ByteArray): Set<String> {
+    val found = mutableSetOf<String>()
+    var i = 0; var depth = 0; var errorsDepth = -1
+    fun whitespace(n: Int): Int { var p = n; while (p < bytes.size && bytes[p].toInt() in listOf(9, 10, 13, 32)) p++; return p }
+    while (i < bytes.size) {
+        when (bytes[i].toInt()) {
+            123 -> { depth++; i++ }
+            125 -> { if (depth == errorsDepth) errorsDepth = -1; depth--; i++ }
+            34 -> {
+                val start = ++i; var escaped = false
+                while (i < bytes.size && bytes[i].toInt() != 34) { if (bytes[i].toInt() == 92) { escaped = true; i++ }; i++ }
+                val end = i; i++
+                val colon = whitespace(i)
+                if (!escaped && colon < bytes.size && bytes[colon].toInt() == 58) {
+                    if (depth == 1 && end - start == 6 && "errors".indices.all { bytes[start + it].toInt() == "errors"[it].code }) {
+                        val value = whitespace(colon + 1)
+                        if (value < bytes.size && bytes[value].toInt() == 123) errorsDepth = depth + 1
+                    } else if (depth == errorsDepth && end - start in 1..64) {
+                        // Compare bytes with known field names before constructing any key text.
+                        val known = listOf("vmid", "name", "hostname", "node", "pool", "tags", "ostype", "memory", "balloon", "shares", "sockets", "cores", "vcpus", "cpulimit", "cpuunits", "cpu", "vga", "machine", "bios", "scsihw", "swap", "searchdomain", "nameserver", "startup", "arch", "affinity", "efidisk0", "tpmstate0", "storage", "ostemplate", "password", "ssh-public-keys", "ha-managed", "agent", "rootfs") +
+                            listOf("ide" to 3, "sata" to 5, "scsi" to 30, "virtio" to 15, "mp" to 255, "net" to 31).flatMap { (prefix, max) -> (0..max).map { prefix + it } }
+                        known.firstOrNull { k -> k.length == end - start && k.indices.all { bytes[start + it].toInt() == k[it].code } }?.let { found += it }
+                    }
+                }
+            }
+            else -> i++
+        }
+    }
+    return found
 }

@@ -1,4 +1,4 @@
-@file:OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
+@file:OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class, androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 package local.ringleader.desktop
 
 import androidx.compose.animation.animateColorAsState
@@ -67,7 +67,8 @@ internal fun gib(bytes: Long?): String {
     if (bytes == null || bytes < 0L) return "—"
     return String.format(Locale.ROOT, if (bytes >= 10L * 1073741824) "%.0f" else "%.1f", bytes / 1073741824.0)
 }
-internal fun shortcutPage(number: Int) = ringPages.getOrNull(number - 1)
+/** Ctrl+1 to Ctrl+9 only; pages after the ninth (Schedules) have no number shortcut. */
+internal fun shortcutPage(number: Int) = if (number in 1..9) ringPages.getOrNull(number - 1) else null
 
 /** Latest finite, non-negative sample, otherwise the same check on the recorded fallback. */
 internal fun latestCpu(series: Series?, fallback: Double?): Double? =
@@ -790,7 +791,7 @@ internal fun syncedAgo(updatedAt: java.time.Instant?, now: java.time.Instant): S
     // sp grows with the accessibility text size; dp does not. Widen the tight cells, and stop before the 960 and 1920 strips gain a line.
     val fontScale = androidx.compose.ui.platform.LocalDensity.current.fontScale.coerceIn(1f, 1.5f)
     fun textWidth(base: Dp, cap: Float) = base * fontScale.coerceAtMost(cap)
-    val link: @Composable RowScope.() -> Unit = {
+    val link: @Composable () -> Unit = {
         StripCell("LINK · $host", Modifier.width(textWidth(220.dp, 1.08f)), identity = true) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 LivePill(state) { val next = !state.live; workspace.setLive(next); prefs.put("live", next) }
@@ -798,17 +799,16 @@ internal fun syncedAgo(updatedAt: java.time.Instant?, now: java.time.Instant): S
             }
         }
     }
-    val counts: @Composable RowScope.() -> Unit = {
+    val counts: @Composable () -> Unit = {
         if (total != null) {
-            StripCell(if (state.overview?.remotes.isNullOrEmpty()) "NODES" else "REMOTES", Modifier.width(textWidth(76.dp, 1.25f))) {
+            StripCell(if (state.overview?.remotes.isNullOrEmpty()) "NODES" else "REMOTES", Modifier.width(textWidth(76.dp, 1.25f)).height(76.dp * fontScale)) {
                 AnimatedCount(if (state.overview?.remotes.isNullOrEmpty()) total.nodes else state.overview!!.remotes.size)
             }
-            StripDivider()
-            StripCell("GUESTS", Modifier.width(textWidth(230.dp, 1.12f))) {
+            StripCell("GUESTS", Modifier.width(textWidth(230.dp, 1.12f)).height(76.dp * fontScale)) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     AnimatedCount(total.guests)
                     Text(guestSplitText(total), fontSize = 10.sp, color = Tech.Muted, fontFamily = Tech.Mono,
-                        modifier = Modifier.weight(1f).padding(bottom = 3.dp), maxLines = 1, overflow = TextOverflow.Ellipsis, softWrap = false)
+                        modifier = Modifier.weight(1f).padding(bottom = 3.dp), maxLines = 2, overflow = TextOverflow.Ellipsis)
                 }
                 SplitBar(listOf(total.running, total.stopped, total.templates, otherGuests(total)), Modifier.fillMaxWidth())
             }
@@ -896,13 +896,27 @@ internal fun syncedAgo(updatedAt: java.time.Instant?, now: java.time.Instant): S
         val wideHeight = 76.dp * fontScale.coerceAtMost(1.2f)
         val narrowHeight = 72.dp * fontScale.coerceAtMost(1.2f)
         BoxWithConstraints {
-            if (maxWidth >= 1450.dp) {
+            val availableWidth = maxWidth
+            if (availableWidth >= 1450.dp * fontScale) {
                 Row(Modifier.fillMaxWidth().height(wideHeight), verticalAlignment = Alignment.CenterVertically) { link(); StripDivider(); counts(); StripDivider(); usage(); actions() }
             } else {
                 Column {
-                    Row(Modifier.fillMaxWidth().height(narrowHeight), verticalAlignment = Alignment.CenterVertically) { link(); StripDivider(); counts(); Spacer(Modifier.weight(1f)); actions() }
+                    if (availableWidth >= 900.dp * fontScale) {
+                        Row(Modifier.fillMaxWidth().height(narrowHeight), verticalAlignment = Alignment.CenterVertically) { link(); StripDivider(); counts(); Spacer(Modifier.weight(1f)); actions() }
+                    } else {
+                        // Keep every action reachable when an expanded rail or large text reduces the available width.
+                        FlowRow(Modifier.fillMaxWidth(), horizontalArrangement=Arrangement.spacedBy(4.dp), verticalArrangement=Arrangement.spacedBy(4.dp)) {
+                            Box(Modifier.height(narrowHeight)) { link() }
+                            counts()
+                        }
+                        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).height(40.dp * fontScale), verticalAlignment = Alignment.CenterVertically) { actions() }
+                    }
                     Box(Modifier.fillMaxWidth().height(1.dp).background(Tech.Edge))
-                    Row(Modifier.fillMaxWidth().height(narrowHeight), verticalAlignment = Alignment.CenterVertically) { usage() }
+                    val usageScroll = rememberScrollState()
+                    Column {
+                        Row(Modifier.fillMaxWidth().horizontalScroll(usageScroll).widthIn(min = 820.dp * fontScale).height(narrowHeight), verticalAlignment = Alignment.CenterVertically) { usage() }
+                        HorizontalScrollbar(rememberScrollbarAdapter(usageScroll), Modifier.fillMaxWidth().height(8.dp))
+                    }
                 }
             }
         }

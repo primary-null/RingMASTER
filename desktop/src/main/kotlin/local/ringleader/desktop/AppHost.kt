@@ -4,7 +4,11 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.input.key.KeyEvent
 import java.nio.file.Path
 
-data class WindowControls(val minimize: () -> Unit, val maximize: () -> Unit, val close: () -> Unit)
+/** [close] follows the close-to-tray policy; [quit] always exits (used after Clear everything). */
+data class WindowControls(val minimize: () -> Unit, val maximize: () -> Unit, val close: () -> Unit, val quit: () -> Unit = close)
+
+/** The resident runtime (tray and scheduler) of the desktop window. Null in browser mode, tests and when not the owner. */
+internal val LocalResident = staticCompositionLocalOf<ResidentRuntime?> { null }
 
 open class AppHost(val web: Boolean, val hostActions: Boolean = !web) {
     open val windowControls: WindowControls? = null

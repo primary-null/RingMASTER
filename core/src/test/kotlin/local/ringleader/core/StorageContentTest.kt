@@ -68,6 +68,34 @@ class StorageContentTest {
         assertEquals(5L, exact.shownSize, "An exact size wins")
     }
 
+    @Test fun aLinkedCloneKeepsItsBaseVolume() {
+        val rows = parseStorageContent("""{"data":[
+            {"volid":"local-lvm:base-900-disk-0/vm-140-disk-0","content":"images","format":"raw","size":10,"vmid":140,"parent":"base-900-disk-0"},
+            {"volid":"local-lvm:vm-141-disk-0","content":"images","size":10,"vmid":141,"parent":"bad\u0007name"},
+            {"volid":"local-lvm:vm-142-disk-0","content":"images","size":10,"vmid":142,"parent":17},
+            {"volid":"local-lvm:vm-143-disk-0","content":"images","size":10,"vmid":143}
+        ]}""").associateBy { it.vmid }
+        assertEquals("base-900-disk-0", rows.getValue(140).parent)
+        assertNull(rows.getValue(141).parent, "A control character drops the parent, not the row")
+        assertNull(rows.getValue(142).parent, "A parent that is not text is no parent")
+        assertNull(rows.getValue(143).parent)
+    }
+
+    @Test fun theVisibilityWordingNamesEveryRule() {
+        // The five rules of check_volume_access, as research section 5 states them.
+        for (rule in listOf(
+            "ISO images, templates and import files need Datastore.Audit or Datastore.AllocateSpace",
+            "backups also need Datastore.AllocateSpace there plus VM.Backup on their guest",
+            "disks need Datastore.Audit plus VM.Config.Disk on their guest",
+            "snippets need Datastore.Allocate, which reveals everything",
+            "left out without an error",
+        )) assertTrue(STORAGE_VISIBILITY_WHY.contains(rule), rule)
+        assertEquals(2, STORAGE_VISIBILITY_WHY.split(". ").size, "Two sentences")
+        // The "?" beside the volume count keeps its plain reason first and the rules after it.
+        assertTrue(STORAGE_VISIBILITY_HELP.startsWith("This list shows the files this account is allowed to see."))
+        assertTrue(STORAGE_VISIBILITY_HELP.endsWith("\n\n" + STORAGE_VISIBILITY_WHY))
+    }
+
     @Test fun rowsAreCheckedBeforeTheyAreShown() {
         val rows = parseStorageContent("""{"data":[
             {"volid":"a:iso/one.iso","size":-5,"used":"12","ctime":-1,"vmid":0,"protected":"0","format":"iso"},

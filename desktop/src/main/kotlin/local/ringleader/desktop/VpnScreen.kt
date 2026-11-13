@@ -63,6 +63,8 @@ class VpnSession(private val scope: CoroutineScope, val backend: VpnBackend?, va
     var searched by mutableStateOf(false); private set
     /** Set from the window. Background polls wait while the window is minimised. */
     var minimized by mutableStateOf(false)
+    /** Counts VPN changes, at their start and at their end, so route observers can drop what they saw before. */
+    var changes by mutableStateOf(0); private set
     private var generation = 0
     private var findJob: Job? = null
 
@@ -76,6 +78,8 @@ class VpnSession(private val scope: CoroutineScope, val backend: VpnBackend?, va
         if (minimized && !manual && !force) return
         val ticket = synchronized(this) { ++generation }
         if (manual) reading = true
+        // A route read for another server is never shown for this one.
+        if (route != null && route?.host != host) route = null
         scope.launch {
             try {
                 val s = withContext(Dispatchers.IO) { b.snapshot() }
@@ -85,6 +89,8 @@ class VpnSession(private val scope: CoroutineScope, val backend: VpnBackend?, va
                 if (!isCurrent(ticket)) return@launch
                 route = next
             } catch (e: CancellationException) { throw e } catch (_: Exception) {
+                // The route came from the snapshot that just failed to refresh; it is not kept as if it were current.
+                if (isCurrent(ticket)) route = null
             } finally { if (isCurrent(ticket)) reading = false }
         }
     }
@@ -98,11 +104,12 @@ class VpnSession(private val scope: CoroutineScope, val backend: VpnBackend?, va
         if (!hostActions) { failed = true; message = VPN_HOST_ACTIONS_REASON; return }
         if (busy != null) return
         busy = key; message = null; failed = false
+        changes++
         scope.launch {
             try { withContext(Dispatchers.IO) { block(b) }; message = done }
             catch (e: CancellationException) { throw e }
             catch (e: Exception) { failed = true; message = e.message?.takeIf { it.isNotBlank() } ?: "The change did not complete." }
-            finally { busy = null; refresh(host, force = true) }
+            finally { busy = null; changes++; refresh(host, force = true) }
         }
     }
 
@@ -139,6 +146,7 @@ private fun hostOf(address: String?): String? = address?.takeIf { it.isNotBlank(
     var importing by remember { mutableStateOf<Path?>(null) }
     val snap = session.snapshot
     val backend = session.backend
+    LayoutViewport(360.dp) {
     Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(Tech.Space8)) {
         Row(Modifier.fillMaxWidth().height(32.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             MiniAction(if (session.reading) "Reading…" else "Refresh", enabled = backend != null && !session.reading) { session.refresh(host, manual = true) }
@@ -231,6 +239,7 @@ private fun hostOf(address: String?): String? = address?.takeIf { it.isNotBlank(
     } }
 }
 
+}
 private sealed class VpnConfirm(val title: String, val body: String, val action: String, val admin: Boolean) {
     class Toggle(val tunnel: VpnTunnel, val up: Boolean) : VpnConfirm(
         "${if (up) "Bring up" else "Bring down"} ${tunnel.name}?",

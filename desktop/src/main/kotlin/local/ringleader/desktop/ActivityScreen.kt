@@ -87,6 +87,7 @@ private fun statusColor(outcome: TaskOutcome) = when (outcome) {
         androidx.compose.runtime.CompositionLocalProvider(LocalActivitySplit provides split) {
         Box(Modifier.weight(1f).fillMaxHeight()) {
         LazyColumn(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(0.dp)) {
+            item { StorageActionStrip(state,workspace) }
             item {
             Column(verticalArrangement = Arrangement.spacedBy(Tech.Space8)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Tech.Space12)) {
@@ -196,8 +197,10 @@ private fun statusColor(outcome: TaskOutcome) = when (outcome) {
     val vmid = fields[2]
     val kind = fields[3]
     val name = fields[4]
-    val status = fields[5]
-    val color = when (submission.phase) {
+    val warnings = local.ringleader.core.isCreateSubmission(submission) && local.ringleader.core.createFinishedWithWarnings(submission)
+    val warningCount = Regex("WARNINGS: *([0-9]+)").find(submission.detail)?.groupValues?.get(1)
+    val status = if (warnings) "Finished with ${warningCount ?: "some"} warnings." else fields[5]
+    val color = if (warnings) Tech.Amber else when (submission.phase) {
         PowerPhase.Succeeded -> Tech.Green
         PowerPhase.Accepted -> Tech.Amber
         PowerPhase.Unsuccessful, PowerPhase.Rejected -> Tech.Red

@@ -1,3 +1,4 @@
+@file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 package local.ringleader.desktop
 
 import androidx.compose.ui.focus.focusRequester
@@ -244,16 +245,25 @@ class ToolsSession(private val scope: CoroutineScope) {
     session.hostActions = LocalAppHost.current.hostActions
     LaunchedEffect(Unit) { session.reload() }
     val plugin = session.plugins.firstOrNull { it.id == session.selectedId } ?: session.plugins.firstOrNull()
+    LayoutViewport(600.dp) {
     Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         if (web) Text("Tests run from the server", color = Tech.Amber, fontFamily = Tech.Mono, fontSize = 11.sp, maxLines = 1)
         if (plugin == null) {
             Text("No tools are available.", color = Tech.Muted, fontFamily = Tech.Mono, fontSize = 12.sp)
             return@Column
         }
-        Row(Modifier.weight(1f).fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            ToolList(session, plugin.id)
-            ToolDetail(session, plugin, Modifier.weight(1f).fillMaxHeight())
+        BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
+            if (maxWidth < 800.dp) Column(Modifier.fillMaxSize(), verticalArrangement=Arrangement.spacedBy(8.dp)) {
+                FlowRow(horizontalArrangement=Arrangement.spacedBy(6.dp), verticalArrangement=Arrangement.spacedBy(6.dp)) {
+                    session.plugins.forEach { item -> MiniAction(item.name, primary=item.id==plugin.id, enabled = !session.running) { session.select(item.id) } }
+                }
+                ToolDetail(session, plugin, Modifier.weight(1f).fillMaxWidth())
+            } else Row(Modifier.fillMaxSize(), horizontalArrangement=Arrangement.spacedBy(12.dp)) {
+                ToolList(session, plugin.id)
+                ToolDetail(session, plugin, Modifier.weight(1f).fillMaxHeight())
+            }
         }
+    }
     }
     val command = session.confirmCommand
     val confirming = plugin

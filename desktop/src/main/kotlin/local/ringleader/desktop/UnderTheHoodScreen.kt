@@ -1,3 +1,4 @@
+@file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 package local.ringleader.desktop
 
 import androidx.compose.foundation.*
@@ -94,14 +95,17 @@ private val hoodTime = DateTimeFormatter.ofPattern("HH:mm:ss.SSS").withZone(Zone
         if(follow && filtered.isNotEmpty()) { list.scrollToItem(filtered.lastIndex); seen=events.lastOrNull()?.id ?: seen }
     }
     // The page header already names the screen; this line only says what is being captured.
+    LayoutViewport(640.dp) {
     Column(Modifier.fillMaxSize().background(Tech.Canvas).padding(top = 4.dp), verticalArrangement=Arrangement.spacedBy(10.dp)) {
-        Row(horizontalArrangement=Arrangement.spacedBy(12.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+        FlowRow(horizontalArrangement=Arrangement.spacedBy(12.dp), verticalArrangement=Arrangement.spacedBy(4.dp)) {
             StatusTag(if(state.demo) "DEMO · SYNTHETIC" else "LIVE CAPTURE",healthy=true)
             Text("Every instrumented operation · redacted before capture · ${Trace.CAPACITY} operation rolling buffer",color=Tech.Muted,fontSize=11.sp,fontFamily=Tech.Mono)
         }
         BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
-            val width=maxWidth.value
-            Row(Modifier.fillMaxSize()) {
+            val surfaceWidth = maxOf(maxWidth,900.dp)
+            val width=surfaceWidth.value
+            Box(Modifier.fillMaxSize().horizontalScroll(rememberScrollState())) {
+            Row(Modifier.width(surfaceWidth).fillMaxHeight()) {
                 Column(Modifier.weight(split).fillMaxHeight().background(Tech.Panel).padding(12.dp),verticalArrangement=Arrangement.spacedBy(10.dp)) {
                     SectionLabel("STREAM",suffix="${filtered.size} OPERATIONS")
                     Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
@@ -224,6 +228,8 @@ private val hoodTime = DateTimeFormatter.ofPattern("HH:mm:ss.SSS").withZone(Zone
             }
         }
     }
+}
+}
 }
 @Composable private fun DataText(text: String, modifier: Modifier=Modifier) { Text(text,modifier,color=Tech.Muted,fontFamily=Tech.Mono,fontSize=11.sp,lineHeight=15.sp) }
 @Composable private fun HorizontalDividerLine() { androidx.compose.material3.HorizontalDivider(color=Tech.Edge) }

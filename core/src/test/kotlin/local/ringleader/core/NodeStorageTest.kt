@@ -543,4 +543,31 @@ class NodeStorageTest {
         kotlin.test.assertEquals(4294967296L, guest.metrics?.memoryLimitBytes)
         kotlin.test.assertEquals(3600L, guest.metrics?.uptimeSeconds)
     }
+
+    @Test fun oneStoragesStatusReadIsForbiddenLikeTheIndex() {
+        // pve-storage read_status calls storage_info for every storage on the node, so this read wakes them all.
+        for (path in listOf(
+            "/api2/json/nodes/node-a/storage/local/status",
+            "/api2/json/nodes/node-a/storage/local/status?content=iso",
+            "/api2/json/nodes/node-a/storage/local/status/",
+            "/api2/json/nodes/node-a/storage/backup-nfs/status",
+            "/api2/json/nodes/node-a/storage",
+            "/api2/json/nodes/node-a/storage/",
+            "/api2/json/nodes/",
+        )) assertTrue(isForbiddenNodeRead(path), path)
+        for (path in listOf(
+            "/api2/json/nodes/node-a/storage/local/content",
+            "/api2/json/nodes/node-a/storage/local/rrddata?timeframe=hour&cf=AVERAGE",
+            "/api2/json/nodes/node-a/status",
+            "/api2/json/storage",
+            "/api2/json/nodes/node-a/storage/local/status/extra",
+        )) assertFalse(isForbiddenNodeRead(path), path)
+        fixture { address, pin, calls, _, _ ->
+            Connection(address, "fixture@pve!read", "test-only", pin).use { c ->
+                val refusal = assertFailsWith<IllegalArgumentException> { ProxmoxTransport().direct(c, "/api2/json/nodes/node-a/storage/local/status") }
+                assertEquals(FORBIDDEN_NODE_READ, refusal.message)
+            }
+            assertEquals(0, calls.get(), "Nothing reached the server")
+        }
+    }
 }

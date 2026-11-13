@@ -92,6 +92,7 @@ class ProfileDesk(
     private val io: CoroutineContext = Dispatchers.IO,
     /** How long a just-typed secret may wait for the first inventory before it is dropped unremembered. */
     private val rememberWaitMs: Long = 90_000,
+    private val certificateStore: CertificateTrustStore = CertificateTrustStore(store.file.resolveSibling("certificates.json")),
 ) : AutoCloseable {
     private var workspace: Workspace = workspace
     private val mutableState = MutableStateFlow(DeskState())
@@ -431,27 +432,67 @@ class ProfileDesk(
     }
 
     /** [passwordLogin] is the Password / API token choice; null skips that check. */
-    fun connectManual(address: String, tokenId: String, pin: String, kind: String = DIRECT_PVE_KIND, otp: String? = null, passwordLogin: Boolean? = null): Boolean {
+    /** Resolves only certificate identity, never usernames or credential memory. */
+    fun manualTrust(address: String, observed: String? = null): ManualTrust = try {
+        check(!state.value.saveBlocked && store.trustReadError() == null) { "Saved profiles could not be read. Resolve that error before connecting manually." }
+        val origin = certificateOrigin(address)
+        val remembered = certificateStore.load().find { it.origin == origin }?.pin
+        val saved = state.value.profiles.filter { certificateOrigin(it.origin) == origin }.mapNotNull { it.sha256Pin }.toSet()
+        val known = (saved + listOfNotNull(remembered)).sorted()
+        ManualTrust(origin, known, observed?.let { canonicalOptionalPin(it) }, saved.isNotEmpty())
+    } catch (e: IllegalStateException) { ManualTrust(error = e.message ?: "Could not read remembered certificates.") }
+      catch (e: IllegalArgumentException) { ManualTrust(error = e.message ?: "Invalid server address.") }
+
+    fun forgetManualTrust(address: String): Boolean = try {
+        val origin = certificateOrigin(address)
+        val entries = certificateStore.load()
+        certificateStore.save(entries.filterNot { it.origin == origin })
+        mutableState.update { it.copy(formError = null, notice = "Remembered certificate forgotten. Saved-profile pins are unchanged.") }
+        true
+    } catch (e: IllegalStateException) {
+        mutableState.update { it.copy(formError = e.message) }; false
+    } catch (e: IllegalArgumentException) {
+        mutableState.update { it.copy(formError = e.message) }; false
+    }
+
+    fun connectManual(address: String, tokenId: String, pin: String, kind: String = DIRECT_PVE_KIND, otp: String? = null,
+                      passwordLogin: Boolean? = null, observed: String? = null, approval: ManualTrust? = null): Boolean {
         onWorkspace(workspace.state.value)
         val identity = if (passwordLogin == true && kind == DIRECT_PVE_KIND) completeLoginUser(tokenId) else tokenId.trim()
         passwordLogin?.let { authChoiceMismatch(it, identity, kind) }?.let { message ->
-            mutableState.update { it.copy(formError = message) }
-            return false
+            mutableState.update { it.copy(formError = message) }; return false
         }
         val chars = manualSecret?.copyOf() ?: CharArray(0)
+        var connection: Connection? = null
         return try {
-            val connection = Connection(address, identity, chars.concatToString(), pin, kind, otp)
+            val trust = manualTrust(address, observed)
+            check(trust.error == null) { trust.error.orEmpty() }
+            val pasted = canonicalOptionalPin(pin)
+            val selectedPin = if (approval != null) {
+                check(approval == trust && trust.canApprove) { "Certificate approval changed. Review the current scan and saved pins." }
+                check(pasted == null || pasted == trust.observed) { "The pasted fingerprint differs from the scan." }
+                trust.observed!!
+            } else {
+                check(!trust.conflict) { "Saved certificate pins conflict. Review the saved connections before connecting." }
+                val known = trust.known.singleOrNull()
+                check(trust.observed == null || trust.observed == known) { "Review the scanned certificate and use Trust and connect explicitly." }
+                check(known == null || pasted == null || pasted == known) { "The pasted fingerprint differs from known trust." }
+                known ?: pasted
+            }
+            // Validate the entire action before changing disk. Approval survives authentication failure.
+            connection = Connection(address, identity, chars.concatToString(), selectedPin.orEmpty(), kind, otp)
+            if (approval != null) {
+                val entries = certificateStore.certificates()
+                certificateStore.save(entries.filterNot { it.origin == trust.origin } + ApprovedCertificate(trust.origin!!, selectedPin!!))
+            }
             publishSecretClear(connectedProfileId = null, notice = null, connect = connection)
+            connection = null // ownership transferred to the workspace
             true
         } catch (e: IllegalArgumentException) {
-            mutableState.update { it.copy(formError = e.message) }
-            false
+            mutableState.update { it.copy(formError = e.message) }; false
         } catch (e: IllegalStateException) {
-            mutableState.update { it.copy(formError = e.message) }
-            false
-        } finally {
-            chars.fill('\u0000')
-        }
+            mutableState.update { it.copy(formError = e.message) }; false
+        } finally { connection?.close(); chars.fill('\u0000') }
     }
 
     fun exploreDemo(): Boolean {

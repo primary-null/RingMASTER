@@ -9,7 +9,7 @@ private fun JsonObject.strings(k: String) = va(k).mapNotNull { (it as? JsonPrimi
 fun parseTailscaleStatus(json: String): TailscaleStatus {
     val r = Json.parseToJsonElement(json).jsonObject
     fun instant(value: String?) = value?.takeUnless { it.startsWith("0001-") }?.let { runCatching { Instant.parse(it) }.getOrNull() }
-    fun peer(p: JsonObject) = TailscalePeer(p.vs("ID").orEmpty(), p.vs("HostName").orEmpty(), p.vs("DNSName")?.trimEnd('.'), p.vs("OS"), p.vs("Online") == "true", p.strings("TailscaleIPs").sortedBy { ':' in it }, p.vs("ExitNodeOption") == "true", p.vs("ExitNode") == "true", p.vs("Relay"), p.vs("CurAddr"), instant(p.vs("LastSeen")), p.vs("RxBytes")?.toLongOrNull(), p.vs("TxBytes")?.toLongOrNull(), p.strings("Tags"), instant(p.vs("LastHandshake")))
+    fun peer(p: JsonObject) = TailscalePeer(p.vs("ID").orEmpty(), p.vs("HostName").orEmpty(), p.vs("DNSName")?.trimEnd('.'), p.vs("OS"), p.vs("Online") == "true", p.strings("TailscaleIPs").sortedBy { ':' in it }, p.vs("ExitNodeOption") == "true", p.vs("ExitNode") == "true", p.vs("Relay"), p.vs("CurAddr"), instant(p.vs("LastSeen")), p.vs("RxBytes")?.toLongOrNull(), p.vs("TxBytes")?.toLongOrNull(), p.strings("Tags"), instant(p.vs("LastHandshake")), p.vs("Active")?.toBooleanStrictOrNull())
     val tail = r["CurrentTailnet"] as? JsonObject
     val self = (r["Self"] as? JsonObject)?.let(::peer)?.let { if(it.addresses.isEmpty()) it.copy(addresses = r.strings("TailscaleIPs")) else it }
     return TailscaleStatus(r.vs("BackendState").orEmpty(), r.vs("Version"), tail?.vs("Name"), tail?.vs("MagicDNSSuffix") ?: r.vs("MagicDNSSuffix"), self, (r["Peer"] as? JsonObject)?.values.orEmpty().map { peer(it.jsonObject) }.sortedWith(compareBy({ !it.online }, { it.hostName.lowercase() })), r.vs("AuthURL"), r.strings("Health"))
@@ -58,9 +58,9 @@ fun parseWindowsVpnJson(json: String): List<VpnTunnel> {
         val name = p.vs("Name").orEmpty(); val (rx, tx) = traffic(name); VpnTunnel("ras:$name", vpnKind(p.vs("TunnelType").orEmpty()), name, if(p.vs("ConnectionStatus") == "Connected") VpnState.Up else VpnState.Down, name, addresses(name), p.vs("ServerAddress")?.let { "Server $it" }, canToggle = true, rxBytes = rx, txBytes = tx)
     } + r.va("adapters").map { it.jsonObject }.map { p -> val name = p.vs("Name").orEmpty(); val (rx, tx) = traffic(name); VpnTunnel("nic:$name", vpnKind(p.vs("InterfaceDescription").orEmpty()), name, if(p.vs("Status") == "Up") VpnState.Up else VpnState.Down, name, addresses(name), rxBytes = rx, txBytes = tx) }
 }
-fun matchRouteTunnel(alias: String?, address: String?, tunnels: List<VpnTunnel>): VpnTunnel? {
-    val ts = tunnels.firstOrNull { it.kind == VpnKind.Tailscale && it.state == VpnState.Up }
-    val ip = address?.let(ScanRules::ipv4)
-    if(alias.equals("Tailscale", true) || alias == "tailscale0" || (ip != null && ip ushr 22 == 0x191L) || address?.lowercase()?.startsWith("fd7a:115c:a1e0:") == true) if(ts != null) return ts
-    return alias?.let { a -> tunnels.firstOrNull { it.interfaceName == a } ?: tunnels.firstOrNull { it.name == a } }
-}
+/**
+ * The tunnel a route goes through, from route facts only (see [matchRouteTunnelEvidence]). A destination inside
+ * Tailscale's range is not proof by itself: the route has to name the tunnel's interface or use its source address.
+ */
+fun matchRouteTunnel(alias: String?, source: String?, tunnels: List<VpnTunnel>, tailscaleSelf: List<String> = emptyList()): VpnTunnel? =
+    matchRouteTunnelEvidence(alias, source, tunnels, tailscaleSelf)?.first

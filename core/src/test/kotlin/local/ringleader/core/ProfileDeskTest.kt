@@ -326,7 +326,7 @@ class ProfileDeskTest {
         } finally { deleteParent(file) }
     }
 
-    @Test fun corruptStoreLeavesManualConnectionAndDemoUsable() = runTest {
+    @Test fun corruptStoreBlocksManualTrustDowngradeButDemoRemainsUsable() = runTest {
         val directory = Files.createTempDirectory("ringmaster-desk")
         val file = directory.resolve("profiles.json")
         val bytes = """{"version":1,"profiles":[{"secret":"do-not-keep"}]}""".toByteArray()
@@ -339,12 +339,10 @@ class ProfileDeskTest {
             desk.beginCreate()
             assertFalse(desk.state.value.editing)
             desk.setManualSecret(secret)
-            assertTrue(desk.connectManual(origin, token, ""))
+            assertFalse(desk.connectManual(origin, token, ""))
             runCurrent()
-            assertTrue(workspace.state.value.connected)
-            assertEquals(origin, workspace.state.value.overview!!.guests.single().remote)
-            assertNull(desk.state.value.connectedProfileId)
-            assertFalse(desk.hasManualSecret())
+            assertFalse(workspace.state.value.connected)
+            assertTrue(desk.hasManualSecret())
             desk.exploreDemo()
             assertTrue(workspace.state.value.demo)
             assertEquals(DEMO_REMOTE_KEY, workspace.state.value.overview!!.guests.first().remote)

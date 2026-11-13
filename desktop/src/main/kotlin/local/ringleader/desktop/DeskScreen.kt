@@ -133,12 +133,13 @@ private val ConnectPanelWidth = 520.dp
                     DeskMessages(deskState, workspaceState, sessionNotice)
                     if (split) {
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.Top) {
-                            SavedConnections(Modifier.weight(1f), deskState, desk, onScan, onOpenWorkspace, anyOpen, connectedProfiles)
+                            SavedConnections(Modifier.weight(1f), deskState, desk, onScan, onOpenWorkspace, anyOpen, connectedProfiles, showQuickStart = scanned == null)
                             ManualConnection(Modifier.width(ConnectPanelWidth), anyOpen, deskState, desk, scanned, motionPreferences, onOpenWorkspace)
                         }
                     } else {
-                        SavedConnections(Modifier.fillMaxWidth(), deskState, desk, onScan, onOpenWorkspace, anyOpen, connectedProfiles)
+                        if (scanned == null) SavedConnections(Modifier.fillMaxWidth(), deskState, desk, onScan, onOpenWorkspace, anyOpen, connectedProfiles, showQuickStart = scanned == null)
                         ManualConnection(Modifier.widthIn(max = ConnectPanelWidth).fillMaxWidth(), anyOpen, deskState, desk, scanned, motionPreferences, onOpenWorkspace)
+                        if (scanned != null) SavedConnections(Modifier.fillMaxWidth(), deskState, desk, onScan, onOpenWorkspace, anyOpen, connectedProfiles, showQuickStart = scanned == null)
                     }
                 }
             }
@@ -192,7 +193,7 @@ private val ConnectPanelWidth = 520.dp
     }
 }
 
-@Composable private fun SavedConnections(modifier: Modifier, deskState: DeskState, desk: ProfileDesk, onScan: () -> Unit, onOpenWorkspace: () -> Unit, connected: Boolean = false, connectedProfiles: Set<String> = emptySet()) {
+@Composable private fun SavedConnections(modifier: Modifier, deskState: DeskState, desk: ProfileDesk, onScan: () -> Unit, onOpenWorkspace: () -> Unit, connected: Boolean = false, connectedProfiles: Set<String> = emptySet(), showQuickStart: Boolean = true) {
     Column(modifier, verticalArrangement = Arrangement.spacedBy(Tech.Space8)) {
         SectionLabel("Saved connections", suffix = deskState.profiles.size.takeIf { it > 0 }?.toString())
         if (deskState.profiles.isNotEmpty()) {
@@ -223,7 +224,7 @@ private val ConnectPanelWidth = 520.dp
         if (pending != null) DeleteConfirmation(pending, pending.id == deskState.connectedProfileId, desk)
         if (deskState.editing) ProfileEditor(deskState, desk)
         else if (deskState.selectedId != null && pending == null) ProfileConnect(deskState, desk, onOpenWorkspace)
-        if (deskState.profiles.isEmpty() && !deskState.editing && !connected) QuickStart(onScan)
+        if (showQuickStart && deskState.profiles.isEmpty() && !deskState.editing && !connected) QuickStart(onScan)
     }
 }
 
@@ -440,15 +441,21 @@ private fun rememberHelp(vaultName: String): String = when {
     var fingerprint by remember(scanned) { mutableStateOf("") }
     var kind by remember(scanned) { mutableStateOf(if (scanned?.kind == ScanKind.PDM) PDM_KIND else DIRECT_PVE_KIND) }
     val passwordMode = passwordChoice && kind == DIRECT_PVE_KIND
-    val pinPrompt = remember(scanned) { ScannedPinPrompt().also { p -> scanned?.fingerprint?.let { p.offer(scanned.origin, it) } } }
-    var pinConfirmShowing by remember(scanned) { mutableStateOf(false) }
+    // An edit permanently invalidates this scan offer, even if the address is later restored.
+    val scanOffer = remember(scanned) { ScannedPinOffer(scanned?.origin.orEmpty(), kind, scanned?.fingerprint) }
+    var scanExpired by remember(scanned) { mutableStateOf(false) }
+    var scanValid by remember(scanned) { mutableStateOf(true) }
+    var replacementChecked by remember(scanned, address, kind) { mutableStateOf(false) }
+    var trustRevision by remember { mutableStateOf(0) }
+    val observed = scanOffer.current(address, kind).takeIf { scanValid }
+    val trust = remember(address, observed, deskState.profiles, deskState.saveBlocked, trustRevision) { desk.manualTrust(address, observed) }
     TechPanel(modifier) {
         Column(verticalArrangement = Arrangement.spacedBy(Tech.Space8)) {
             SectionLabel("Connect")
             HelpTip("A new connection opens beside the ones already open; nothing is replaced. Verify private certificate fingerprints with your administrator.") {
                 Text(if (anyOpen) "Opens beside the open connection · secrets stay in memory" else "Connect without saving a profile · secrets stay in memory", fontSize = 11.sp, color = Tech.Muted, fontFamily = Tech.Mono)
             }
-            KindChoice(kind) { kind = it }
+            KindChoice(kind) { if (kind != it) { scanValid = false; scanOffer.invalidate(); fingerprint = "" }; kind = it }
             if (kind == DIRECT_PVE_KIND) AuthChoice(passwordMode) { chosen ->
                 passwordChoice = chosen
                 motion.put(DESK_PASSWORD_MODE, chosen)
@@ -456,21 +463,24 @@ private fun rememberHelp(vaultName: String): String = when {
             }
             val login = passwordMode && kind == DIRECT_PVE_KIND
             val canConnect = address.isNotBlank() && (if (passwordMode) user else tokenId).isNotBlank() && deskState.manualSecretPresent
-            val submit = {
-                if (canConnect) {
+            val connect: (Boolean, Boolean) -> Unit = { approve, normalTls ->
+                if (observed != null && scanOffer.current(address, kind) == null) {
+                    scanExpired = true; scanValid = false
+                } else if (canConnect) {
                     val completed = if (login) completeLoginUser(user) else tokenId
                     if (login && completed != user) user = completed
-                    if (desk.connectManual(address, if (login) completed else tokenId, fingerprint, kind, otp = if (passwordMode) otp.ifBlank { null } else null,
-                            passwordLogin = login)) onOpenWorkspace()
+                    val opened = desk.connectManual(address, if (login) completed else tokenId, fingerprint, kind,
+                            otp = if (passwordMode) otp.ifBlank { null } else null, passwordLogin = login,
+                            observed = if (normalTls) null else observed, approval = if (approve) trust else null)
+                    trustRevision++
+                    if (opened) onOpenWorkspace()
                 }
             }
-            // Tab order is composition order. These fields stay consecutive:
-            // Server address, user or token ID, password or secret, (two-factor code), Trusted certificate SHA-256.
+            // Enter in a secret field never approves new or changed trust.
+            val submit = { if (!trust.needsApproval && !trust.conflict && trust.error == null) connect(false, false) }
             CompactDeskField(address, {
+                if (address != it) { scanValid = false; scanOffer.invalidate(); fingerprint = "" }
                 address = it
-                // A pin confirmed from the scan belongs to the scanned address only.
-                if (pinPrompt.addressChanged(it, fingerprint)) fingerprint = ""
-                if (!pinPrompt.pending) pinConfirmShowing = false
             }, "Server address", identity = true)
             if (passwordMode) {
                 CompactDeskField(user, { user = it.trim() }, "User · user@realm, for example root@pam", identity = true, passwordUser = true)
@@ -481,40 +491,35 @@ private fun rememberHelp(vaultName: String): String = when {
                 SecretField(deskState.secretGeneration, "API token secret", onSubmit = submit) { desk.setManualSecret(it) }
             }
             CompactDeskField(fingerprint, { fingerprint = it }, "Trusted certificate SHA-256 · optional")
-            if (scanned != null && address == scanned.origin) {
-                scanned.fingerprint?.let { seen ->
-                    Text("Scanned SHA-256: $seen", fontFamily = FontFamily.Monospace, fontSize = Tech.Label, color = Tech.Amber)
-                    Text("Compare with the server's real fingerprint before trusting it. Proxmox: node › System › Certificates.", color = Tech.Muted, fontFamily = Tech.Mono, fontSize = 11.sp, lineHeight = 15.sp)
-                    // Offered again here: an earlier confirm or address edit may have dropped the offer.
-                    TechAction("Use scanned fingerprint…") { pinPrompt.offer(scanned.origin, seen); pinPrompt.request(); pinConfirmShowing = true }
+            if (scanExpired) Text("Scan offer expired. Scan again before trusting a certificate.", color = Tech.Red, fontSize = 12.sp)
+            if (address.isNotBlank()) {
+                trust.error?.let { Text(it, color = Tech.Red, fontSize = 12.sp) }
+                trust.known.forEach { known ->
+                    Text("Known SHA-256: ${if (Appearance.showcase) "Hidden" else known}", fontFamily = Tech.Mono, fontSize = 11.sp, color = Tech.Muted)
                 }
+                if (trust.known.isNotEmpty()) {
+                    Text(if (trust.savedPin) "Includes saved-profile trust. Edit that profile to change its pin." else "Approved certificate for this server address and port.", color = Tech.Muted, fontSize = 11.sp)
+                    MiniAction("Forget remembered certificate") { desk.forgetManualTrust(address); trustRevision++ }
+                }
+                observed?.let { seen ->
+                    Text("${if (trust.changed) "Certificate changed" else "Scanned certificate"} \u00b7 ${if (Appearance.showcase) "Hidden server" else address}", color = Tech.Amber, fontSize = 12.sp)
+                    Text("Observed SHA-256: ${if (Appearance.showcase) "Hidden" else seen}", fontFamily = Tech.Mono, fontSize = 11.sp, color = Tech.Amber)
+                    if (trust.needsApproval) Text("Compare with the server's fingerprint before trusting. Approval is remembered for this address and port, even if sign-in fails. No password is saved.", color = Tech.Muted, fontSize = 12.sp)
+                }
+                if (trust.conflict) Text("Saved pins conflict. Review saved connections and remembered trust before connecting.", color = Tech.Red, fontSize = 12.sp)
+                if (trust.changed && trust.canApprove) TechCheck(replacementChecked, { replacementChecked = it }, "Replace the known certificate with this scanned certificate")
+                if (trust.needsApproval) MiniAction("Cancel scanned certificate") { scanValid = false; scanOffer.invalidate(); replacementChecked = false }
             }
-            if (pinConfirmShowing) ScannedPinConfirmation(
-                address = pinPrompt.address ?: address,
-                fp = pinPrompt.fingerprint ?: scanned?.fingerprint.orEmpty(),
-                onPin = { pinPrompt.confirm()?.let { fingerprint = it }; pinConfirmShowing = false },
-                onCancel = { pinPrompt.cancel(); pinConfirmShowing = false },
-            )
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(Tech.Space12), verticalArrangement = Arrangement.spacedBy(Tech.Space8)) {
-                TechAction(if (anyOpen) "Add connection" else "Connect", active = true, enabled = canConnect, onClick = submit)
+            if (trust.needsApproval) Column(verticalArrangement = Arrangement.spacedBy(Tech.Space8)) {
+                TechAction(if (trust.changed) "Replace trust and connect" else "Trust and connect", active = true,
+                    enabled = canConnect && trust.canApprove && (!trust.changed || replacementChecked)) { connect(true, false) }
+                if (trust.known.isEmpty() && trust.error == null) TechAction("Connect with normal TLS", enabled = canConnect && fingerprint.isBlank()) { connect(false, true) }
+                TechAction("Explore demo") { if (desk.exploreDemo()) onOpenWorkspace() }
+            } else FlowRow(horizontalArrangement = Arrangement.spacedBy(Tech.Space12), verticalArrangement = Arrangement.spacedBy(Tech.Space8)) {
+                TechAction(if (anyOpen) "Add connection" else "Connect", active = true,
+                    enabled = canConnect && !trust.conflict && trust.error == null, onClick = submit)
                 TechAction("Explore demo") { if (desk.exploreDemo()) onOpenWorkspace() }
             }
-        }
-    }
-}
-
-@Composable private fun ScannedPinConfirmation(address: String, fp: String, onPin: () -> Unit, onCancel: () -> Unit) {
-    TechPanel(Modifier.widthIn(max = 560.dp).fillMaxWidth(), rail = Tech.Amber) {
-        Text("Pin this fingerprint?", fontSize = Tech.Section)
-        Text("A scan cannot verify the server. Whoever answers on this address can present their own certificate.", color = Tech.Muted, fontSize = 13.sp)
-        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(address, fontFamily = Tech.Mono, fontSize = 12.sp, color = Tech.Ink)
-            Text(fp, fontFamily = Tech.Mono, fontSize = 12.sp, color = Tech.Amber)
-        }
-        Text("Compare with the fingerprint the server itself shows. Proxmox: node › System › Certificates.", color = Tech.Muted, fontFamily = Tech.Mono, fontSize = 11.sp, lineHeight = 15.sp)
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(Tech.Space12), verticalArrangement = Arrangement.spacedBy(Tech.Space8)) {
-            TechAction("Pin this fingerprint", onClick = onPin)
-            TechAction("Cancel", active = true, onClick = onCancel)
         }
     }
 }

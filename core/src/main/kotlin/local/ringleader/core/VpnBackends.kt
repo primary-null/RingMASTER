@@ -80,7 +80,8 @@ internal fun windowsRouteScript(address: String) = psUtf8Prefix() + "Find-NetRou
  */
 class LocalVpnBackend(os: String = System.getProperty("os.name"), private val run: (List<String>, Long) -> String = ::runVpnCommand, private val which: (String) -> String? = ::findExecutable,
     private val imports: WireGuardImports = WireGuardImports(), private val hostActions: Boolean = false, private val stagingRoot: Path? = null,
-    private val counters: (String) -> Pair<Long?, Long?> = ::interfaceCounters) : VpnBackend {
+    private val counters: (String) -> Pair<Long?, Long?> = ::interfaceCounters,
+    private val routes: RouteProbe = LocalRouteProbe(os, run, which)) : VpnBackend {
     private val windows = os.startsWith("Windows", true)
     override val platform = if(windows) "Windows" else "Linux"
     private fun ts() = if(windows) which("C:\\Program Files\\Tailscale\\tailscale.exe") ?: which("tailscale") else which("tailscale")
@@ -110,7 +111,7 @@ class LocalVpnBackend(os: String = System.getProperty("os.name"), private val ru
         } catch(e: Exception) { notes += noted("Windows VPN status could not be read.", e) }
         else {
             val ipTunnels = try { parseIpWireGuardJson(exec(listOf(which("ip") ?: "ip", "-j", "addr", "show", "type", "wireguard"))) } catch(e: Exception) { notes += noted("WireGuard interfaces could not be read.", e); emptyList() }
-            if(wgExe != null) try { details = parseWgDump(exec(listOf(wgExe, "show", "all", "dump"))) } catch(e: Exception) { notes += noted("WireGuard peer details need root.", e) }
+            if(wgExe != null) try { details = parseWgDump(exec(listOf(wgExe, "show", "all", "dump"))) } catch(e: Exception) { notes += noted(WIREGUARD_PEER_NOTE, e) }
             val nm = which("nmcli")
             val managed = if(nm != null) try { nmTunnels(nm) } catch(e: Exception) { notes += noted("NetworkManager VPN status could not be read.", e); emptyList() } else emptyList()
             tunnels += managed.map { t -> t.copy(addresses = ipTunnels.firstOrNull { it.interfaceName == t.interfaceName }?.addresses.orEmpty()) }
@@ -210,11 +211,16 @@ class LocalVpnBackend(os: String = System.getProperty("os.name"), private val ru
         }
         else if(!windows && tunnel.id.startsWith("nm:")) exec(listOf(which("nmcli") ?: error("NetworkManager is not installed."), "connection", "delete", "uuid", tunnel.id.removePrefix("nm:"))) else error("Unsupported tunnel.")
     }
+    /**
+     * The route for the first address Java resolves for [host] (the one its HTTPS connection uses). The tunnel is matched
+     * from the route's interface and source address only; a failed route read leaves the interface and tunnel empty.
+     */
     override fun routeTo(host: String, snapshot: VpnSnapshot?): VpnRoute {
-        val address = try { if(ScanRules.ipv4(host) != null) host else if(':' in host) { InetAddress.getByName(host); host } else InetAddress.getAllByName(host).sortedBy { it !is Inet4Address }.first().hostAddress } catch(_: Exception) { return VpnRoute(host, null, null, null, null) }
-        val alias = runCatching { if(windows) Json.parseToJsonElement(ps(windowsRouteScript(address))).jsonObject.vs("InterfaceAlias") else Json.parseToJsonElement(exec(listOf(which("ip") ?: "ip", "-j", "route", "get", address))).jsonArray.first().jsonObject.vs("dev") }.getOrNull()
-        val tunnel = matchRouteTunnel(alias, address, (snapshot ?: snapshot()).tunnels)
-        return VpnRoute(host, address, alias, tunnel?.id, tunnel?.name)
+        val address = try { (ipLiteral(host) ?: InetAddress.getByName(host)).hostAddress.substringBefore('%') } catch(_: Exception) { return VpnRoute(host, null, null, null, null) }
+        val route = runCatching { routes.route(address) }.getOrNull()
+        val s = snapshot ?: snapshot()
+        val tunnel = matchRouteTunnel(route?.iface?.name, route?.source, s.tunnels, s.tailscale?.self?.addresses.orEmpty())
+        return VpnRoute(host, address, route?.iface?.name, tunnel?.id, tunnel?.name, route?.source)
     }
 
     private fun createStage(): Path {
@@ -232,6 +238,9 @@ private fun tailscaleTraffic(status: TailscaleStatus): Triple<Long?, Long?, Long
     val handshake = status.peers.mapNotNull { it.lastHandshake }.maxOrNull()?.epochSecond
     return Triple(rx, tx, handshake)
 }
+
+/** Start of the snapshot note for unreadable WireGuard peer details. It does not mean a tunnel is missing from the list. */
+const val WIREGUARD_PEER_NOTE = "WireGuard peer details need root."
 
 /** Parent for a short-lived Linux key copy: the user runtime dir, then /dev/shm, else the JVM temp dir. */
 internal fun linuxKeyStagingParent(env: Map<String, String> = System.getenv(), isDir: (Path) -> Boolean = { Files.isDirectory(it) }): Path? {

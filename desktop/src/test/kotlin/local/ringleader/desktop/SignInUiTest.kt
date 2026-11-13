@@ -112,7 +112,8 @@ class SignInUiTest {
             click(scene, assertNotNull(editableAfter(scene, "Server address")))
             Appearance.preview(false, showcase = true)
             bench.settle(scene)
-            assertNotNull(findTextPrefix(scene, "Signs in as ${identityMask("root@pam")} (Linux PAM"))
+            assertNull(findTextPrefix(scene, "Signs in as ${identityMask("root@pam")} (Linux PAM"))
+            assertTrue(nodes(scene).any { it.config.getOrNull(SemanticsProperties.ContentDescription)?.contains("Hidden") == true })
             assertNull(findTextPrefix(scene, "Signs in as root@pam"))
             Appearance.preview(false, showcase = false)
             bench.settle(scene)
@@ -129,7 +130,7 @@ class SignInUiTest {
             clickText(scene, "PASSWORD")
             bench.settle(scene)
             assertEquals("root@pam", field(scene, "User"), "a new profile's Password choice fills root@pam")
-        } finally { scene.close(); bench.close() }
+        } finally { Appearance.preview(false, showcase = false); scene.close(); bench.close() }
     }
 
     @Test fun aSavedProfileFocusesTheSecretAndEnterConnects() = runBlocking {

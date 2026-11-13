@@ -1,4 +1,4 @@
-@file:OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
+@file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class, androidx.compose.ui.ExperimentalComposeUiApi::class)
 package local.ringleader.desktop
 
 import androidx.compose.foundation.layout.*
@@ -111,8 +111,8 @@ internal fun certificateNote(hit: ScanHit, now: Long = System.currentTimeMillis(
     var info by remember { mutableStateOf(false) }
     val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState(initialScroll)), verticalArrangement = Arrangement.spacedBy(Tech.Space12)) {
-        Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-            Text("Discover devices on your private networks", modifier=Modifier.weight(1f),color=Tech.Muted)
+        FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp), verticalArrangement=Arrangement.spacedBy(4.dp)) {
+            Text("Discover devices on your private networks", fontSize=12.sp,color=Tech.Muted)
             HelpTip(SCAN_HELP) { MiniAction(if (info) "Hide trust info" else "Scan & trust info", primary = info) { info = !info } }
         }
         if(info) Text(SCAN_HELP,color=Tech.Muted)
@@ -179,17 +179,19 @@ internal fun certificateNote(hit: ScanHit, now: Long = System.currentTimeMillis(
                         if (i > 0) HorizontalDivider(color=Tech.Edge.copy(alpha=.6f))
                         val requester=remember(hit.origin) { BringIntoViewRequester() }
                         LaunchedEffect(picked) { if(picked?.first==hit.origin) requester.bringIntoView() }
-                        Row(Modifier.fillMaxWidth().bringIntoViewRequester(requester).background(if (hovered==hit.origin) Tech.Raised else androidx.compose.ui.graphics.Color.Transparent)
+                        FlowRow(Modifier.fillMaxWidth().bringIntoViewRequester(requester).background(if (hovered==hit.origin) Tech.Raised else androidx.compose.ui.graphics.Color.Transparent)
                             .onPointerEvent(PointerEventType.Enter) { hovered=hit.origin }.onPointerEvent(PointerEventType.Exit) { hovered=null }
-                            .height(32.dp).padding(horizontal=4.dp), verticalAlignment=androidx.compose.ui.Alignment.CenterVertically, horizontalArrangement=Arrangement.spacedBy(Tech.Space12)) {
+                            .heightIn(min=32.dp).padding(horizontal=4.dp, vertical=4.dp), itemVerticalAlignment=androidx.compose.ui.Alignment.CenterVertically, horizontalArrangement=Arrangement.spacedBy(Tech.Space12), verticalArrangement=Arrangement.spacedBy(4.dp)) {
                             KindGlyph(hit.kind, 28.dp)
-                            Column(Modifier.weight(1f)) {
+                            Column(Modifier.widthIn(max=300.dp)) {
                                 val name = serviceName(hit)
                                 Text(name, fontSize=Tech.Body, maxLines=1, overflow=androidx.compose.ui.text.style.TextOverflow.Ellipsis)
                                 Text(if (name == hit.kind.label) "No page title" else hit.kind.label, fontSize=Tech.Label, color=Tech.Muted)
                             }
                             Text(if (hit.secure) "TLS" else "HTTP", fontFamily=androidx.compose.ui.text.font.FontFamily.Monospace, fontSize=Tech.Label, color=if (hit.secure) Tech.Green else Tech.Muted, modifier=Modifier.width(40.dp))
-                            Text("${hit.ip}:${hit.port}", fontFamily=androidx.compose.ui.text.font.FontFamily.Monospace, fontSize=Tech.Label, color=Tech.Ink, modifier=Modifier.width(150.dp))
+                            HelpTip("${hit.ip}:${hit.port}", identity=true) {
+                                Text("${hit.ip}:${hit.port}", fontFamily=androidx.compose.ui.text.font.FontFamily.Monospace, fontSize=Tech.Label, color=Tech.Ink, modifier=Modifier.identity(), maxLines=1, overflow=androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                            }
                         }
                     }
                 }

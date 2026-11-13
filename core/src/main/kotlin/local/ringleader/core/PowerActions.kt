@@ -9,8 +9,15 @@ import kotlinx.serialization.json.JsonPrimitive
 /**
  * One guest power action. Shutdown is the graceful ACPI/container shutdown.
  * Hard stop is the immediate stop. This client never turns a shutdown into a hard stop.
+ *
+ * [Create] labels the submission of a new guest (GuestCreateFlow.kt) so Activity, the follow and the lost-result store
+ * work unchanged. It is never a power action on an existing guest: a [PowerConfirmation] refuses it, [actionMatches] is
+ * false for it, and [powerActionPath] and [powerRequestBody] refuse it. Screens list power actions explicitly and never
+ * offer it (PowerCreateGuardTest).
  */
-enum class PowerAction { Start, Shutdown, HardStop, Reboot, Suspend, Resume, Reset, SnapshotCreate, SnapshotRollback, SnapshotDelete }
+enum class PowerAction { Start, Shutdown, HardStop, Reboot, Suspend, Resume, Reset, SnapshotCreate, SnapshotRollback, SnapshotDelete, Create }
+
+const val CREATE_NOT_POWER_ACTION = "Creating a guest is not a power action."
 
 /** What the server evidence supports. Accepted is not success. */
 enum class PowerPhase { Accepted, Succeeded, Unsuccessful, Unknown, Rejected, Simulated }
@@ -72,6 +79,7 @@ data class PowerConfirmation(
     val snapshot: SnapshotRequest? = null,
 ) {
     init {
+        require(action != PowerAction.Create) { CREATE_NOT_POWER_ACTION }
         require(profileLabel.isNotBlank() && profileLabel.none { it.isISOControl() }) { "The confirmation is missing its connection." }
         require(origin.isNotBlank() && origin.none { it.isISOControl() }) { "The confirmation is missing its server." }
         require(node.matches(routeNode) && !node.contains("..")) { "The confirmation route is not usable." }
@@ -93,6 +101,8 @@ data class PowerSubmission(
     val simulated: Boolean,
     val checkable: Boolean,
     val checking: Boolean = false,
+    /** A create whose outcome was unknown and whose ID a later read found free: it no longer blocks the session (design 4.5). */
+    val resolvedByCheck: Boolean = false,
 ) {
     init {
         require(localId.startsWith("local-") && !localId.contains("UPID:")) { "The submission identity is not usable." }
@@ -115,6 +125,7 @@ fun actionMatches(guest: Guest, action: PowerAction): Boolean {
         PowerAction.Suspend, PowerAction.Reset -> guest.kind == "VM" && guest.status == "running"
         PowerAction.Resume -> guest.kind == "VM" && guest.status in listOf("paused", "suspended")
         PowerAction.SnapshotCreate, PowerAction.SnapshotRollback, PowerAction.SnapshotDelete -> guest.status in listOf("running", "stopped")
+        PowerAction.Create -> false
     }
 }
 
@@ -129,6 +140,7 @@ fun powerActionTitle(action: PowerAction): String = when (action) {
     PowerAction.SnapshotCreate -> "Create snapshot"
     PowerAction.SnapshotRollback -> "Rollback snapshot"
     PowerAction.SnapshotDelete -> "Delete snapshot"
+    PowerAction.Create -> "Create"
 }
 
 /** The confirmation's commit button names the action itself, never a generic Send. */
@@ -170,7 +182,7 @@ fun confirmationSnapshot(confirmation: PowerConfirmation, state: WorkspaceState)
 
 /** The submission that blocks other actions in this session: accepted and not finished, or with an unknown result. */
 fun unresolvedSubmission(state: WorkspaceState): PowerSubmission? =
-    state.submissions.firstOrNull { it.phase == PowerPhase.Accepted || it.phase == PowerPhase.Unknown }
+    state.submissions.firstOrNull { (it.phase == PowerPhase.Accepted || it.phase == PowerPhase.Unknown) && !it.resolvedByCheck }
 
 /** Names the guest and the action that is still open, and what the user can do. */
 fun unresolvedActionText(submission: PowerSubmission): String {
@@ -184,6 +196,7 @@ fun unresolvedActionText(submission: PowerSubmission): String {
 
 /** Requests no direct force-stop fallback; server HA policy can override shutdown behavior. */
 fun powerRequestBody(action: PowerAction): ByteArray = when (action) {
+    PowerAction.Create -> throw IllegalArgumentException(CREATE_NOT_POWER_ACTION)
     PowerAction.Shutdown -> """{"forceStop":false}"""
     else -> "{}"
 }.toByteArray(Charsets.UTF_8)
@@ -203,6 +216,7 @@ fun powerActionPath(node: String, kind: String, vmid: Int, action: PowerAction):
         PowerAction.Suspend -> "suspend"
         PowerAction.Resume -> "resume"
         PowerAction.Reset -> "reset"
+        PowerAction.Create -> throw IllegalArgumentException(CREATE_NOT_POWER_ACTION)
         else -> error("Snapshot actions require a snapshot request.")
     }
     return "/api2/json/nodes/$node/$api/$vmid/status/$leaf"

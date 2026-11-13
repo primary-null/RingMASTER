@@ -51,7 +51,7 @@ data class TailscalePeer(
     val exitNodeOption: Boolean,
     /** This peer is the exit node in use. */
     val exitNode: Boolean,
-    /** DERP region code when relayed ("dfw"), else null. */
+    /** The peer's home DERP region ("dfw"). Tailscale reports it even when the path is direct or idle. */
     val relay: String?,
     /** ip:port when the connection is direct, else null. */
     val direct: String?,
@@ -61,6 +61,8 @@ data class TailscalePeer(
     val tags: List<String> = emptyList(),
     /** Last successful handshake, when Tailscale reports one. */
     val lastHandshake: Instant? = null,
+    /** Tailscale's "Active": traffic with this peer recently. Null when the status did not say. */
+    val active: Boolean? = null,
 )
 
 data class TailscaleStatus(
@@ -115,6 +117,8 @@ data class VpnRoute(
     /** The [VpnTunnel.id] the route goes through, or null for an ordinary interface. */
     val tunnelId: String?,
     val tunnelName: String?,
+    /** The local source address the route uses, when the operating system reported it. */
+    val source: String? = null,
 )
 
 /** A Proxmox-family service answering on a tailnet peer. */

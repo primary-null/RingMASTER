@@ -239,7 +239,7 @@ fun Modifier.focusRing(focused: Boolean, shape: androidx.compose.ui.graphics.Sha
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
     TextButton(onClick=onClick, enabled=enabled, shape=Tech.Control, contentPadding=PaddingValues(horizontal=if (width != null) 0.dp else 10.dp, vertical=0.dp), interactionSource=interaction,
-        modifier=Modifier.height(26.dp).then(if (width != null) Modifier.width(width) else Modifier).focusRing(focused, Tech.Control, gap = 2.dp).border(1.dp, if (enabled) androidx.compose.ui.graphics.lerp(Tech.Edge, Tech.Amber, lit) else Tech.Edge, Tech.Control),
+        modifier=Modifier.heightIn(min = 26.dp).then(if (width != null) Modifier.width(width) else Modifier).focusRing(focused, Tech.Control, gap = 2.dp).border(1.dp, if (enabled) androidx.compose.ui.graphics.lerp(Tech.Edge, Tech.Amber, lit) else Tech.Edge, Tech.Control),
         colors=ButtonDefaults.textButtonColors(contentColor=androidx.compose.ui.graphics.lerp(Tech.Ink, Tech.Amber, lit), disabledContentColor=Tech.Muted.copy(alpha=.5f))) {
         Text(label.uppercase(), fontFamily=FontFamily.Monospace, fontSize=11.sp, fontWeight=FontWeight.Bold, letterSpacing=.5.sp)
     }
@@ -466,8 +466,8 @@ internal fun techDialogProperties(dismiss: Dismiss, reduce: Boolean) = androidx.
 /** A tab strip in the Tech language: mono capitals, an amber underline under the chosen tab, a hairline under the rest. */
 @Composable fun TechTabs(tabs: List<String>, selected: String, onSelect: (String) -> Unit, modifier: Modifier = Modifier) {
     val motion = LocalMotion.current
-    Row(modifier.fillMaxWidth().drawBehind { drawLine(Tech.Edge, Offset(0f, size.height - .5f), Offset(size.width, size.height - .5f), 1f) },
-        horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+    FlowRow(modifier.fillMaxWidth().drawBehind { drawLine(Tech.Edge, Offset(0f, size.height - .5f), Offset(size.width, size.height - .5f), 1f) },
+        horizontalArrangement = Arrangement.spacedBy(2.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
         tabs.forEach { title ->
             val interaction = remember { MutableInteractionSource() }
             val hovered by interaction.collectIsHoveredAsState()
@@ -475,12 +475,12 @@ internal fun techDialogProperties(dismiss: Dismiss, reduce: Boolean) = androidx.
             val active = title == selected
             val ink by animateColorAsState(when { active -> Tech.Amber; hovered || focused -> Tech.Ink; else -> Tech.Muted }, motion.fade(MotionDur.Quick))
             val bar by animateColorAsState(when { active -> Tech.Amber; hovered -> Tech.Edge; else -> Color.Transparent }, motion.fade(MotionDur.Quick))
-            Box(Modifier.height(32.dp).focusRing(focused).hoverable(interaction)
+            Box(Modifier.heightIn(min = 32.dp).focusRing(focused).hoverable(interaction)
                 .clickable(interactionSource = interaction, indication = null, role = Role.Tab) { onSelect(title) }
                 .pointerHoverIcon(androidx.compose.ui.input.pointer.PointerIcon.Hand)
                 .drawBehind { drawRect(bar, Offset(0f, size.height - 2.dp.toPx()), androidx.compose.ui.geometry.Size(size.width, 2.dp.toPx())) }
-                .padding(horizontal = 12.dp), contentAlignment = Alignment.Center) {
-                Text(title.uppercase(), fontFamily = Tech.Mono, fontSize = 11.sp, fontWeight = if (active) FontWeight.Bold else FontWeight.Medium, letterSpacing = .8.sp, color = ink, maxLines = 1)
+                .padding(horizontal = 12.dp, vertical = 8.dp), contentAlignment = Alignment.Center) {
+                Text(title.uppercase(), fontFamily = Tech.Mono, fontSize = 11.sp, lineHeight = 14.sp, fontWeight = if (active) FontWeight.Bold else FontWeight.Medium, letterSpacing = .8.sp, color = ink, maxLines = 1)
             }
         }
     }

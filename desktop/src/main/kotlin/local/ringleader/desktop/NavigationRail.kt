@@ -46,10 +46,10 @@ private const val SESSION_ROW = 28
 private const val SESSION_HEAD = 18
 
 /** Rail order. Ctrl+1 opens the first name; Main maps the number keys to these names. */
-internal val ringPages = listOf("Desk", "Fleet", "Storage", "Activity", "Scan", "Bluetooth", "VPN", "Tools", "Under the Hood")
+internal val ringPages = listOf("Desk", "Fleet", "Storage", "Activity", "Scan", "Bluetooth", "VPN", "Tools", "Under the Hood", "Schedules")
 
 /** Pages this host is allowed to show. The browser drops Under the Hood so Ctrl+1-8 keep their meaning. */
-internal fun pagesFor(host: AppHost): List<String> = if (host.traceView) ringPages else ringPages - "Under the Hood"
+internal fun pagesFor(host: AppHost): List<String> = if (host.traceView) ringPages else ringPages - "Under the Hood" - "Schedules"
 
 /** Line icons drawn on a 20dp canvas, 1.5dp stroke, round caps. */
 private fun DrawScope.railIcon(kind: String, c: Color) {
@@ -121,6 +121,11 @@ private fun DrawScope.railIcon(kind: String, c: Color) {
                 lineTo(left + side * .88f, top + side * .55f)
             }
             drawPath(beat, c, style = st)
+        }
+        "Schedules" -> { // clock face with hands
+            drawCircle(c, w * .38f, center, style = st)
+            drawLine(c, center, center + Offset(0f, -h * .24f), st.width, StrokeCap.Round)
+            drawLine(c, center, center + Offset(w * .17f, h * .1f), st.width, StrokeCap.Round)
         }
         "Tools" -> { // open-end wrench
             val jaw = Path().apply {
@@ -211,13 +216,15 @@ private fun DrawScope.railIcon(kind: String, c: Color) {
         val room = (maxHeight.value - (8 + pages.size * ITEM_HEIGHT) - (1 + ITEM_HEIGHT + 48 + ITEM_HEIGHT + 24) - head - rule - 4 - sessionBlock).toInt()
         val shown = visiblePinCount(entries.size, room, PIN_ROW, PIN_MORE)
         val hidden = (entries.size - shown).coerceAtLeast(0)
-        Column(Modifier.fillMaxSize()) {
+        val railScroll = rememberScrollState()
+        Column(Modifier.fillMaxSize().verticalScroll(railScroll)) {
             Spacer(Modifier.height(8.dp))
             Box {
                 Column { pages.forEachIndexed { i, item ->
                     val label = if (item == "Tools") "Network tools" else item
-                    RailRow(item, label, expanded, active = page == item, hint = "Ctrl ${i + 1}", badge = if (item == "Activity") running else 0,
-                        tooltip = "$label  ·  Ctrl ${i + 1}" + if (item == "Activity" && running > 0) "  ·  $running running" else "") { onPage(item) }
+                    val keys = if (i < 9) "Ctrl ${i + 1}" else null
+                    RailRow(item, label, expanded, active = page == item, hint = keys, badge = if (item == "Activity") running else 0,
+                        tooltip = label + (keys?.let { "  ·  $it" } ?: "") + if (item == "Activity" && running > 0) "  ·  $running running" else "") { onPage(item) }
                 } }
                 if (index >= 0) Box(Modifier.offset(y = offset).size(3.dp, 24.dp).background(Tech.Amber))
             }
@@ -231,7 +238,7 @@ private fun DrawScope.railIcon(kind: String, c: Color) {
                 }
                 if (hidden > 0) PinMoreRow(hidden, expanded) { moreOpen = true }
             }
-            Spacer(Modifier.weight(1f))
+            Spacer(Modifier.heightIn(min = 8.dp).weight(1f))
             if (sessions.size > 1) {
                 Box(Modifier.fillMaxWidth().height(1.dp).background(Tech.Edge))
                 if (expanded) Text("SESSIONS", Modifier.padding(start = 20.dp, top = 2.dp).height(16.dp), fontSize = 9.sp, letterSpacing = 1.2.sp, color = Tech.Muted, fontFamily = Tech.Mono)
@@ -253,6 +260,7 @@ private fun DrawScope.railIcon(kind: String, c: Color) {
                 .clickable(onClick = onAbout), fontSize = 9.sp, color = if (updateAvailable) Tech.Amber else Tech.Muted.copy(alpha = .7f), fontFamily = Tech.Mono, maxLines = 1,
                 textAlign = if (expanded) null else androidx.compose.ui.text.style.TextAlign.Center)
         }
+        VerticalScrollbar(rememberScrollbarAdapter(railScroll), Modifier.align(Alignment.CenterEnd).fillMaxHeight())
         if (moreOpen && pins != null && connectionKey != null) PinMoreDialog(state, pins, connectionKey, entries.drop(shown), { moreOpen = false }, onPin)
     }
 }
@@ -275,6 +283,7 @@ private fun DrawScope.railIcon(kind: String, c: Color) {
     val hovered by interaction.collectIsHoveredAsState()
     val focused by interaction.collectIsFocusedAsState()
     var menu by remember { mutableStateOf(false) }
+    var editing by remember { mutableStateOf(false) }
     val bg by animateColorAsState(if (hovered || focused) Tech.Raised.copy(alpha = .6f) else Color.Transparent, LocalMotion.current.fade(MotionDur.Quick))
     val row = @Composable {
         Row(Modifier.fillMaxWidth().height(PIN_ROW.dp).background(bg)
@@ -323,8 +332,10 @@ private fun DrawScope.railIcon(kind: String, c: Color) {
         DropdownMenu(menu, { menu = false }, containerColor = Tech.Raised) {
             DropdownMenuItem(text = { Text("Move up", fontSize = 13.sp, color = Tech.Ink) }, enabled = index > 0, onClick = { menu = false; store.move(connectionKey, pin.id, -1) })
             DropdownMenuItem(text = { Text("Move down", fontSize = 13.sp, color = Tech.Ink) }, enabled = index < total - 1, onClick = { menu = false; store.move(connectionKey, pin.id, 1) })
+            if (pin.target == PIN_SERVICE) DropdownMenuItem(text = { Text("Edit address…", fontSize = 13.sp, color = Tech.Ink) }, onClick = { menu = false; editing = true })
             DropdownMenuItem(text = { Text("Unpin", fontSize = 13.sp, color = Tech.Ink) }, onClick = { menu = false; store.unpin(connectionKey, pin.id) })
         }
+        if (editing) ServicePinEditor(state, store, connectionKey, pin) { editing = false }
     }
 }
 

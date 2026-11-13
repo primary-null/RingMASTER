@@ -17,7 +17,7 @@ import androidx.compose.ui.focus.focusRequester
 import local.ringleader.core.*
 
 internal enum class SettingsSection(val label: String) {
-    Appearance("Appearance"), Size("Size and text"), Motion("Motion and refresh"), Browser("Browser access"), Updates("Updates"), About("About")
+    Appearance("Appearance"), Size("Size and text"), Motion("Motion and refresh"), Background("Background and tray"), Browser("Browser access"), Updates("Updates"), About("About")
 }
 
 @Composable internal fun SettingsDialog(state: WorkspaceState, workspace: Workspace, section: SettingsSection,
@@ -48,7 +48,7 @@ internal fun settingsSheetSize(maxWidth: androidx.compose.ui.unit.Dp, maxHeight:
     onSection: (SettingsSection) -> Unit, onClose: () -> Unit, onWiped: () -> Unit, modifier: Modifier = Modifier, initialScroll: Int = 0, updatesChecker: UpdateChecker? = null, updatePreview: UpdateState? = null,
     modal: Boolean = false, initialFocus: androidx.compose.ui.focus.FocusRequester? = null) {
     val web = LocalAppHost.current.web
-    val selected = if (web && section == SettingsSection.Browser) SettingsSection.Appearance else section
+    val selected = if (web && (section == SettingsSection.Browser || section == SettingsSection.Background)) SettingsSection.Appearance else section
     // As a modal it carries TechDialog's 12dp shadow and amber rail, so it reads as above the page on Dark and Pitch Black.
     Surface(modifier, color = ringColors.surface, contentColor = Tech.Ink, shape = Tech.Plate, border = BorderStroke(1.dp, Tech.Edge), shadowElevation = if (modal) 12.dp else 0.dp) {
         Row {
@@ -62,8 +62,10 @@ internal fun settingsSheetSize(maxWidth: androidx.compose.ui.unit.Dp, maxHeight:
                 MiniAction("Done", primary = true, onClick = onClose)
             }
             Row(Modifier.weight(1f)) {
-                Column(Modifier.width(204.dp).fillMaxHeight().background(Tech.Black).verticalScroll(rememberScrollState()).padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    SettingsSection.entries.filter { !web || it != SettingsSection.Browser }.forEach { item ->
+                val sectionScroll = rememberScrollState()
+                Box(Modifier.width(176.dp).fillMaxHeight().background(Tech.Black)) {
+                Column(Modifier.fillMaxSize().padding(end=10.dp).verticalScroll(sectionScroll).padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    SettingsSection.entries.filter { !web || (it != SettingsSection.Browser && it != SettingsSection.Background) }.forEach { item ->
                         val active = selected == item
                         val interaction = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
                         val focused by interaction.collectIsFocusedAsState()
@@ -77,6 +79,8 @@ internal fun settingsSheetSize(maxWidth: androidx.compose.ui.unit.Dp, maxHeight:
                         }
                     }
                 }
+                VerticalScrollbar(rememberScrollbarAdapter(sectionScroll), Modifier.align(Alignment.CenterEnd).fillMaxHeight())
+                }
                 key(selected) {
                     Column(Modifier.weight(1f).fillMaxHeight().verticalScroll(rememberScrollState(initialScroll)).padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
                         SectionLabel(selected.label)
@@ -84,6 +88,7 @@ internal fun settingsSheetSize(maxWidth: androidx.compose.ui.unit.Dp, maxHeight:
                             SettingsSection.Appearance -> AppearanceSettingsSection()
                             SettingsSection.Size -> SizeSettingsSection()
                             SettingsSection.Motion -> MotionSettingsSection(state, workspace)
+                            SettingsSection.Background -> BackgroundSettingsSection(LocalResident.current)
                             SettingsSection.Browser -> BrowserSettingsSection()
                             SettingsSection.Updates -> UpdatesSettings(updatesChecker ?: DesktopUpdates.checker, updatePreview)
                             SettingsSection.About -> AboutSettingsSection(onWiped)

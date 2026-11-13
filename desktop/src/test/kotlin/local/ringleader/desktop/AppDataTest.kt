@@ -41,6 +41,20 @@ class AppDataTest {
         assertTrue(AppData.removes.any { it.contains("password safe") })
     }
 
+    @Test fun clearPreservesTheResidentLockAndRemovesScheduleHistory() {
+        val root = Files.createTempDirectory("rm-wipe-lock")
+        val config = Files.createDirectories(root.resolve("config"))
+        val owner = InstanceLock.acquire(config) as InstanceLock.Outcome.Owner
+        try {
+            Files.writeString(config.resolve("schedules.json"), "private history")
+            assertEquals(emptyList(), AppData.clearAll(config, root.resolve("cache"), NoVault("none")))
+            assertFalse(Files.exists(config.resolve("schedules.json")))
+            assertTrue(Files.exists(config.resolve("instance.lock")))
+            assertEquals(InstanceLock.Outcome.Taken, InstanceLock.acquire(config))
+            assertTrue(AppData.removes.any { it.contains("run history") })
+        } finally { owner.lock.release() }
+    }
+
     @Test fun clearAllForgetsRememberedSecretsBeforeTheFiles() {
         val root = Files.createTempDirectory("rm-wipe-vault")
         val config = Files.createDirectories(root.resolve("config"))

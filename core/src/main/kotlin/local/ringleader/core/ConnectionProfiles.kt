@@ -227,6 +227,8 @@ class ProfileStore(
     private var blocked = false
     private var blockedMessage = "Saved profiles could not be read. The file was left unchanged."
 
+    internal fun trustReadError(): String? = if (blocked) blockedMessage else null
+
     fun profiles(): List<ConnectionProfile> = snapshot.toList()
 
     fun load(): List<ConnectionProfile> {
@@ -402,7 +404,7 @@ private fun decodeUtf8(bytes: ByteArray): String = try {
     throw ProfileStoreException("Saved profiles are not valid text. The file was left unchanged.", blocksSave = true)
 }
 
-private fun rejectDuplicateKeys(text: String) {
+internal fun rejectDuplicateKeys(text: String) {
     JsonStructure(text).readDocument()
 }
 

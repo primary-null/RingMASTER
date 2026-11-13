@@ -1,8 +1,10 @@
-@file:OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
+@file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class, androidx.compose.ui.ExperimentalComposeUiApi::class)
 package local.ringleader.desktop
 
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -41,6 +43,7 @@ import local.ringleader.core.*
 
 /** What a lens shows: whose numbers, and which chart. */
 sealed interface LensSubject {
+    data class StorageSubject(val node: String, val storage: String) : LensSubject
     data object Cluster : LensSubject
     data class GuestSubject(val resource: ResourceId) : LensSubject
     data class NodeSubject(val name: String) : LensSubject
@@ -113,6 +116,7 @@ internal fun seriesHistory(series: Series, metric: LiveMetric, node: Boolean): L
 
 /** Hour to year for a node, and for a direct guest that is still in the inventory. Cluster and PDM stay on live samples. */
 internal fun lensServerRanges(state: WorkspaceState, subject: LensSubject, guest: Guest?): Boolean = when (subject) {
+    is LensSubject.StorageSubject -> state.kind != PDM_KIND || state.demo
     is LensSubject.Cluster -> false
     is LensSubject.NodeSubject -> !(state.kind == PDM_KIND && !state.demo)
     is LensSubject.GuestSubject -> guest != null && guestHasPage(state, guest)
@@ -234,8 +238,15 @@ fun Modifier.opensLens(request: () -> LensRequest): Modifier = composed {
                     while (true) awaitPointerEvent(PointerEventPass.Initial)
                 }
             }) {
-            Column(Modifier.fillMaxSize().graphicsLayer { alpha = contentAlpha }.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                LensBody(request, state, workspace, onClose)
+            Box(Modifier.fillMaxSize()) {
+            LayoutViewport(420.dp) {
+                Column(Modifier.fillMaxSize().graphicsLayer { alpha = contentAlpha }.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    LensBody(request, state, workspace, onClose)
+                }
+            }
+            Box(Modifier.align(Alignment.TopEnd).padding(12.dp)) {
+                HelpTip("Close (Esc)") { MiniAction("\u2715", onClick=onClose) }
+            }
             }
         }
     }
@@ -262,33 +273,34 @@ private fun lerpRect(a: Rect, b: Rect, t: Float) = Rect(
             Text(request.chart.title.uppercase(), fontSize = 11.sp, letterSpacing = 1.sp, fontFamily = Tech.Mono, color = Tech.Muted, maxLines = 1)
             LensSubjectLine(subject, guest)
         }
-        HelpTip("Close (Esc)") { MiniAction("✕", onClick = onClose) }
+        Spacer(Modifier.width(64.dp))
     }
     val ranges = buildList {
         if (request.chart.live != null) add("live" to "Live")
         if (server) historyTimeframes.forEach { add(it to it.replaceFirstChar(Char::uppercase)) }
     }
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-        if (ranges.isNotEmpty()) HistorySegments(ranges, timeframe) { timeframe = it }
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement=Arrangement.spacedBy(6.dp), itemVerticalAlignment = Alignment.CenterVertically) {
+        if (ranges.isNotEmpty()) FlowRow { ranges.forEach { (key,label) -> MiniAction(label, primary=timeframe==key) { timeframe=key } } }
         if (server && timeframe != "live") HistorySegments(listOf("AVERAGE" to "Average", "MAX" to "Maximum"), cf) { cf = it }
         LensReset(interaction)
     }
     note?.let { Text(it, color = Tech.Muted, fontFamily = Tech.Mono, fontSize = 11.sp, maxLines = 2) }
     val node = subject is LensSubject.NodeSubject
     val series = when (subject) {
+        is LensSubject.StorageSubject -> Series()
         is LensSubject.Cluster -> state.history.cluster
         is LensSubject.NodeSubject -> state.history.nodes[subject.name] ?: Series()
         is LensSubject.GuestSubject -> guest?.let { state.history.guests[it.resource] } ?: Series()
     }
     val livePoints = request.chart.live?.let { seriesHistory(series, it, node) }.orEmpty()
-    var held by remember(subject) { mutableStateOf<List<HistoryPoint>>(emptyList()) }
-    var loading by remember(subject) { mutableStateOf(false) }
-    var error by remember(subject) { mutableStateOf<String?>(null) }
+    var held by remember(subject, state.connectionEpoch) { mutableStateOf<List<HistoryPoint>>(emptyList()) }
+    var loading by remember(subject, state.connectionEpoch) { mutableStateOf(false) }
+    var error by remember(subject, state.connectionEpoch) { mutableStateOf<String?>(null) }
     val nodeName = (subject as? LensSubject.NodeSubject)?.name
-    LaunchedEffect(subject, timeframe, cf, server) {
+    LaunchedEffect(subject, timeframe, cf, server, state.connectionEpoch) {
         if (timeframe == "live" || !server) { loading = false; error = null; return@LaunchedEffect }
         loading = true
-        val section = try { workspace.readHistory(if (nodeName != null) null else guest, nodeName, timeframe, cf) }
+        val section = try { if(subject is LensSubject.StorageSubject) workspace.readStorageHistory(subject.node,subject.storage,timeframe,cf) else workspace.readHistory(if (nodeName != null) null else guest, nodeName, timeframe, cf) }
         catch (e: CancellationException) { throw e }
         loading = false
         val value = section.value
@@ -301,6 +313,7 @@ private fun lerpRect(a: Rect, b: Rect, t: Float) = Rect(
 
 @Composable private fun LensSubjectLine(subject: LensSubject, guest: Guest?) {
     when (subject) {
+        is LensSubject.StorageSubject -> Text("${subject.storage} · ${subject.node}", Modifier.identity(),fontSize=14.sp,fontFamily=Tech.Mono,color=Tech.Ink)
         is LensSubject.Cluster -> Text("Cluster", fontSize = 14.sp, fontFamily = Tech.Mono, color = Tech.Ink, maxLines = 1)
         is LensSubject.NodeSubject -> Text(subject.name, Modifier.identity(), fontSize = 14.sp, fontFamily = Tech.Mono, color = Tech.Ink, maxLines = 1)
         is LensSubject.GuestSubject -> if (guest == null) Text(LENS_GUEST_GONE, fontSize = 12.sp, fontFamily = Tech.Mono, color = Tech.Muted, maxLines = 1)

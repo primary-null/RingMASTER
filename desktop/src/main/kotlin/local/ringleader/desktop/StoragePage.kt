@@ -1,3 +1,4 @@
+@file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 package local.ringleader.desktop
 
 import androidx.compose.animation.animateColorAsState
@@ -5,6 +6,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -18,6 +20,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -26,12 +29,26 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.Text
+import local.ringleader.core.*
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.ui.input.key.*
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.yield
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
@@ -51,7 +68,7 @@ import local.ringleader.core.RecordedStorage
 import local.ringleader.core.SHARED_DISAGREE_NOTE
 import local.ringleader.core.STORAGE_CONTENT_ACTIVATES
 import local.ringleader.core.STORAGE_CONTENT_DIRECT_ONLY
-import local.ringleader.core.STORAGE_VISIBILITY_NOTE
+import local.ringleader.core.STORAGE_VISIBILITY_HELP
 import local.ringleader.core.StorageKey
 import local.ringleader.core.StorageVolume
 import local.ringleader.core.VOLUME_TYPE_ALL
@@ -71,19 +88,28 @@ import local.ringleader.core.volumeTypeCounts
  *
  * Give it the whole page: it fills its parent. Wide (900dp and up) shows the two panes side by side, narrower stacks them.
  */
-@Composable fun StoragePage(state: WorkspaceState, workspace: Workspace, modifier: Modifier = Modifier) {
-    BoxWithConstraints(modifier.fillMaxSize()) {
+@Composable fun StoragePage(state: WorkspaceState, workspace: Workspace, modifier: Modifier = Modifier, profileLabel: String = "Active connection") {
+    val searchFocus=remember { FocusRequester() }
+    LaunchedEffect(state.connectionEpoch, state.demo) {
+        if (state.kind != PDM_KIND) { workspace.loadStorageConfig(); if(state.permissions.value==null && !state.permissions.loading && state.permissions.error==null) workspace.loadPermissions() }
+    }
+    BoxWithConstraints(modifier.fillMaxSize().onPreviewKeyEvent {
+        if(it.type==KeyEventType.KeyDown && it.isCtrlPressed && it.key==Key.F && recordedStorageCount(recordedStorage(state))>=STORAGE_SEARCH_FROM) {searchFocus.requestFocus();true} else false
+    }) {
         if (maxWidth >= 900.dp) {
             Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                StorageListPane(state, workspace, Modifier.width(360.dp).fillMaxHeight())
-                StorageContentPane(state, workspace, Modifier.weight(1f).fillMaxHeight())
+                StorageListPane(state, workspace, Modifier.width(360.dp).fillMaxHeight(),searchFocus)
+                Box(Modifier.weight(1f).fillMaxHeight()) { LayoutViewport(600.dp) { StorageContentPane(state, workspace, Modifier.fillMaxSize(),profileLabel) } }
             }
         } else {
-            Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                StorageListPane(state, workspace, Modifier.fillMaxWidth().heightIn(max = 250.dp))
-                StorageContentPane(state, workspace, Modifier.fillMaxWidth().weight(1f))
+            // Each pane needs a useful viewport. A weighted contents pane could collapse entirely in a short window.
+            val contentsHeight = maxOf(600.dp, maxHeight - 262.dp)
+            Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                StorageListPane(state, workspace, Modifier.fillMaxWidth().height(250.dp),searchFocus)
+                StorageContentPane(state, workspace, Modifier.fillMaxWidth().height(contentsHeight),profileLabel)
             }
         }
+        if(state.taskLog!=null) TaskLogPanel(state,workspace,Modifier.fillMaxSize())
     }
 }
 
@@ -97,39 +123,84 @@ private fun recordedStorage(state: WorkspaceState): List<RecordedStorage> {
     return state.overview?.storage.orEmpty().filter { it.remote == remote }
 }
 
-@Composable private fun StorageListPane(state: WorkspaceState, workspace: Workspace, modifier: Modifier) {
+@Composable private fun StorageListPane(state: WorkspaceState, workspace: Workspace, modifier: Modifier, searchFocus: FocusRequester) {
     val rows = recordedStorage(state)
     val members = state.overview?.members.orEmpty().associateBy { it.name }
-    val grouped = rows.groupBy { it.node }.toSortedMap()
-    val count = recordedStorageCount(rows)
-    val disagree = sharedStorageReport(rows).disagreements.isNotEmpty()
+    val model = storageListModel(rows, state.overview?.members.orEmpty(), state.storageView.config.value)
+    var query by remember { mutableStateOf("") }
+    var sort by remember { mutableStateOf(StorageSort.Name) }
+    var expanded by remember { mutableStateOf(setOf<String>()) }
+    val listState=rememberLazyListState()
+    val scope=rememberCoroutineScope()
+    var cursor by remember { mutableStateOf<RecordedStorage?>(null) }
+    val candidates=sortStorageRows(model.shared.map { it.shown },sort) + model.nodes.flatMap { sortStorageRows(it.rows,sort) }
+    val visible=candidates.filter { storageMatches(it,query) }
+    val count = model.shared.size + model.nodes.sumOf { it.rows.size }
+    val keyboardNavigation=Modifier.onPreviewKeyEvent { event ->
+        if(event.type!=KeyEventType.KeyDown) false
+        else if(event.isCtrlPressed && event.key==Key.F && count>=STORAGE_SEARCH_FROM) { searchFocus.requestFocus(); true }
+        else if(!event.isCtrlPressed && event.key in listOf(Key.DirectionDown,Key.DirectionUp,Key.MoveHome,Key.MoveEnd) && visible.isNotEmpty()) {
+            val current=visible.indexOfFirst { it.node==cursor?.node && it.id==cursor?.id }
+            val index=when(event.key) { Key.MoveHome -> 0; Key.MoveEnd -> visible.lastIndex; Key.DirectionUp -> if(current<0) visible.lastIndex else (current-1+visible.size)%visible.size; else -> (current+1)%visible.size }
+            cursor=visible[index]
+            expanded=model.nodes.map { it.node }.toSet()
+            val target=cursor!!
+            val keys=buildList<String> {
+                if(model.shared.isNotEmpty()) add("shared-header")
+                sortStorageRows(model.shared.filter { g -> g.rows.any { storageMatches(it,query) } }.map { it.shown },sort).forEach { add("${it.node}/${it.id}") }
+                model.nodes.forEach { group ->
+                    val filtered=sortStorageRows(group.rows.filter { storageMatches(it,query) },sort)
+                    if(filtered.isNotEmpty()) {add("node:${group.node}");filtered.forEach {add("${it.node}/${it.id}")} }
+                }
+            }
+            val item=keys.indexOf("${target.node}/${target.id}")
+            if(item>=0) scope.launch {yield();listState.scrollToItem(item)}
+            true
+        } else if(event.key==Key.Enter && cursor!=null) { cursor?.let { workspace.selectStorage(it.node,it.id) }; true } else false
+    }
     PaneFrame(modifier) {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            SectionLabel("Storage", suffix = if (rows.isEmpty()) null else "$count on ${grouped.size} ${if (grouped.size == 1) "node" else "nodes"}")
-        }
-        Text(if (state.demo) RECORDED_SAMPLE_CAPTION else RECORDED_CAPTION, fontFamily = Tech.Mono, fontSize = 10.sp, color = if (state.demo) Tech.Amber else Tech.Muted)
-        if (disagree) {
-            Text(SHARED_DISAGREE_NOTE, fontSize = 10.sp, color = Tech.Amber)
-            Text("They are not added together.", fontSize = 10.sp, color = Tech.Muted)
-        }
-        if (state.stale) Text("The inventory is stale. These rows are from the last good read.", fontSize = 10.sp, color = Tech.Amber)
-        state.overview?.indexError?.let { Text(it, fontSize = 10.sp, lineHeight = 13.sp, color = Tech.Amber, maxLines = 3, overflow = TextOverflow.Ellipsis) }
+        SectionLabel("Storage", suffix = "$count recorded")
+        Text(if (state.demo) RECORDED_SAMPLE_CAPTION else RECORDED_CAPTION, fontFamily = Tech.Mono, fontSize = 10.sp, color = Tech.Muted)
+        if (state.stale || state.overview?.indexStale == true) Text("Inventory is stale. Last recorded rows are shown.", color=Tech.Amber,fontSize=10.sp)
+        state.overview?.indexError?.let { Text(it,color=Tech.Amber,fontSize=10.sp) }
         when {
-            state.kind == PDM_KIND -> Text(STORAGE_CONTENT_DIRECT_ONLY, fontSize = 11.sp, lineHeight = 15.sp, color = Tech.Muted)
-            state.overview == null -> if (state.loading) TechBusy() else Text("Connect to a Proxmox server to see its storage.", fontSize = 11.sp, color = Tech.Muted)
-            rows.isEmpty() -> Text(
-                "No recorded storage. The resource list shows only storage this identity can audit (Datastore.Audit), and not disabled storage.",
-                fontSize = 11.sp, lineHeight = 15.sp, color = Tech.Muted,
-            )
-            else -> LazyColumn(Modifier.fillMaxWidth().weight(1f, fill = false)) {
-                grouped.forEach { (node, storages) ->
-                    item(key = "node:$node") { NodeGroupHeader(node, members[node]?.status) }
-                    items(storages.sortedBy { it.id }, key = { "${it.node}/${it.id}" }) { row ->
-                        val key = StorageKey(row.remote, row.node, row.id)
-                        StorageRow(row, selected = state.storageSelection == key, online = members[row.node]?.status == "online" || state.demo) {
-                            workspace.selectStorage(row.node, row.id)
-                        }
+            state.kind == PDM_KIND -> Text(STORAGE_CONTENT_DIRECT_ONLY,color=Tech.Muted,fontSize=11.sp)
+            state.overview == null -> if(state.loading) TechBusy() else Text("Connect to a Proxmox server to see its storage.",color=Tech.Muted,fontSize=11.sp)
+            else -> {
+                if(count>=STORAGE_SEARCH_FROM) {
+                    TechField(query,{query=it},"Search storage · node · type",Modifier.focusRequester(searchFocus).identity())
+                    FlowRow { StorageSort.entries.forEach { order -> MiniAction(when(order) { StorageSort.Name -> "Name"; StorageSort.UsedPercent -> "Used %"; StorageSort.Free -> "Free" },primary=sort==order) {sort=order} } }
+                }
+                LazyColumn(Modifier.fillMaxWidth().weight(1f).then(keyboardNavigation),state=listState,verticalArrangement=Arrangement.spacedBy(5.dp)) {
+                    if(model.shared.isNotEmpty()) item { SectionLabel("Shared") }
+                    items(sortStorageRows(model.shared.filter { g -> g.rows.any { storageMatches(it,query) } }.map { it.shown },sort),key={"shared:${it.id}"}) { shown ->
+                        val group=model.shared.first { it.id==shown.id }
+                        val selected=state.storageSelection
+                        val chosen=group.rows.firstOrNull { it.node==selected?.node } ?: shown
+                        StorageCard(shown,selected?.storage==shown.id && group.rows.any { it.node==selected.node },members[shown.node]?.status=="online",group,keyboardFocused=cursor?.id==shown.id) { workspace.selectStorage(chosen.node,chosen.id) }
                     }
+                    model.nodes.forEach { group ->
+                        val matching=group.rows.filter { storageMatches(it,query) }
+                        val sorted=sortStorageRows(matching,sort)
+                        val folded=matching.size>8 && group.node !in expanded && query.isBlank()
+                        if(matching.isNotEmpty()) item(key="node:${group.node}") { NodeGroupHeader(group.node,members[group.node]?.status) }
+                        items(if(folded) sortStorageRows(matching,StorageSort.UsedPercent).take(8) else sorted,key={"${it.node}/${it.id}"}) { row ->
+                            StorageCard(row,state.storageSelection==StorageKey(row.remote,row.node,row.id),group.online, keyboardFocused=cursor?.node==row.node && cursor?.id==row.id) { workspace.selectStorage(row.node,row.id) }
+                        }
+                        if(folded) item { Box(Modifier.onFocusChanged { if(it.hasFocus) cursor=null }) { MiniAction("Show all ${matching.size}") { expanded=expanded+group.node } } }
+                    }
+                    model.disabled.filter { query.isBlank() || it.storage.contains(query,true) }.forEach { config -> item(key="disabled:${config.storage}") {
+                        Column(Modifier.fillMaxWidth().border(1.dp,Tech.Edge).padding(8.dp)) {
+                            Text(config.storage,Modifier.identity(),color=Tech.Muted,fontFamily=Tech.Mono,fontSize=12.sp)
+                            NeutralTag("Disabled")
+                            Text("Disabled in the storage configuration · ${config.type ?: "type unknown"}",color=Tech.Muted,fontSize=10.sp)
+                        }
+                    } }
+                    if(rows.isEmpty()) item { Text("No recorded storage this account can audit. Disabled storage comes from configuration.",color=Tech.Muted,fontSize=11.sp) }
+                    item { Text("Capacities are not added across storage IDs or nodes.",color=Tech.Muted,fontSize=10.sp) }
+                    if(storageListComplete(state.permissions.value?.dump)!=true || state.demo) item { Text("Storage this account cannot audit is not listed.",color=Tech.Muted,fontSize=10.sp) }
+                    if(model.disabled.isNotEmpty()) item { Text("Disabled storage comes from the storage configuration.",color=Tech.Muted,fontSize=10.sp) }
+                    if(state.storageView.config.error!=null) item { Text(STORAGE_CONFIG_UNREAD,color=Tech.Muted,fontSize=10.sp) }
                 }
             }
         }
@@ -141,41 +212,6 @@ private fun recordedStorage(state: WorkspaceState): List<RecordedStorage> {
         Box(Modifier.size(14.dp, 3.dp).background(Tech.Amber.copy(alpha = .7f)))
         Text(node.uppercase(), Modifier.identity(), fontFamily = Tech.Mono, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp, color = Tech.Muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
         if (status != null && status != "online") NeutralTag(status)
-    }
-}
-
-@Composable private fun StorageRow(row: RecordedStorage, selected: Boolean, online: Boolean, onClick: () -> Unit) {
-    val interaction = remember { MutableInteractionSource() }
-    val hovered by interaction.collectIsHoveredAsState()
-    val bg by animateColorAsState(if (selected) Tech.Raised else if (hovered) Tech.Raised.copy(alpha = .6f) else Tech.Panel, tween(if (LocalReduceMotion.current) 0 else 120))
-    val fraction = memoryFraction(row.diskBytes, row.maxDiskBytes)
-    Column(
-        Modifier.fillMaxWidth().background(bg).hoverable(interaction).clickable(interactionSource = interaction, indication = null, onClick = onClick)
-            .drawBehind {
-                if (selected) drawRect(Tech.Amber, size = Size(2.dp.toPx(), size.height))
-                drawLine(Tech.Edge.copy(alpha = .5f), Offset(0f, size.height), Offset(size.width, size.height), 1f)
-            }.padding(horizontal = 10.dp, vertical = 6.dp),
-        verticalArrangement = Arrangement.spacedBy(3.dp),
-    ) {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text(row.id, Modifier.weight(1f, fill = false).identity(), fontFamily = Tech.Mono, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
-                color = if (online) Tech.Ink else Tech.Muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            row.pluginType?.let { NeutralTag(it) }
-            if (row.shared == true) NeutralTag("Shared", help = "The same pool is listed once per node. Figures are as recorded on this node.")
-            Spacer(Modifier.weight(1f))
-            if (storageStatusInactive(row.status)) TechTag(row.status, storageStatusTint(row.status))
-        }
-        if (fraction != null) {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                UsageBar(fraction, Modifier.weight(1f))
-                Text("${storageSize(row.diskBytes)} / ${storageSize(row.maxDiskBytes)}", fontFamily = Tech.Mono, fontSize = 10.sp, color = Tech.Ink.copy(alpha = .85f), maxLines = 1)
-            }
-        } else {
-            HelpTip("No sample yet. The node has not reported this storage (inactive, disabled, or no audit right).") {
-                Text("No usage recorded", fontFamily = Tech.Mono, fontSize = 10.sp, color = Tech.Muted)
-            }
-        }
-        row.content?.let { Text(it, fontFamily = Tech.Mono, fontSize = 9.sp, color = Tech.Muted, maxLines = 1, overflow = TextOverflow.Ellipsis) }
     }
 }
 
@@ -194,7 +230,8 @@ internal fun volumeChipLabel(type: String): String = when (type) {
     else -> type
 }
 
-@Composable private fun StorageContentPane(state: WorkspaceState, workspace: Workspace, modifier: Modifier) {
+@Composable private fun StorageContentPane(state: WorkspaceState, workspace: Workspace, modifier: Modifier, profileLabel: String) {
+    var tab by remember(state.connectionEpoch) { mutableStateOf("Overview") }
     val key = state.storageSelection
     val recorded = key?.let { k -> recordedStorage(state).firstOrNull { it.node == k.node && it.id == k.storage } }
     val section = state.storageContent
@@ -207,10 +244,12 @@ internal fun volumeChipLabel(type: String): String = when (type) {
                 else "Pick a storage on the left to read what it holds: disk images, ISOs, container templates, backups and snippets, with size, format, date and owner.",
                 fontSize = 12.sp, lineHeight = 17.sp, color = Tech.Muted,
             )
-            ReadNotices(section)
+            ReadNotices(section,Modifier.identity())
             Text(STORAGE_CONTENT_ACTIVATES, fontSize = 10.sp, lineHeight = 13.sp, color = Tech.Muted)
             return@PaneFrame
         }
+        var guestFilter by remember(key) { mutableStateOf<Int?>(null) }
+        var volumeFilter by remember(key) { mutableStateOf<String?>(null) }
         var type by remember(key) { mutableStateOf(VOLUME_TYPE_ALL) }
         var sort by remember(key) { mutableStateOf("Name") }
         var descending by remember(key) { mutableStateOf(false) }
@@ -222,37 +261,64 @@ internal fun volumeChipLabel(type: String): String = when (type) {
             }
             MiniAction("Refresh", enabled = !section.loading) { workspace.refreshStorageContent() }
         }
+        StorageFileActions(state,workspace,key,profileLabel=profileLabel)
+        Box(Modifier.heightIn(max=160.dp).verticalScroll(rememberScrollState())) { StorageActionStrip(state,workspace,key) }
         Text(STORAGE_CONTENT_ACTIVATES, fontSize = 10.sp, lineHeight = 13.sp, color = Tech.Muted)
-        ReadNotices(section)
-        if (view == null) return@PaneFrame
+        val sharedRows=recordedStorage(state).filter { it.id==recorded.id && it.shared==true }
+        if(sharedRows.size>1) FlowRow(horizontalArrangement=Arrangement.spacedBy(6.dp)) {
+            sharedRows.forEach { sample -> HelpTip("${sample.node}: ${storageSize(sample.diskBytes)} used / ${storageSize(sample.maxDiskBytes)} total",identity=true) {
+                Box(Modifier.identity()) { MiniAction(sample.node,primary=key.node==sample.node) { workspace.selectStorage(sample.node,sample.id) } }
+            } }
+        }
+        TechTabs(listOf("Overview","Contents"),tab,{tab=it},Modifier.onPreviewKeyEvent { if(it.type==KeyEventType.KeyDown && it.key in listOf(Key.DirectionLeft,Key.DirectionRight)) {tab=if(tab=="Overview") "Contents" else "Overview"; true} else false })
+        ReadNotices(section,Modifier.identity())
+        view?.filter?.let { Text("Listing filtered to ${volumeChipLabel(it)}.",color=Tech.Muted,fontSize=10.sp) }
+        if(tab=="Overview") {
+            StorageOverview(state,workspace,recorded,view?.volumes,Modifier.fillMaxWidth().weight(1f)) { content,guest,volume ->
+                type=content; guestFilter=guest; volumeFilter=volume; tab="Contents"
+            }
+            return@PaneFrame
+        }
+        if (view == null) { if(section.loading) repeat(4) { Shimmer(Modifier.fillMaxWidth().height(34.dp)) }; return@PaneFrame }
         val counts = volumeTypeCounts(view.volumes)
         val activeType = counts.firstOrNull { it.first == type }?.first ?: VOLUME_TYPE_ALL
-        val shown = remember(view.volumes, activeType, sort, descending) { sortVolumes(filterVolumes(view.volumes, activeType), sort, descending) }
+        val shown = remember(view.volumes, activeType, sort, descending,guestFilter,volumeFilter) { sortVolumes(storageFilteredVolumes(view.volumes, activeType,guestFilter,volumeFilter), sort, descending) }
         val showUsed = view.volumes.any { it.usedBytes != null }
         Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
             val chips = counts.map { volumeChipLabel(it.first) to it.second }
             SegmentedFilter(chips, volumeChipLabel(activeType)) { label -> type = counts.firstOrNull { volumeChipLabel(it.first) == label }?.first ?: VOLUME_TYPE_ALL }
         }
+        if(guestFilter!=null || volumeFilter!=null) FlowRow {
+            Text(listOfNotNull(guestFilter?.let { "Guest $it" },volumeFilter).joinToString(" · "),Modifier.identity(),color=Tech.Muted,fontSize=11.sp)
+            MiniAction("Clear filter") { guestFilter=null; volumeFilter=null }
+        }
         BoxWithConstraints(Modifier.fillMaxWidth().weight(1f)) {
-            val wide = maxWidth >= 700.dp
+            val wide = maxWidth >= 900.dp * androidx.compose.ui.platform.LocalDensity.current.fontScale
             val onSort: (String) -> Unit = { k -> if (sort == k) descending = !descending else { sort = k; descending = k in listOf("Size", "Date") } }
             Column(Modifier.fillMaxSize()) {
                 if (wide) WideHeader(sort, descending, showUsed, onSort) else NarrowHeader(sort, descending, onSort)
                 if (shown.isEmpty()) {
-                    Text(if (view.volumes.isEmpty()) "The server listed no volumes for this identity." else "No volume of this type.", Modifier.padding(top = 10.dp),
+                    Text(if (view.volumes.isEmpty()) if(storageVerdict(state,recorded)==StorageVisibility.Complete) STORAGE_EMPTY_COMPLETE else STORAGE_EMPTY_FILTERED else "No volume of this type.", Modifier.padding(top = 10.dp),
                         fontSize = 12.sp, color = Tech.Muted)
                 } else {
                     LazyColumn(Modifier.fillMaxWidth().weight(1f)) {
-                        items(shown, key = { it.volid }) { if (wide) WideRow(it, showUsed) else NarrowRow(it) }
+                        items(shown, key = { it.volid }) { volume ->
+                            Column { if (wide) WideRow(volume, showUsed) else NarrowRow(volume)
+                                StorageFileActions(state,workspace,key,volume,profileLabel)
+                            }
+                        }
                     }
                 }
             }
         }
-        Text(
-            "${NumberFormat.getIntegerInstance(Locale.ROOT).format(shown.size)} ${if (shown.size == 1) "volume" else "volumes"} · UPDATED ${readClock(section.updatedAt)}",
-            fontFamily = Tech.Mono, fontSize = 10.sp, color = Tech.Muted,
-        )
-        HelpTip(STORAGE_VISIBILITY_NOTE) { Text(STORAGE_VISIBILITY_NOTE, fontSize = 10.sp, lineHeight = 13.sp, color = Tech.Muted, maxLines = 3, overflow = TextOverflow.Ellipsis) }
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(
+                "${NumberFormat.getIntegerInstance(Locale.ROOT).format(shown.size)} ${if (shown.size == 1) "volume" else "volumes"} · UPDATED ${readClock(section.updatedAt)}",
+                fontFamily = Tech.Mono, fontSize = 10.sp, color = Tech.Muted,
+            )
+
+        }
+        StorageVisibilityNote(storageVerdict(state,recorded))
     }
 }
 
@@ -308,7 +374,7 @@ private fun sizeText(volume: StorageVolume): String =
             if (flagged || volume.notes != null) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     if (flagged) VolumeFlags(volume)
-                    volume.notes?.let { Text(it, Modifier.weight(1f, fill = false), fontSize = 10.sp, color = Tech.Muted, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                    volume.notes?.let { Text(it, Modifier.identity().weight(1f, fill = false), fontSize = 10.sp, color = Tech.Muted, maxLines = 1, overflow = TextOverflow.Ellipsis) }
                 }
             }
         }
@@ -332,6 +398,6 @@ private fun sizeText(volume: StorageVolume): String =
                 Modifier.weight(1f, fill = false).identity(), fontFamily = Tech.Mono, fontSize = 10.sp, color = Tech.Muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
             VolumeFlags(volume)
         }
-        volume.notes?.let { Text(it, fontSize = 10.sp, color = Tech.Muted, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+        volume.notes?.let { Text(it, Modifier.identity(), fontSize = 10.sp, color = Tech.Muted, maxLines = 1, overflow = TextOverflow.Ellipsis) }
     }
 }

@@ -53,6 +53,7 @@ object AppData {
         "Appearance, interface sizes and background images",
         "Window placement, rail, live-refresh and update preferences",
         "Configuration backups",
+        "Schedules, background access and run history",
         "A leftover console browser profile, if one is in the cache",
         REMEMBERED,
     )
@@ -81,7 +82,7 @@ object AppData {
                 Files.walk(path).use { s -> s.sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) } }
             }.onFailure { failed += path.toString() }
         }
-        if (Files.isDirectory(config)) Files.list(config).use { s -> s.toList() }.filter { it.fileName.toString() != KEPT }.forEach(::wipe)
+        if (Files.isDirectory(config)) Files.list(config).use { s -> s.toList() }.filter { it.fileName.toString() !in setOf(KEPT, "instance.lock", "instance.sock", "instance.token") }.forEach(::wipe)
         wipe(cache.resolve("chromium-profile"))
         return failed
     }

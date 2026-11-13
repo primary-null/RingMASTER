@@ -147,6 +147,8 @@ data class WorkspaceState(
     val submissions: List<PowerSubmission> = emptyList(), val powerBusy: Boolean = false, val powerNotice: String? = null,
     /** Actions from an earlier session to this server whose result was lost. Memory only; shown until dismissed. */
     val lostPowerResults: List<LostPowerResult> = emptyList(),
+    /** The open create wizard's reads and result (GuestCreateFlow.kt), or null. */
+    val creation: CreateSession? = null,
     val kind: String = DIRECT_PVE_KIND,
     val selectedNode: String? = null, val nodeStatus: NodeLiveStatus? = null, val nodeStatusLoading: Boolean = false,
     val nodeStatusError: String? = null, val nodeStatusStale: Boolean = false, val nodeStatusUpdatedAt: Instant? = null,
@@ -173,6 +175,9 @@ data class WorkspaceState(
     val nodeUpdates: ReadSection<NodeUpdatesView> = ReadSection(),
     val storageSelection: StorageKey? = null,
     val storageContent: ReadSection<StorageContentView> = ReadSection(),
+    /** The storage view's configuration and history reads ([StorageWorkbench]). Dropped with the session. */
+    val storageView: StorageViewState = StorageViewState(),
+    val storageActions: StorageActionsState = StorageActionsState(),
 )
 
 fun requireActiveRemote(remote: String, overview: Overview, kind: String = DIRECT_PVE_KIND): Overview {
@@ -220,9 +225,33 @@ class Workspace(
     private val permissionsGateway: PermissionsGateway = LivePermissionsGateway(),
     private val nodeToolsGateway: NodeToolsGateway = LiveNodeToolsGateway(),
     private val storageContentGateway: StorageContentGateway = LiveStorageContentGateway(),
+    private val storageGateway: StorageGateway = LiveStorageGateway(),
+    @Suppress("unused") private val createGateway: CreateGuestGateway = LiveCreateGuestGateway(),
+    private val storageActionGateway: StorageActionGateway = LiveStorageActionGateway(),
 ) : AutoCloseable {
     private val mutableState = MutableStateFlow(WorkspaceState())
     val state = mutableState.asStateFlow()
+    private val storageWorkbench = StorageWorkbench(scope, mutableState, storageGateway, clock, { connection },
+        { epoch -> if (mutableState.value.connectionEpoch == epoch) expire() })
+    @Volatile private var storageSendOwner: String? = null
+    private val storageActionWorkbench = StorageActionWorkbench(scope, mutableState, storageActionGateway, { connection },
+        { id -> if (powerBusy || storageSendOwner != null) false else { storageSendOwner = id; powerBusy = true; mutableState.update { it.copy(powerBusy = true) }; true } },
+        { id -> if (storageSendOwner == id) { storageSendOwner = null; powerBusy = false; mutableState.update { it.copy(powerBusy = false) } } },
+        { epoch -> if (mutableState.value.connectionEpoch == epoch) expire() },
+        { key -> if (mutableState.value.storageSelection == key) refreshStorageContent() })
+    fun captureStorage(node: String, storage: String, request: StorageRequest, profileLabel: String, browser: Boolean = false): StorageConfirmation? {
+        if (browser && request is StorageRequest.Upload) { mutableState.update { it.copy(storageActions = it.storageActions.copy(notice = "Browser mode cannot upload a local file.")) }; return null }
+        return storageActionWorkbench.capture(StorageKey(if (mutableState.value.demo) DEMO_REMOTE_KEY else connection?.remoteKey.orEmpty(), node, storage), request, profileLabel)
+    }
+    fun submitStorage(confirmation: StorageConfirmation): Boolean = storageActionWorkbench.submit(confirmation)
+    fun loadStorageCatalogue(node: String, storage: String) = storageActionRead(node, storage)
+    fun queryStorageUrlMetadata(node: String, storage: String, url: String, verifyCertificates: Boolean = true) = storageActionRead(node, storage, url, verifyCertificates)
+    fun readStorageAttributes(node: String, storage: String, volid: String) = storageActionRead(node, storage, volid = volid)
+    private fun storageActionRead(node: String, storage: String, url: String? = null, verify: Boolean = true, volid: String? = null) =
+        storageActionWorkbench.read(StorageKey(if (mutableState.value.demo) DEMO_REMOTE_KEY else connection?.remoteKey.orEmpty(), node, storage), url, verify, volid)
+    fun cancelStorageUpload(localId: String) = storageActionWorkbench.cancelUpload(localId)
+    fun acknowledgeStorageResult(localId: String) = storageActionWorkbench.acknowledge(localId)
+    fun openStorageTaskLog(localId: String): Boolean { val task = storageActionWorkbench.task(localId) ?: return false; openTaskLog(task); return true }
     // Read by the keeper from the reader thread and the expiry job as well as the UI thread.
     @Volatile private var consoleKeepMinutesField = CONSOLE_KEEP_DEFAULT_MINUTES
     private val consoleKeeper = ConsoleKeeper(
@@ -241,8 +270,9 @@ class Workspace(
             consoleKeepMinutesField = next
             if (next == 0) consoleKeeper.closeAll() else consoleKeeper.wake()
         }
-    private var connection: Connection? = null
+    @Volatile private var connection: Connection? = null
     private var generation = 0L
+    private var inventoryOrder = 0L
     private var detailGeneration = 0L
     private var taskGeneration = 0L
     private var nodeGeneration = 0L
@@ -262,7 +292,23 @@ class Workspace(
     private val powerFollowJobs = mutableMapOf<String, Job>()
     private var powerCatchUpJob: Job? = null
     /** The confirmation whose POST is in flight, so a session that ends before its answer can say it may have run. */
-    private var powerInFlight: PowerConfirmation? = null
+    @Volatile private var powerInFlight: PowerConfirmation? = null
+    /** Read by scheduled runs (another thread) through [MutationLeases]: this session's in-flight or unresolved mutations. */
+    private val foregroundView = ForegroundMutations { key -> foregroundBusy(key) }
+    /** Process-wide interlock with scheduled runs. Tests may replace it; the session re-registers itself. */
+    internal var mutationLeases: MutationLeases = MutationLeases.shared
+        set(value) { field.unregister(foregroundView); field = value; value.register(foregroundView) }
+    init { mutationLeases.register(foregroundView) }
+    private fun foregroundBusy(key: GuestKey): String? {
+        val origin = connection?.remoteKey ?: return null
+        if (origin != key.origin) return null
+        powerInFlight?.let { if (it.resource.vmid == key.vmid && it.kind == key.kind) return "A foreground action on this guest is being sent." }
+        if (createInFlight != null || storageSendOwner != null) return "A foreground change is being sent to this server."
+        val open = mutableState.value.submissions.firstOrNull {
+            (it.phase == PowerPhase.Accepted || it.phase == PowerPhase.Unknown) && !it.resolvedByCheck && it.remote == origin && it.vmid == key.vmid && it.kind == key.kind
+        } ?: return null
+        return if (open.phase == PowerPhase.Accepted) "A foreground action on this guest is still running." else "A foreground action on this guest has an unknown result."
+    }
     /** Lost results for this app run. Shared by every session window; memory only. */
     internal var lostResults: LostPowerResultStore = LostPowerResultStore.shared
     private var captureNotice: String? = null
@@ -372,6 +418,7 @@ class Workspace(
         val current = connection ?: return
         if (inventoryJob?.isActive == true || liveTick?.isActive == true) return
         val expected = generation
+        val order = ++inventoryOrder
         val remote = current.remoteKey
         dropNodeRead()
         mutableState.update { it.copy(loading = true, error = null, nodeStatusLoading = false) }
@@ -379,29 +426,24 @@ class Workspace(
             try {
                 val overview = if (current.kind == PDM_KIND) {
                     val document = pdmGateway.read(current)
-                    if (generation != expected) return@launch
+                    if (generation != expected || inventoryOrder != order) return@launch
                     mergePdmFleet(mutableState.value.overview, remote, document)
                 } else {
                     val fetched = gateway.overview(current)
-                    if (generation != expected) return@launch
+                    if (generation != expected || inventoryOrder != order) return@launch
                     requireActiveRemote(remote, adoptRecordedIndex(remote, fetched), DIRECT_PVE_KIND)
                 }
-                if (generation != expected) return@launch
+                if (generation != expected || inventoryOrder != order) return@launch
                 val selected = mutableState.value.selected
-                val readAt = clock()
-                mutableState.update { it.copy(overview = overview, loading = false, stale = false, error = null, updatedAt = readAt, nodeStatusLoading = false, liveBackoffSeconds = null) }
-                recordHistory(overview, readAt)
-                retireKeptConsoles(overview)
-                if (selected != null) {
-                    val fresh = findCurrentGuest(remote, selected, overview.guests)
-                    if (fresh == null) clearSelection() else select(fresh)
-                }
+                publishTick(remote, overview, clock())
+                selected?.let { findCurrentGuest(remote, it, overview.guests) }?.let { select(it) }
+                mutableState.update { it.copy(loading = false, nodeStatusLoading = false) }
                 if (current.kind != PDM_KIND) holdMember(remote)
             } catch (e: CancellationException) { throw e }
             catch (e: SessionExpiredException) { if (generation == expected) expire() }
             catch (e: TwoFactorRequiredException) { if (generation == expected) expire(e.message) }
             catch (e: Exception) {
-                if (generation == expected) mutableState.update {
+                if (generation == expected && inventoryOrder == order) mutableState.update {
                     it.copy(loading = false, stale = it.overview != null, error = readableError(e), nodeStatusLoading = false, nodeStatusStale = it.nodeStatus != null || it.nodeStatusStale)
                 }
             }
@@ -438,6 +480,20 @@ class Workspace(
                 }
             }
         }
+    }
+
+    /** Resolve only a current creation submission; never guess a task from the recent feed. */
+    fun openCreateTaskLog(localId: String): Boolean {
+        val state = mutableState.value
+        val submission = state.submissions.singleOrNull { it.localId == localId && it.action == PowerAction.Create } ?: return false
+        val current = connection ?: return false
+        if (!state.connected || state.demo || current.kind != DIRECT_PVE_KIND || submission.remote != current.remoteKey) return false
+        val upid = submittedUpids[localId] ?: return false
+        val parsed = parseServerUpid(upid) ?: return false
+        if (parsed.node != submission.node || parsed.subjectId != submission.vmid.toString()) return false
+        openTaskLog(ClusterTask(submission.remote, upid, parsed.node, parsed.type, parsed.subjectId,
+            parsed.user, null, null, null, TaskOutcome.Unknown))
+        return true
     }
 
     /** Open one task log. A PDM connection is refused before any node path is built. Demo samples never leave this computer. */
@@ -585,10 +641,13 @@ class Workspace(
             if (taskLogToken != token || generation != session || state.connectionEpoch != epoch) return@update state
             val log = state.taskLog ?: return@update state
             if (log.task.identity != task.identity) return@update state
-            val merged = mergeTaskLogLines(log.lines, page.lines)
+            val storageTask = storageActionWorkbench.ownsTask(task)
+            val safePage = if (storageTask) page.lines.map { it.copy(text = storageSafeLogText(it.text)) } else page.lines
+            val safeStatus = if (storageTask && status != null && status.exitStatus != null && status.exitStatus != "OK" && !Regex("WARNINGS: [0-9]+").matches(status.exitStatus)) status.copy(exitStatus = "Storage task did not finish with OK.") else status
+            val merged = mergeTaskLogLines(log.lines, safePage)
             val total = maxOf(log.total, page.total, merged.lastOrNull()?.n ?: 0)
             val (lines, dropped) = capTaskLogLines(merged)
-            state.copy(taskLog = log.copy(lines = lines, total = total, status = status ?: log.status, error = null, loading = false, dropped = log.dropped + dropped))
+            state.copy(taskLog = log.copy(lines = lines, total = total, status = safeStatus ?: log.status, error = null, loading = false, dropped = log.dropped + dropped))
         }
     }
 
@@ -661,6 +720,10 @@ class Workspace(
             mutableState.update { it.copy(powerNotice = refusal) }
             return false
         }
+        if (!mutableState.value.demo && connection?.let { mutationLeases.scheduledHolds(GuestKey(it.remoteKey, confirmation.kind, confirmation.resource.vmid)) } == true) {
+            mutableState.update { it.copy(powerNotice = MutationLeases.SCHEDULED_REFUSAL) }
+            return false
+        }
         if (!usedConfirmations.add(confirmation.confirmationId)) {
             mutableState.update { it.copy(powerNotice = "This confirmation was already used. Nothing else was sent.") }
             return false
@@ -673,8 +736,11 @@ class Workspace(
             mutableState.update { it.copy(powerNotice = "The connection changed. Nothing was sent.") }
             return false
         }
-        powerBusy = true
-        powerInFlight = confirmation
+        // Checked and marked under the scheduler interlock's lock, so a scheduled run cannot claim the guest in between.
+        if (mutationLeases.foreground(GuestKey(current.remoteKey, confirmation.kind, confirmation.resource.vmid)) { powerBusy = true; powerInFlight = confirmation; true } == null) {
+            mutableState.update { it.copy(powerNotice = MutationLeases.SCHEDULED_REFUSAL) }
+            return false
+        }
         val session = generation
         mutableState.update { it.copy(powerBusy = true, powerNotice = null) }
         powerJob = scope.launch {
@@ -754,6 +820,272 @@ class Workspace(
                     )
                 }
             }
+        }
+    }
+
+    // Guest creation (GuestCreateFlow.kt). Phase A0: signatures only. No screen calls these yet, and none sends anything.
+
+    /**
+     * Open the create wizard's session for [kind] on [node] and start its reads (next ID, pools, bridges, and for a VM
+     * the CPU models and flags); in demo mode the session is [demoCreateSession]. Returns false, with nothing read, when
+     * [createAvailability] says no or [node] is not online. Opening again replaces the previous session.
+     */
+    private var createJob: Job? = null
+    private var createSerial = 0L
+    private val createReads = mutableMapOf<String, Job>()
+    private val createTokens = mutableMapOf<String, Long>()
+    private val capturedCreates = mutableMapOf<String, Long>()
+    private val usedCreateConfirmations = mutableSetOf<String>()
+    private var createSecretsInFlight: CreateSecrets? = null
+    @Volatile private var createInFlight: CreateConfirmation? = null
+
+    fun openCreateSession(kind: NewGuestKind, node: String): Boolean {
+        val state = mutableState.value
+        if (!createAvailability(state, kind).available || state.overview?.members?.none { it.name == node && it.status == "online" } != false) return false
+        closeCreateSession()
+        val serial = ++createSerial
+        mutableState.update { it.copy(creation = if (it.demo) demoCreateSession(kind, node, it.connectionEpoch, clock()).copy(generation = serial) else CreateSession(kind, node, it.connectionEpoch, serial, identityIsRootPam = connection?.let { c -> c.passwordLogin && c.tokenId == "root@pam" } == true)) }
+        if (!state.demo) {
+            val content = if (kind == NewGuestKind.Vm) "iso" else "vztmpl"
+            storageChoices(state.overview.storage, node, content).firstOrNull()?.let { readForCreate(CreateRead.Volumes(it.id, content)) }
+            readForCreate(CreateRead.NextId); readForCreate(CreateRead.Pools); readForCreate(CreateRead.Bridges)
+            if (kind == NewGuestKind.Vm) { readForCreate(CreateRead.CpuModels(null)); readForCreate(CreateRead.CpuFlags(null, "kvm")) }
+            if (state.permissions.updatedAt?.let { java.time.Duration.between(it, clock()).seconds < 60 } != true) loadPermissions()
+        }
+        return true
+    }
+    fun changeCreateNode(node: String) {
+        val c = mutableState.value.creation ?: return
+        if (c.result is CreateResult.Sending || c.result is CreateResult.Following) return
+        openCreateSession(c.kind, node)
+    }
+    fun closeCreateSession() {
+        createSerial++
+        createReads.values.toList().forEach { it.cancel() }; createReads.clear(); createTokens.clear(); capturedCreates.clear()
+        createSecretsInFlight?.close(); createSecretsInFlight = null
+        mutableState.update { it.copy(creation = null) }
+    }
+    /** Refresh only media choices in the same editor generation; never replaces the draft session. */
+    fun refreshCreateMedia(epoch: Long, generation: Long, node: String, storage: String, content: String): Boolean {
+        val c = mutableState.value.creation ?: return false
+        if (c.epoch != epoch || c.generation != generation || c.node != node || content !in listOf("iso", "vztmpl")) return false
+        val key = storage to content
+        if (c.sample) {
+            val rows = mutableState.value.storageContent.value?.takeIf { it.key.node == node && it.key.storage == storage }?.volumes ?: return false
+            mutableState.update { it.copy(creation = c.copy(volumes = c.volumes + (key to ReadSection.loaded(rows.filter { it.content == content }, clock(), sample = true)))) }
+        } else {
+            mutableState.update { it.copy(creation = c.copy(volumes = c.volumes + (key to ReadSection()))) }
+            readForCreate(CreateRead.Volumes(storage, content))
+        }
+        return true
+    }
+    fun readForCreate(read: CreateRead) {
+        val c = mutableState.value.creation ?: return
+        if (c.sample) return
+        val conn = connection ?: return
+        if (read is CreateRead.Volumes) {
+            val section = c.volumes[read.storage to read.content]
+            if (section?.loading == true || (section?.value != null && section.error == null && !section.stale)) return
+        }
+        val key = when (read) { is CreateRead.CpuModels -> "cpu"; is CreateRead.CpuFlags -> "flags"; is CreateRead.CheckId -> "check"; else -> read.toString() }
+        createReads.remove(key)?.cancel()
+        val token = (createTokens[key] ?: 0) + 1; createTokens[key] = token
+        fun apply(change: (CreateSession) -> CreateSession) { mutableState.update { st -> if (st.creation?.generation == c.generation && st.connectionEpoch == c.epoch && createTokens[key] == token) st.copy(creation = change(st.creation)) else st } }
+        fun section(old: CreateSession, value: Any? = null, error: String? = null, started: Boolean = false): CreateSession {
+            fun <T> next(previous: ReadSection<T>, v: T?): ReadSection<T> = when { started -> previous.started(); error != null -> previous.failed(error); v != null -> ReadSection.loaded(v, clock()); else -> previous }
+            @Suppress("UNCHECKED_CAST")
+            return when (read) {
+                CreateRead.NextId -> old.copy(nextId = next(old.nextId, (value as? NextIdReply.Free)?.id))
+                is CreateRead.CheckId -> old.copy(idCheck = when { started -> IdCheck.Checking(read.vmid); error != null -> IdCheck.Failed(read.vmid, error); value is NextIdReply.Free -> IdCheck.Free(read.vmid); else -> IdCheck.Taken(read.vmid, "ID ${read.vmid} is in use.") })
+                CreateRead.Pools -> old.copy(pools = next(old.pools, value as? List<PoolChoice>))
+                CreateRead.Bridges -> old.copy(bridges = next(old.bridges, value as? List<BridgeChoice>))
+                is CreateRead.CpuModels -> old.copy(cpuModels = next(old.cpuModels, value as? List<CpuModelChoice>))
+                is CreateRead.CpuFlags -> old.copy(cpuFlags = next(old.cpuFlags, value as? List<CpuFlagChoice>))
+                CreateRead.TagRules -> old.copy(tagRules = next(old.tagRules, value as? ClusterTagRules))
+                is CreateRead.Volumes -> { val k = read.storage to read.content; old.copy(volumes = old.volumes + (k to next(old.volumes[k] ?: ReadSection(), value as? List<StorageVolume>))) }
+            }
+        }
+        apply { section(it, started = true) }
+        createReads[key] = scope.launch {
+            try {
+                if (read is CreateRead.CheckId) delay(400)
+                val value = when (read) {
+                    CreateRead.NextId -> createGateway.nextId(conn, null)
+                    is CreateRead.CheckId -> createGateway.nextId(conn, read.vmid)
+                    CreateRead.Pools -> createGateway.pools(conn)
+                    CreateRead.Bridges -> createGateway.bridges(conn, c.node)
+                    is CreateRead.CpuModels -> createGateway.cpuModels(conn, c.node, read.arch)
+                    is CreateRead.CpuFlags -> createGateway.cpuFlags(conn, c.node, read.arch, read.accel)
+                    CreateRead.TagRules -> createGateway.clusterOptions(conn)
+                    is CreateRead.Volumes -> {
+                        require(read.content in listOf("iso", "vztmpl", "import", "images", "rootdir"))
+                        require(storageChoices(mutableState.value.overview?.storage.orEmpty(), c.node, read.content).any { it.id == read.storage })
+                        createGateway.volumes(conn, c.node, read.storage, read.content)
+                    }
+                }
+                apply { section(it, value) }
+            } catch (e: CancellationException) { throw e }
+            catch (e: SessionExpiredException) { if (mutableState.value.connectionEpoch == c.epoch) expire() }
+            catch (_: Exception) { apply { section(it, error = "Could not read this list. Retry when the connection is available.") } }
+        }
+    }
+    fun captureCreate(request: CreateRequest, profileLabel: String, secrets: SecretState): CreateConfirmation? {
+        val st = mutableState.value
+        val c = st.creation ?: return null
+        if (c.node != request.node || c.kind != request.kind) return null
+        val confirmation = CreateConfirmation(st.connectionEpoch, if (st.demo) DEMO_REMOTE_KEY else st.address,
+            if (st.demo) "Demonstration" else st.address, profileLabel, request.copy(params = request.params.toList()), secrets)
+        val refusal = createRefusal(confirmation, st)
+        if (refusal != null) { mutableState.update { it.copy(powerNotice = refusal) }; return null }
+        capturedCreates[confirmation.confirmationId] = c.generation
+        return confirmation
+    }
+    fun submitCreate(confirmation: CreateConfirmation, secrets: CreateSecrets): Boolean {
+        val st = mutableState.value
+        val c = st.creation
+        if (c == null || capturedCreates[confirmation.confirmationId] != c.generation || c.kind != confirmation.request.kind || c.node != confirmation.request.node || createRefusal(confirmation, st) != null || secrets.state != confirmation.secretsSet || !usedCreateConfirmations.add(confirmation.confirmationId)) { secrets.close(); mutableState.update { it.copy(powerNotice = createRefusal(confirmation, st) ?: "This confirmation is no longer usable. Nothing was sent.") }; return false }
+        val r = confirmation.request
+        val id = newLocalId()
+        fun result(value: CreateResult) { mutableState.update { if (it.connectionEpoch == confirmation.epoch && it.creation?.generation == c.generation) it.copy(creation = it.creation.copy(result = value)) else it } }
+        fun submission(phase: PowerPhase, detail: String, upid: String? = null) {
+            if (mutableState.value.connectionEpoch == confirmation.epoch && createInFlight === confirmation) powerBusy = false
+            if (upid != null) submittedUpids[id] = upid
+            mutableState.update { if (it.connectionEpoch == confirmation.epoch) it.copy(powerBusy = if (createInFlight === confirmation || st.demo) false else it.powerBusy, submissions = listOf(PowerSubmission(id, confirmation.remote, r.node, r.vmid, r.kind.guestKind, r.name, PowerAction.Create, phase, detail, st.demo, upid != null)) + it.submissions) else it }
+        }
+        if (st.demo) { secrets.close(); submission(PowerPhase.Simulated, "Simulated. Nothing was sent."); result(CreateResult.Simulated(r.kind, r.node, r.vmid)); return true }
+        val conn = connection ?: run { secrets.close(); return false }
+        powerBusy = true
+        createInFlight = confirmation; createSecretsInFlight = secrets
+        mutableState.update { it.copy(powerBusy = true) }; result(CreateResult.Sending(r.kind, r.node, r.vmid))
+        createJob = scope.launch {
+            var upid: String? = null
+            try {
+                val reply = try { createGateway.submit(conn, r, secrets) } finally { secrets.close(); createSecretsInFlight = null }
+                if (mutableState.value.connectionEpoch != confirmation.epoch) return@launch
+                when (reply) {
+                    is CreateReply.Rejected -> {
+                        fun target(key: String): FieldId? {
+                            val diskKey = Regex("(?:ide|sata|scsi|virtio)[0-9]+|rootfs|mp[0-9]+")
+                            val parameter = r.params.firstOrNull { it.key == key }
+                            if (diskKey.matches(key) && parameter != null) {
+                                return if (createValueText(parameter.value).contains(",media=cdrom")) {
+                                    if (key == "ide0") CreateFields.DRIVER_DISC else CreateFields.INSTALL
+                                } else CreateFields.disk(key)
+                            }
+                            if (key == "storage") return r.params.firstOrNull { diskKey.matches(it.key) }?.let { CreateFields.disk(it.key, "storage") }
+                            return createErrorTarget(key)
+                        }
+                        val fields = reply.fieldErrors.keys.mapNotNull { k -> target(k)?.let { it to "The server refused this field." } }.toMap()
+                        val serverSaid = reply.fieldErrors.keys.filter { target(it) == null }.associateWith { "The server refused this parameter." }
+                        submission(PowerPhase.Rejected, "The server refused the create request.")
+                        result(CreateResult.Rejected(r.kind, r.node, r.vmid, reply.status, "The server refused the create request.", fields, serverSaid))
+                        return@launch
+                    }
+                    is CreateReply.Accepted -> { upid = reply.upid; submission(PowerPhase.Accepted, "Creating guest.", upid); createInFlight = null; result(CreateResult.Following(r.kind, r.node, r.vmid, id)) }
+                }
+                var attempt = 0
+                var failures = 0
+                while (mutableState.value.connectionEpoch == confirmation.epoch) {
+                    delay(powerFollowDelay(attempt++))
+                    val status = try { createGateway.status(conn, r.node, upid!!) } catch (e: SessionExpiredException) { throw e } catch (e: CancellationException) { throw e } catch (e: GuestPermissionException) {
+                        mutableState.update { it.copy(powerNotice = POWER_FOLLOW_DENIED) }; return@launch
+                    } catch (_: Exception) {
+                        if (++failures >= POWER_FOLLOW_NOTICE_FAILURES) mutableState.update { it.copy(powerNotice = "Reading the task status failed. The create was not sent again.") }
+                        continue
+                    }
+                    failures = 0
+                    if (mutableState.value.connectionEpoch != confirmation.epoch) return@launch
+                    if (status.phase == PowerPhase.Accepted) continue
+                    mutableState.update { it.copy(submissions = it.submissions.map { sub -> if (sub.localId == id) sub.copy(phase = status.phase, detail = status.detail) else sub }) }
+                    val lines = try {
+                        val first = createGateway.taskLog(conn, r.node, upid, 0, 500)
+                        if (first.total > 500) first.lines + createGateway.taskLog(conn, r.node, upid, (first.total - 500).coerceAtLeast(0), 500).lines else first.lines
+                    } catch (e: CancellationException) { throw e } catch (e: SessionExpiredException) { throw e } catch (_: Exception) { emptyList() }
+                    if (mutableState.value.connectionEpoch != confirmation.epoch) return@launch
+                    val outcome = createTaskOutcome(status)
+                    when (outcome) {
+                        CreateTaskOutcome.Succeeded -> result(CreateResult.Succeeded(r.kind, r.node, r.vmid, id, r.start))
+                        is CreateTaskOutcome.FinishedWithWarnings -> result(CreateResult.FinishedWithWarnings(r.kind, r.node, r.vmid, id, outcome.count, createWarningLines(lines)))
+                        is CreateTaskOutcome.Failed -> result(CreateResult.Failed(r.kind, r.node, r.vmid, id, outcome.text, lines.takeLast(20).map { it.text.take(300) }))
+                        else -> { result(CreateResult.Unknown(r.kind, r.node, r.vmid, id, "The task outcome is unknown. It was not sent again.")); return@launch }
+                    }
+                    var last = 0L
+                    for (offset in CREATE_APPEAR_READS_MS) {
+                        delay(offset - last); last = offset
+                        if (mutableState.value.connectionEpoch != confirmation.epoch) return@launch
+                        val overview = refreshCreateInventory(conn, confirmation.epoch)
+                        if (mutableState.value.connectionEpoch != confirmation.epoch) return@launch
+                        val appeared = overview?.guests?.any { it.id == r.vmid && it.node == r.node && it.kind == r.kind.guestKind } == true
+
+                        val appearance = if (appeared) GuestAppearance.Appeared else if (offset == CREATE_APPEAR_DEADLINE_MS) GuestAppearance.NotYet else GuestAppearance.Waiting
+                        mutableState.update { state -> val current = state.creation; if (current?.generation != c.generation) state else state.copy(creation = current.copy(result = when (val old = current.result) { is CreateResult.Succeeded -> old.copy(appearance = appearance); is CreateResult.FinishedWithWarnings -> old.copy(appearance = appearance); is CreateResult.Failed -> old.copy(appearance = appearance); else -> old })) }
+                        if (appeared) break
+                    }
+                    break
+                }
+            } catch (e: SessionExpiredException) { if (mutableState.value.connectionEpoch == confirmation.epoch) expire() }
+            catch (e: CancellationException) { throw e }
+            catch (e: Exception) {
+                val unknown = e is AmbiguousPowerResultException || e is PowerResponseUnclearException || upid != null
+                submission(if (unknown) PowerPhase.Unknown else PowerPhase.Rejected, if (unknown) "Outcome unknown. It was not sent again." else "Nothing was sent.")
+                result(if (unknown) CreateResult.Unknown(r.kind, r.node, r.vmid, id, "The outcome is unknown. It was not sent again. Check the server before trying again.") else CreateResult.Rejected(r.kind, r.node, r.vmid, null, "Could not reach the server. Nothing was sent."))
+            } finally { secrets.close(); if (createInFlight === confirmation) { createInFlight = null; createSecretsInFlight = null; if (mutableState.value.connectionEpoch == confirmation.epoch) { powerBusy = false; mutableState.update { it.copy(powerBusy = false) } } } }
+        }
+        return true
+    }
+    private val createChecks = mutableMapOf<String, Any>()
+
+    /** Shared ordering with manual/live inventory reads; never publishes an older completion. */
+    private suspend fun refreshCreateInventory(conn: Connection, epoch: Long): Overview? {
+        val session = generation
+        val order = ++inventoryOrder
+        try {
+            val fetched = gateway.overview(conn)
+            currentCoroutineContext().ensureActive()
+            if (generation != session || mutableState.value.connectionEpoch != epoch || order != inventoryOrder) return null
+            val overview = requireActiveRemote(conn.remoteKey, adoptRecordedIndex(conn.remoteKey, fetched), DIRECT_PVE_KIND)
+            publishTick(conn.remoteKey, overview, clock())
+            mutableState.update { it.copy(loading = false) }
+            return overview
+        } catch (e: CancellationException) { throw e }
+        catch (e: SessionExpiredException) { if (generation == session && mutableState.value.connectionEpoch == epoch) expire(); throw e }
+        catch (e: Exception) {
+            if (generation == session && mutableState.value.connectionEpoch == epoch && order == inventoryOrder)
+                mutableState.update { it.copy(loading = false, stale = it.overview != null, error = readableError(e)) }
+            return null
+        }
+    }
+
+    fun checkCreateOutcome(localId: String) {
+        val st = mutableState.value
+        val sub = st.submissions.firstOrNull { it.localId == localId && isCreateSubmission(it) && it.phase == PowerPhase.Unknown && !it.resolvedByCheck } ?: return
+        val conn = connection ?: return
+        if (localId in createChecks) return
+        val token = Any(); createChecks[localId] = token
+        val epoch = st.connectionEpoch
+        val serial = st.creation?.generation
+        fun update(check: IdCheck?, checking: Boolean) {
+            mutableState.update { state ->
+                val c = state.creation
+                val old = c?.result as? CreateResult.Unknown
+                if (state.connectionEpoch != epoch || c?.generation != serial || old?.localId != localId || old.vmid != sub.vmid || createChecks[localId] !== token) state
+                else state.copy(creation = c.copy(result = old.copy(checking = checking, check = check ?: old.check)))
+            }
+        }
+        update(null, true)
+        scope.launch {
+            try {
+                val reply = createGateway.nextId(conn, sub.vmid)
+                val overview = if (reply is NextIdReply.Taken) refreshCreateInventory(conn, epoch) else null
+                if (mutableState.value.connectionEpoch != epoch) return@launch
+                val exists = overview?.guests?.any { it.id == sub.vmid } == true
+                val check = if (reply is NextIdReply.Free) IdCheck.Free(sub.vmid) else IdCheck.Taken(sub.vmid, "ID ${sub.vmid} is in use. Look at it in the Fleet before trying again.")
+                mutableState.update { it.copy(submissions = it.submissions.map { s -> if (s.localId == localId && (reply is NextIdReply.Free || exists)) s.copy(resolvedByCheck = true) else s }) }
+                update(check, false)
+            } catch (e: CancellationException) { throw e }
+            catch (e: SessionExpiredException) { if (mutableState.value.connectionEpoch == epoch) expire() }
+            catch (_: Exception) { update(IdCheck.Failed(sub.vmid, "The check did not answer. The create was not sent again."), false) }
+            finally { update(null, false); if (createChecks[localId] === token) createChecks.remove(localId) }
         }
     }
 
@@ -884,6 +1216,7 @@ class Workspace(
         state.submissions.filter { !it.simulated && (it.phase == PowerPhase.Accepted || it.phase == PowerPhase.Unknown) }.forEach {
             lostResults.add(LostPowerResult(newLocalId(), current.address, it.node, it.vmid, it.kind, it.name, it.action, it.phase == PowerPhase.Accepted, now))
         }
+        createInFlight?.let { c -> lostResults.add(LostPowerResult(newLocalId(), current.address, c.request.node, c.request.vmid, c.request.kind.guestKind, c.request.name, PowerAction.Create, false, now)) }
         val inFlight = powerInFlight
         if (powerBusy && inFlight != null) {
             lostResults.add(LostPowerResult(newLocalId(), current.address, inFlight.node, inFlight.resource.vmid, inFlight.kind, inFlight.name, inFlight.action, false, now))
@@ -1518,8 +1851,13 @@ class Workspace(
     }
 
     private fun closeSession() {
+        closeCreateSession()
+        createSecretsInFlight?.close()
+        createSecretsInFlight = null
         consoleKeeper.closeAll(sealOutstanding = true)
         recordLostResults()
+        createInFlight = null
+        createJob?.cancel(); createJob = null
         powerInFlight = null
         captureNotice = null
         powerFollowJobs.values.toList().forEach { it.cancel() }
@@ -1671,9 +2009,10 @@ class Workspace(
      */
     private suspend fun directQuietTick(current: Connection, session: Long, epoch: Long) {
         val remote = current.remoteKey
+        val order = ++inventoryOrder
         val fetched = gateway.overview(current)
         currentCoroutineContext().ensureActive()
-        if (!liveCurrent(session, epoch)) return
+        if (!liveCurrent(session, epoch) || order != inventoryOrder) return
         val overview = requireActiveRemote(remote, adoptRecordedIndex(remote, fetched), DIRECT_PVE_KIND)
         if (!liveCurrent(session, epoch)) return
         val readAt = clock()
@@ -1709,7 +2048,7 @@ class Workspace(
         val fresh = selected?.let { findCurrentGuest(remote, it, overview.guests) }
         mutableState.update {
             it.copy(
-                overview = overview, updatedAt = readAt,
+                overview = overview, updatedAt = readAt, loading = false,
                 // Nothing recorded when the server had refreshed nothing since the last read: the charts move only with new data.
                 history = if (step.fresh) step.history else it.history,
                 selected = if (fresh != null && it.selected?.resource == fresh.resource) fresh else it.selected,
@@ -1882,6 +2221,9 @@ class Workspace(
     private fun cancelReadViews() {
         permissionsGeneration++; servicesGeneration++; updatesGeneration++; syslogGeneration++; storageGeneration++
         permissionsJob?.cancel(); servicesJob?.cancel(); updatesJob?.cancel(); storageJob?.cancel()
+        storageWorkbench.cancel()
+        storageActionWorkbench.cancel()
+        storageSendOwner = null
         syslogJob?.cancel(); syslogMoreJob?.cancel(); syslogLoop?.cancel()
         syslogFollowing = true; syslogCatchUp = false; syslogFailures = 0; lastSyslogDurationMs = 0; syslogSawSlow = false; demoSyslogTotal = DEMO_SYSLOG_START_TOTAL
     }
@@ -1992,6 +2334,7 @@ class Workspace(
      * that one storage to read it, so this runs on a click and never in a loop. The storage index is not called.
      */
     fun selectStorage(node: String, storage: String, content: String? = null) {
+        storageActionWorkbench.selectionChanged()
         val state = mutableState.value
         if (!state.connected && !state.demo) return
         val remote = currentRemote() ?: return
@@ -2013,7 +2356,7 @@ class Workspace(
         val key = StorageKey(remote, node, storage)
         val previous = state.storageContent.takeIf { section -> section.value.let { it != null && it.key == key && it.filter == content } } ?: ReadSection()
         if (state.demo) {
-            val rows = demoStorageContent(recorded).filter { content == null || it.content == content }
+            val rows = (storageActionWorkbench.demoVolumes(key) ?: demoStorageContent(recorded)).filter { content == null || it.content == content }
             mutableState.update { it.copy(storageSelection = key, storageContent = ReadSection.loaded(StorageContentView(key, content, rows), clock(), sample = true)) }
             return
         }
@@ -2046,7 +2389,26 @@ class Workspace(
         storageGeneration++
         storageJob?.cancel()
         mutableState.update { it.copy(storageSelection = null, storageContent = ReadSection()) }
+        storageWorkbench.clearHistory()
     }
+
+    /**
+     * Read the storage configuration (`GET /storage`, allowlisted fields only) into [StorageViewState.config]. It activates
+     * nothing. Demo gives sample rows; PDM is refused. A call while one runs is ignored.
+     */
+    fun loadStorageConfig() = storageWorkbench.loadConfig()
+
+    /**
+     * Read one recorded storage's usage history (`GET /nodes/{node}/storage/{storage}/rrddata`) into
+     * [StorageViewState.history]. It activates nothing. Refused before HTTP for PDM, a storage the inventory does not list, a
+     * stale inventory and a node that is not online.
+     */
+    fun loadStorageHistory(node: String, storage: String, timeframe: String = "hour", cf: String = "AVERAGE") =
+        storageWorkbench.loadHistory(node, storage, timeframe, cf)
+
+    /** One storage history read for the chart lens, same shape as [readHistory]. It leaves the page's state alone. */
+    suspend fun readStorageHistory(node: String, storage: String, timeframe: String, cf: String): InspectionSection<List<HistoryPoint>> =
+        storageWorkbench.read(node, storage, timeframe, cf)
 
     // ---- System log ----
 
@@ -2353,7 +2715,7 @@ class Workspace(
         closeSession()
         mutableState.value = WorkspaceState(error = message)
     }
-    override fun close() = disconnect()
+    override fun close() { mutationLeases.unregister(foregroundView); disconnect() }
 }
 
 fun readableError(error: Exception): String = when (error) {

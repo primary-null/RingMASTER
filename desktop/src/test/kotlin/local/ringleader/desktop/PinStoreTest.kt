@@ -231,4 +231,50 @@ class PinStoreTest {
         when (outcome) { TaskOutcome.Running -> "running"; TaskOutcome.Succeeded -> "OK"; else -> "failed" },
         outcome,
     )
+
+    @Test fun tokensHiddenInThePathAreRefused() {
+        val token = "An address cannot include a key or token in its path."
+        assertEquals(token, serviceAddressError("http://192.0.2.8:8080/app;jsessionid=0A1B2C3D"))
+        assertEquals(token, serviceAddressError("http://192.0.2.8/api/key=abc123"))
+        assertEquals(token, serviceAddressError("http://192.0.2.8/share/eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.c2lnbmF0dXJl"))
+        assertEquals(token, serviceAddressError("http://192.0.2.8:8123/api/webhook/a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7"))
+        assertEquals("An address cannot include a query or a fragment.", serviceAddressError("http://192.0.2.8/a%3Ftoken=x"))
+        assertEquals("An address cannot include a query or a fragment.", serviceAddressError("http://192.0.2.8/a%23frag"))
+        // Ordinary paths, a UUID and long plain words stay allowed.
+        assertNull(serviceAddressError("http://192.0.2.8:32400/web"))
+        assertNull(serviceAddressError("http://192.0.2.8:3000/d/abc123/home-dashboard"))
+        assertNull(serviceAddressError("http://192.0.2.8/item/123e4567-e89b-12d3-a456-426614174000"))
+        assertNull(serviceAddressError("http://192.0.2.8/a-very-long-path-segment-made-of-plain-words"))
+        assertNull(serviceAddressError("http://[2001:db8::5]:8123"))
+    }
+
+    @Test fun theFormCanStripWhatWouldBeRefused() {
+        assertEquals("http://192.0.2.8:3000/admin", withoutSecretParts("http://192.0.2.8:3000/admin?token=secret"))
+        assertEquals("http://192.0.2.8/ui", withoutSecretParts("http://192.0.2.8/ui#session"))
+        assertEquals("http://192.0.2.8/app/x", withoutSecretParts("http://192.0.2.8/app;jsessionid=1/x"))
+        assertNull(withoutSecretParts("http://192.0.2.8/ok"), "nothing to strip")
+        assertNull(withoutSecretParts("http://user:pw@192.0.2.8/?q=1"), "what is left is still refused")
+        assertNull(withoutSecretParts("http://192.0.2.8/hook/a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7?x=1"), "a token in the path stays")
+    }
+
+    @Test fun aPinnedServiceCanBeCorrected() {
+        val file = Files.createTempDirectory("ringmaster-pins").resolve("pins.json")
+        val store = PinStore(file)
+        assertNull(store.addService(profileA, other, "AdGuard UI", "http://192.0.2.8"))
+        assertNull(store.addService(profileA, other, "DNS", "http://192.0.2.8:3000"))
+        store.toggleGuest(profileA, guest)
+        val first = store.list(profileA)[0]
+        assertNull(store.updateService(profileA, first.id, "  AdGuard Home ", "http://192.0.2.8:80"))
+        assertEquals("That address is already pinned for this guest.", store.updateService(profileA, first.id, "AdGuard Home", "http://192.0.2.8:3000"))
+        assertEquals("An address cannot include a query or a fragment.", store.updateService(profileA, first.id, "AdGuard Home", "http://192.0.2.8/?token=x"))
+        assertNotNull(store.updateService(profileA, first.id, "", "http://192.0.2.8"))
+        assertEquals("This pin is no longer there.", store.updateService(profileA, "33333333-3333-3333-3333-333333333333", "X", "http://192.0.2.8"))
+        assertEquals("This pin is no longer there.", store.updateService(profileA, store.list(profileA)[2].id, "X", "http://192.0.2.8"), "a guest pin has no address")
+        val again = PinStore(file).list(profileA)
+        assertEquals(first.id, again[0].id)
+        assertEquals("AdGuard Home", again[0].serviceName)
+        assertEquals("http://192.0.2.8:80", again[0].serviceUrl)
+        assertEquals(listOf(PIN_SERVICE, PIN_SERVICE, PIN_GUEST), again.map { it.target }, "order is kept")
+        assertFalse(Files.readString(file).contains("token"))
+    }
 }

@@ -1,5 +1,9 @@
+@file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 package local.ringleader.desktop
 
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -133,8 +137,10 @@ import local.ringleader.core.writeOwnerOnlyText
             if (reduce) listState.scrollToItem(target) else listState.animateScrollToItem(target)
         } finally { ownScroll.value = false }
     }
-    Column(modifier.fillMaxHeight().background(Tech.Canvas).border(1.dp, Tech.Edge)) {
-        Column(Modifier.phosphor(bloom).progressTrace(progress.takeIf { running }, 12f).fillMaxWidth().height(148.dp).padding(horizontal = 12.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+    BoxWithConstraints(modifier.fillMaxHeight()) {
+    val headerHeight = (maxHeight * .40f).coerceAtMost(164.dp)
+    Column(Modifier.fillMaxSize().background(Tech.Canvas).border(1.dp, Tech.Edge)) {
+        Column(Modifier.phosphor(bloom).progressTrace(progress.takeIf { running }, 12f).fillMaxWidth().height(headerHeight).verticalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(taskTypeName(log.task.type), Modifier.weight(1f), fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold, fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 MiniAction("Close") { workspace.closeTaskLog() }
@@ -179,7 +185,7 @@ import local.ringleader.core.writeOwnerOnlyText
             }
         }
         HorizontalDivider(color = Tech.Edge, thickness = 1.dp)
-        Row(Modifier.fillMaxWidth().height(40.dp).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        FlowRow(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical=4.dp), itemVerticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement=Arrangement.spacedBy(4.dp)) {
             // Following only means something while the task can still write lines.
             if (log.status?.running != false) MiniAction(if (following) "Following" else "Follow", primary = following) { workspace.setTaskLogFollowing(!following) }
             val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
@@ -194,6 +200,7 @@ import local.ringleader.core.writeOwnerOnlyText
     }
 }
 
+}
 @Composable private fun LogLine(line: TaskLogLine) {
     Row(Modifier.fillMaxWidth().heightIn(min = 18.dp).padding(vertical = 1.dp), verticalAlignment = Alignment.Top) {
         Text(line.n.toString(), Modifier.width(56.dp).padding(end = 8.dp), color = Tech.Muted, fontFamily = FontFamily.Monospace, fontSize = 12.sp, lineHeight = 16.sp, textAlign = TextAlign.End, maxLines = 1)

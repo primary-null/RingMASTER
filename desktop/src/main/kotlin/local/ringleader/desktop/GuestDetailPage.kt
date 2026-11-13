@@ -102,15 +102,18 @@ internal var guestHeaderProbe: (() -> Unit)? = null
             if (onConsole) immersive?.exit()
         }
     }
+    LayoutViewport(if (tab == "Console" && !consoleImmersive) 480.dp else 0.dp) {
     Column(Modifier.fillMaxSize().then(if (tab != "Console") Modifier.verticalScroll(scroll) else Modifier).padding(if (consoleImmersive) 0.dp else 16.dp),verticalArrangement = Arrangement.spacedBy(if (consoleImmersive) 0.dp else Tech.Space12)) {
         if (!consoleImmersive) {
         SideEffect { guestHeaderProbe?.invoke() }
-        Row(Modifier.fillMaxWidth(),horizontalArrangement = Arrangement.spacedBy(Tech.Space12),verticalAlignment=androidx.compose.ui.Alignment.CenterVertically) {
-            MiniAction("‹ Fleet", onClick = onBack)
-            Row(Modifier.weight(1f),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-                Text(guest.name,fontSize=18.sp,maxLines=1,overflow=androidx.compose.ui.text.style.TextOverflow.Ellipsis,modifier=Modifier.weight(1f).identity())
-                Text("${guest.kind} ${guest.id} · ${guest.node}",Modifier.identity(),color=Tech.Muted,style=MaterialTheme.typography.labelSmall)
+        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            HelpTip(guest.name, identity = true) {
+                Text(guest.name, Modifier.fillMaxWidth().identity(), fontSize=18.sp, maxLines=1, overflow=androidx.compose.ui.text.style.TextOverflow.Ellipsis)
             }
+            Text("${guest.kind} ${guest.id} · ${guest.node}", Modifier.identity(), color=Tech.Muted, style=MaterialTheme.typography.labelSmall, maxLines=1, overflow=androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+        }
+        FlowRow(Modifier.fillMaxWidth(), horizontalArrangement=Arrangement.spacedBy(6.dp), verticalArrangement=Arrangement.spacedBy(6.dp), itemVerticalAlignment=androidx.compose.ui.Alignment.CenterVertically) {
+            MiniAction("‹ Fleet", onClick = onBack)
             ActivityStatusTag(guest.status,guest.status=="running",guest.resource,anchor = TagAnchor(guest.resource))
             GuestMarks(guest, 2) { hidden ->
                 HelpTip(hidden.joinToString(", ")) {
@@ -143,7 +146,7 @@ internal var guestHeaderProbe: (() -> Unit)? = null
             WebUiAction(if (state.demo || state.kind == PDM_KIND || guest.scope.isNotEmpty()) null else PveWebUi.guest(state.address, guest.kind, guest.id))
             HelpTip("Refresh") { MiniAction("↻", enabled = !state.inspectionLoading, width = 30.dp) { workspace.inspectGuest() } }
         }
-        if (serviceDialog && pins != null && connectionKey != null) PinServiceDialog(guest, report?.addresses?.value.orEmpty().mapNotNull(::reportedHost).distinct(), { serviceDialog = false }) { serviceName, url ->
+        if (serviceDialog && pins != null && connectionKey != null) PinServiceDialog(guest, report, state.demo, { serviceDialog = false }) { serviceName, url ->
             val error = pins.addService(connectionKey, guest, serviceName, url)
             if (error == null) serviceDialog = false
             error
@@ -294,15 +297,13 @@ internal var guestHeaderProbe: (() -> Unit)? = null
                         rows.forEach { backup ->
                             val (verify, warn) = backupVerificationText(backup)
                             TechPanel(Modifier.fillMaxWidth(), padding = 0.dp) {
-                            Row(Modifier.fillMaxWidth().height(32.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Tech.Space12)) {
-                                Text(dateAndAge(backup.time), modifier = Modifier.weight(2f), fontFamily = Tech.Mono, fontSize = 10.sp, color = Tech.Muted)
-                                Text(iec(backup.size?.toDouble()), modifier = Modifier.weight(1f), fontSize = Tech.Label)
-                                Text(backup.storage, modifier = Modifier.weight(1f), fontSize = Tech.Label)
-                                Text(verify, modifier = Modifier.weight(1.4f), fontFamily = Tech.Mono, fontSize = 10.sp, color = if (warn) Tech.Amber else Tech.Muted, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
-                                Box(Modifier.weight(1f), contentAlignment = androidx.compose.ui.Alignment.CenterStart) {
-                                    if (backup.protected) AttentionTag("Protected", help = "This backup is locked. Proxmox will not remove it until the protection is cleared.")
-                                    else Text("\u2014", fontSize = 10.sp, color = Tech.Muted)
-                                }
+                            FlowRow(Modifier.fillMaxWidth().padding(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(Tech.Space12), verticalArrangement = Arrangement.spacedBy(6.dp), itemVerticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                                Text(dateAndAge(backup.time), fontFamily = Tech.Mono, fontSize = 10.sp, color = Tech.Muted)
+                                Text(iec(backup.size?.toDouble()), fontSize = Tech.Label)
+                                Text(backup.storage, Modifier.identity(), fontSize = Tech.Label)
+                                Text(verify, fontFamily = Tech.Mono, fontSize = 10.sp, color = if (warn) Tech.Amber else Tech.Muted)
+                                if (backup.protected) AttentionTag("Protected", help = "This backup is locked. Proxmox will not remove it until the protection is cleared.")
+                                else Text("\u2014", fontSize = 10.sp, color = Tech.Muted)
                             }
                             backup.notes?.let { Text(it, fontSize = Tech.Label, color = Tech.Muted) }
                         } }
@@ -353,6 +354,7 @@ internal var guestHeaderProbe: (() -> Unit)? = null
             }
         }
     }
+}
 }
 
 /**
@@ -424,33 +426,16 @@ internal fun nicExtras(p: Map<String, String>): String = listOfNotNull(
     p["mtu"]?.takeIf { it != "1500" && it != "1" }?.let { "MTU $it" },
 ).joinToString("  ·  ")
 
-@Composable private fun PinServiceDialog(guest: Guest, hosts: List<String>, onDismiss: () -> Unit, onPin: (String, String) -> String?) {
-    var name by remember(guest.resource) { mutableStateOf("") }
-    var address by remember(guest.resource) { mutableStateOf("") }
-    var refused by remember(guest.resource) { mutableStateOf<String?>(null) }
-    LaunchedEffect(hosts) { if (address.isEmpty()) hosts.singleOrNull()?.let { address = serviceUrlForHost(it) } }
-    val nameError = if (name.isEmpty()) null else serviceNameError(name)
-    val addressError = if (address.isEmpty()) null else serviceAddressError(address)
-    val ready = serviceNameError(name) == null && serviceAddressError(address) == null
-    val first = remember { androidx.compose.ui.focus.FocusRequester() }
-    // A form: a stray click outside keeps what was typed. Escape is Cancel.
-    TechDialog("Pin a service", onDismiss, width = 440.dp, subtitle = "Opens in the system browser. No username or password is stored.", dismiss = Dismiss.Soft, initialFocus = first, actions = {
-        TechAction("Pin service", active = true, enabled = ready) { refused = onPin(name.trim(), address.trim()) }
-        TechAction("Cancel", onClick = onDismiss)
-    }) {
-        TechField(name, { name = it.take(32) }, "Name", Modifier.focusRequester(first), placeholder = "AdGuard UI", error = nameError)
-        Box(Modifier.fillMaxWidth().identity()) {
-            TechField(address, { address = it.take(200) }, "Address", placeholder = "http://192.0.2.8:3000", error = addressError ?: refused,
-                hint = if (addressError == null && refused == null) "http or https, with a host." else null)
-        }
-        if (hosts.isNotEmpty()) {
-            Text("REPORTED ADDRESSES", fontFamily = Tech.Mono, fontSize = 10.sp, letterSpacing = .8.sp, color = Tech.Muted)
-            hosts.forEach { host ->
-                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(host, Modifier.weight(1f).identity(), fontFamily = Tech.Mono, fontSize = 12.sp, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
-                    MiniAction("Use") { address = serviceUrlForHost(host); refused = null }
-                }
-            }
-        }
+/**
+ * Pin a service for this guest. The form (PinServiceForm.kt) guesses the address from the guest's notes, name and tags,
+ * and can look at the guest's ports on request. Not offered with sample data or in browser mode.
+ */
+@Composable private fun PinServiceDialog(guest: Guest, report: GuestInspection?, demo: Boolean, onDismiss: () -> Unit, onPin: (String, String) -> String?) {
+    val hosts = report?.addresses?.value.orEmpty().mapNotNull(::reportedHost).distinct()
+    val hints = remember(guest.name, guest.tags, report?.hardware?.value) { GuestHints(guest.name, guest.tags, report?.hardware?.value?.fields?.get("description")) }
+    val web = LocalAppHost.current.web
+    key(guest.resource) {
+        ServicePinForm(hints, hosts, canProbe = !demo && !web, onDismiss = onDismiss, onSave = onPin,
+            probeUnavailable = if (demo) "Find services and Test are not offered with sample data." else "Find services and Test need the desktop app.")
     }
 }

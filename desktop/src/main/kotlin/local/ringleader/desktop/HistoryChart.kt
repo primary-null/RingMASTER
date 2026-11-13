@@ -147,7 +147,7 @@ internal class HistoryLoadGate {
     }
 }
 
-private fun historySeriesName(key: String) = when (key) { "cpu" -> "CPU"; "mem" -> "Memory"; "netin" -> "Inbound"; "netout" -> "Outbound"; "diskread" -> "Disk read"; "diskwrite" -> "Disk write"; "maxmem", "memtotal" -> "Total"; "memused" -> "Used"; "swapused" -> "Used"; "swaptotal" -> "Total"; "iowait" -> "IO wait"; "loadavg" -> "Load average"; "pressurecpusome", "pressureiosome", "pressurememorysome" -> "Some"; "pressureiofull", "pressurememoryfull" -> "Full"; else -> key }
+private fun historySeriesName(key: String) = when (key) { "cpu" -> "CPU"; "mem" -> "Memory"; "netin" -> "Inbound"; "netout" -> "Outbound"; "diskread" -> "Disk read"; "diskwrite" -> "Disk write"; "total", "maxmem", "memtotal" -> "Total"; "used", "memused" -> "Used"; "swapused" -> "Used"; "swaptotal" -> "Total"; "iowait" -> "IO wait"; "loadavg" -> "Load average"; "pressurecpusome", "pressureiosome", "pressurememorysome" -> "Some"; "pressureiofull", "pressurememoryfull" -> "Full"; else -> key }
 
 /** What a chart says to a screen reader: its title, the latest value, and the minimum, average and maximum. */
 internal fun historyChartDescription(title: String, latest: String?, min: String?, avg: String?, max: String?): String =
@@ -182,14 +182,16 @@ internal fun historyChartDescription(title: String, latest: String?, min: String
     val axisWidth = 64.dp
     var dragFrom by remember { mutableStateOf<Float?>(null) }
     var dragTo by remember { mutableStateOf<Float?>(null) }
-    val capacity = setOf("maxmem", "memtotal", "swaptotal")
+    val capacity = setOf("maxmem", "memtotal", "swaptotal", "total")
     fun seriesColor(k: String) = if (k in capacity) Tech.Muted else colors[keys.filterNot { it in capacity }.indexOf(k).coerceAtLeast(0) % colors.size]
     val primary = activeKeys.firstOrNull { it !in capacity } ?: activeKeys.firstOrNull()
     val primaryValues = remember(points, primary) { primary?.let { k -> points.mapNotNull { it.values[k]?.takeIf { v -> v.isFinite() } } }.orEmpty() }
     val latest = primary?.let { k -> points.lastOrNull { it.values[k] != null }?.values?.get(k) }
     TechPanel(Modifier.fillMaxWidth(), padding = 10.dp) {
         // One fixed-height header row: title, legend chips (click to hide a series), latest value of the main series.
+        // The title and the legend wrap in a narrow panel (the node inspector); the expand button and the latest value stay at the right.
         Row(Modifier.fillMaxWidth().heightIn(min = 22.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+          FlowRow(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(2.dp), itemVerticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
             Text(title.uppercase(), fontSize = 10.sp, letterSpacing = 1.sp, fontFamily = Tech.Mono, color = Tech.Muted, maxLines = 1)
             keys.forEach { k ->
                 val off = k in hidden
@@ -202,7 +204,7 @@ internal fun historyChartDescription(title: String, latest: String?, min: String
                     Text(historySeriesName(k), fontSize = 10.sp, fontFamily = Tech.Mono, color = if (off) Tech.Muted.copy(alpha = .6f) else Tech.Ink, maxLines = 1)
                 }
             }
-            Spacer(Modifier.weight(1f))
+          }
             if (onExpand != null) {
                 val report = LocalExpandBounds.current
                 Box(Modifier.onGloballyPositioned { report?.invoke(it.boundsInRoot()) }) {

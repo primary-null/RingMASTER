@@ -1,3 +1,4 @@
+@file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 package local.ringleader.desktop
 
 import androidx.compose.ui.focus.focusRequester
@@ -43,7 +44,7 @@ import local.ringleader.core.*
 
         SectionLabel("Scan inside this VM")
         val refusal = guestBluetoothRefusal(guest, directPve = state.kind != PDM_KIND && guest.scope.isEmpty(), hardware = hardware)
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        FlowRow(itemVerticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement=Arrangement.spacedBy(6.dp)) {
             MiniAction(if (scanning) "Scanning…" else "Scan inside VM · ${BT_SCAN_SECONDS_DEFAULT}s", primary = true, enabled = refusal == null && !scanning) { confirm = true }
             Text(refusal ?: "Uses the VM's own Bluetooth adapter. Nothing is paired or connected.",
                 fontSize = 10.sp, lineHeight = 14.sp, fontFamily = Tech.Mono, color = Tech.Muted)
@@ -68,11 +69,12 @@ import local.ringleader.core.*
 }
 
 @Composable private fun AttachmentRow(key: String, kind: String, detail: String, extra: String?) {
-    Row(Modifier.fillMaxWidth().height(34.dp).border(1.dp, Tech.Edge, Tech.Control).background(Tech.Black.copy(alpha = .3f)).padding(horizontal = 10.dp),
-        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text(key, Modifier.width(72.dp), fontFamily = Tech.Mono, fontSize = 11.sp, color = Tech.Amber)
-        Text(kind, Modifier.width(118.dp), fontFamily = Tech.Mono, fontSize = 9.sp, letterSpacing = 1.sp, fontWeight = FontWeight.Bold, color = Tech.Ink)
-        Text(detail, Modifier.weight(1f), fontFamily = Tech.Mono, fontSize = 11.sp, color = Tech.Muted, maxLines = 1)
-        extra?.let { HealthyTag(it, help = "This USB device is attached as USB 3.") }
+    Column(Modifier.fillMaxWidth().border(1.dp, Tech.Edge, Tech.Control).background(Tech.Black.copy(alpha = .3f)).padding(horizontal=10.dp,vertical=8.dp), verticalArrangement=Arrangement.spacedBy(6.dp)) {
+        FlowRow(itemVerticalAlignment=Alignment.CenterVertically, horizontalArrangement=Arrangement.spacedBy(12.dp), verticalArrangement=Arrangement.spacedBy(6.dp)) {
+            Text(key, fontFamily=Tech.Mono, fontSize=11.sp, color=Tech.Amber)
+            Text(kind, fontFamily=Tech.Mono, fontSize=9.sp, letterSpacing=1.sp, fontWeight=FontWeight.Bold, color=Tech.Ink)
+            extra?.let { HealthyTag(it, help="This USB device is attached as USB 3.") }
+        }
+        Text(detail, Modifier.fillMaxWidth().identity(), fontFamily=Tech.Mono, fontSize=11.sp, color=Tech.Muted)
     }
 }

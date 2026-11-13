@@ -10,10 +10,10 @@ import kotlinx.serialization.json.*
  *  GET /nodes/{node}/storage/{storage}/content[?content=<type>]
  *    permission  Datastore.Audit or Datastore.AllocateSpace on /storage/{storage}.
  *    parameters  content (iso, vztmpl, backup, images, rootdir, snippets, import), vmid (not used here).
- *    returns     volid, format, size | approximate-size, used, ctime, vmid, notes, protected, verification {state, upid}, plus
+ *    returns     volid, format, size | approximate-size, used, ctime, vmid, parent, notes, protected, verification {state, upid}, plus
  *                `content` (the volume type), which the plugins set although the schema does not list it.
  *    filtering   Every volume goes through check_volume_access and one the identity may not read is dropped without an error
- *                (see [STORAGE_VISIBILITY_NOTE]). An empty list therefore does not prove an empty storage.
+ *                (see [STORAGE_VISIBILITY_WHY]). An empty list therefore does not prove an empty storage.
  *    activation  volume_list calls activate_storage for this one storage, which can mount NFS or CIFS. That is why a read is
  *                a deliberate click on one storage. The storage index `GET /nodes/{node}/storage` activates every enabled
  *                storage and stays forbidden at the transport.
@@ -30,10 +30,21 @@ const val STORAGE_NOT_RECORDED = "This storage is not in the recorded inventory.
 const val STORAGE_CONTENT_TYPE_REFUSED = "That content type is not one Proxmox VE lists. Nothing was requested."
 const val STORAGE_NODE_NOT_ONLINE = "The node of this storage is not online in the last inventory. Nothing was requested."
 const val STORAGE_CONTENT_ACTIVATES = "Reading a storage's contents asks its node to connect that storage, which can mount it."
-const val STORAGE_VISIBILITY_NOTE =
-    "The server lists only volumes this identity may read. ISOs and templates need Datastore.Audit or Datastore.AllocateSpace; " +
-        "disk images need Datastore.Audit and VM.Config.Disk on the guest; backups need Datastore.AllocateSpace and VM.Backup on the guest; " +
-        "snippets need Datastore.Allocate, which shows everything. An empty list does not prove the storage is empty."
+/**
+ * Why a listing can be short, in two sentences (research section 5, from pve-storage `check_volume_access`). It names the five
+ * rules: ISO images, templates and import files; backups; disks; snippets (Datastore.Allocate reveals everything); and that
+ * hidden volumes are left out without an error. The Storage page's "Why?" tip and the "?" beside the volume count use it.
+ */
+const val STORAGE_VISIBILITY_WHY =
+    "Proxmox lists only the volumes this account may read: ISO images, templates and import files need Datastore.Audit or " +
+        "Datastore.AllocateSpace on the storage, backups also need Datastore.AllocateSpace there plus VM.Backup on their guest, " +
+        "disks need Datastore.Audit plus VM.Config.Disk on their guest, and snippets need Datastore.Allocate, which reveals everything. " +
+        "Volumes it may not read are left out without an error, so a short or empty list does not mean the storage holds nothing more."
+
+/** What the "?" beside the volume count says: the plain reason first, then the rules ([STORAGE_VISIBILITY_WHY]). */
+const val STORAGE_VISIBILITY_HELP =
+    "This list shows the files this account is allowed to see. Proxmox hides the rest, so a short or empty list does not always mean the storage is empty." +
+        "\n\n" + STORAGE_VISIBILITY_WHY
 
 /** Content types Proxmox VE knows for a storage, in the order the filter chips use. */
 val STORAGE_CONTENT_TYPES = listOf("iso", "vztmpl", "backup", "images", "rootdir", "snippets", "import")
@@ -44,7 +55,8 @@ data class StorageKey(val remote: String, val node: String, val storage: String)
 /**
  * One volume. [content] is the volume type, or null when neither the row nor the volume id says. [sizeBytes] is exact;
  * [approximateSizeBytes] stands in for it on storages that cannot measure (an upper bound). [verification] is the last
- * verification state and only Proxmox Backup Server storages report one.
+ * verification state and only Proxmox Backup Server storages report one. [parent] is the base volume of a linked clone, as
+ * the listing names it, or null.
  */
 data class StorageVolume(
     val volid: String,
@@ -58,6 +70,7 @@ data class StorageVolume(
     val notes: String?,
     val protected: Boolean,
     val verification: String?,
+    val parent: String? = null,
 ) {
     val shownSize: Long? get() = sizeBytes ?: approximateSizeBytes
 }
@@ -126,7 +139,7 @@ fun parseStorageContent(raw: String): List<StorageVolume> {
     val seen = HashSet<String>()
     return rows.mapNotNull { element ->
         val row = element as? JsonObject ?: return@mapNotNull null
-        val volid = row.str("volid")?.trim()?.takeIf { it.isNotEmpty() && it.length <= 512 && it.none { c -> c.isISOControl() } } ?: return@mapNotNull null
+        val volid = cleanVolid(row.str("volid")) ?: return@mapNotNull null
         if (!seen.add(volid)) return@mapNotNull null
         val declared = row.str("content")?.trim()?.lowercase()?.takeIf { it.matches(contentTypeName) }
         val verification = (row["verification"] as? JsonObject)?.str("state")?.let { cleanLine(it, 40) }
@@ -142,13 +155,18 @@ fun parseStorageContent(raw: String): List<StorageVolume> {
             notes = cleanLine(row.str("notes"), 240),
             protected = row.flag("protected"),
             verification = verification,
+            parent = cleanVolid(row.str("parent")),
         )
     }
 }
 
+/** A volume id as the listing gives it: trimmed, not empty, at most 512 characters, no control character. Else null. */
+internal fun cleanVolid(value: String?): String? =
+    value?.trim()?.takeIf { it.isNotEmpty() && it.length <= 512 && it.none { c -> c.isISOControl() } }
+
 // ---- sorting and filtering -----------------------------------------------------------------------------------------
 
-private fun naturalName(value: String): String = digits.replace(value.lowercase()) { it.value.padStart(12, '0') }
+internal fun naturalName(value: String): String = digits.replace(value.lowercase()) { it.value.padStart(12, '0') }
 
 private fun <T : Comparable<T>> ordered(
     rows: List<StorageVolume>,

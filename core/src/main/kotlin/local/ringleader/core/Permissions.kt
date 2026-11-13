@@ -216,6 +216,7 @@ data class FeatureRequirement(
     val alsoNote: String? = null,
     /** Extra checks that must all hold before the row is Allowed. Unlike [alsoNeeds], these are not alternatives. */
     val alsoRequires: List<PrivilegeNeed> = emptyList(),
+    val anyOf: List<List<PrivilegeNeed>> = emptyList(),
 )
 
 const val GROUP_TODAY = "In use"
@@ -242,6 +243,13 @@ private fun need(scope: PermissionScope, vararg privileges: String, any: Boolean
  *  - GET /cluster/notifications/endpoints/{gotify,webhook}: Mapping.Audit on /mapping/notifications (sendmail and smtp also accept Mapping.Modify).
  */
 val FEATURE_REQUIREMENTS: List<FeatureRequirement> = listOf(
+    FeatureRequirement("storage-get-files", "Download templates and upload files", GROUP_TODAY, listOf(need(PermissionScope.Storage, "Datastore.AllocateTemplate")), "POST .../aplinfo; POST .../upload"),
+    FeatureRequirement("storage-url", "Download from a URL", GROUP_TODAY, listOf(need(PermissionScope.Storage, "Datastore.AllocateTemplate")), "POST .../download-url; GET .../query-url-metadata", anyOf = listOf(listOf(need(PermissionScope.Node, "Sys.AccessNetwork")), listOf(need(PermissionScope.Root, "Sys.Audit", "Sys.Modify")))),
+    FeatureRequirement("storage-remove", "Remove storage files", GROUP_TODAY, listOf(need(PermissionScope.Storage, "Datastore.Allocate")), "DELETE .../content/{volume}", "Owned backups instead require Datastore.AllocateSpace plus VM.Backup. Disk images and root volumes are never removed."),
+    FeatureRequirement("backup-notes", "Backup notes and protection", GROUP_TODAY, listOf(PrivilegeNeed(PermissionScope.Root, emptyList(), open = true)), "GET and PUT .../content/{volume}", "Read access to the selected backup is required.", anyOf = listOf(listOf(need(PermissionScope.Storage, "Datastore.Allocate")), listOf(need(PermissionScope.Storage, "Datastore.AllocateSpace"), need(PermissionScope.Guest, "VM.Backup")))),
+
+    FeatureRequirement("create-vm", "Create VMs", GROUP_TODAY, listOf(need(PermissionScope.Guest, "VM.Allocate", "VM.Config.Disk", "VM.Config.CPU", "VM.Config.Memory", "VM.Config.Network", "VM.Config.HWType", "VM.Config.Options"), need(PermissionScope.Storage, "Datastore.AllocateSpace"), need(PermissionScope.Sdn, "SDN.Use")), "POST /nodes/{node}/qemu", "Pool VM.Allocate can grant creation. The server checks each chosen resource."),
+    FeatureRequirement("create-ct", "Create containers", GROUP_TODAY, listOf(need(PermissionScope.Guest, "VM.Allocate", "VM.Config.Disk", "VM.Config.CPU", "VM.Config.Memory", "VM.Config.Network", "VM.Config.Options"), need(PermissionScope.Storage, "Datastore.AllocateSpace"), need(PermissionScope.Sdn, "SDN.Use")), "POST /nodes/{node}/lxc", "A privileged container needs Sys.Modify on /. Add to HA needs Sys.Console on /. Start after created needs VM.PowerMgmt."),
     FeatureRequirement("fleet-guests", "Fleet: guest list", GROUP_TODAY, listOf(need(PermissionScope.Guest, "VM.Audit")),
         "GET /cluster/resources; GET .../status/current, .../config, .../snapshot",
         "The server leaves out guests this identity cannot audit instead of refusing the call."),
@@ -508,10 +516,12 @@ fun evaluateFeatures(
     direct: Boolean = true,
     requirements: List<FeatureRequirement> = FEATURE_REQUIREMENTS,
 ): List<FeatureCheck> = requirements.map { requirement ->
-    val labels = requirement.needs.map { it.label() }
+    val labels = requirement.needs.map { it.label() } + if (requirement.anyOf.isEmpty()) emptyList() else listOf(requirement.anyOf.joinToString(" OR ") { branch -> branch.joinToString(" + ") { it.label() } })
     if (!direct) return@map FeatureCheck(requirement, FeatureStatus.Unknown, labels, PERMISSIONS_DIRECT_ONLY)
     if (dump == null) return@map FeatureCheck(requirement, FeatureStatus.Unknown, labels, PERMISSIONS_UNREAD)
-    val outcomes = requirement.needs.map { evaluateNeed(dump, it, targets) }
+    val alternative = requirement.anyOf.map { branch -> branch.map { evaluateNeed(dump, it, targets) } }
+        .filter { it.isNotEmpty() }.minByOrNull { branch -> branch.maxOf { severity.getValue(it.status) } }.orEmpty()
+    val outcomes = requirement.needs.map { evaluateNeed(dump, it, targets) } + alternative
     val worst = outcomes.maxBy { severity.getValue(it.status) }
     val status = outcomes.map { it.status }.maxBy { severity.getValue(it) }
     if (status != FeatureStatus.Allowed) return@map FeatureCheck(requirement, status, labels, describe(worst))

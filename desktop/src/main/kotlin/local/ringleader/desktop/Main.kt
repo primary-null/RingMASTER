@@ -35,12 +35,23 @@ fun main(args: Array<String>) {
         Appearance.load()
         Appearance.useBrowserDisplay()
         local.ringleader.desktop.web.WebServer(options).start(true)
-    } else desktopMain()
+    } else {
+        // One process per config store owns the scheduler. A second launch asks the owner to show its window and exits.
+        val resident = ResidentRuntime.start() ?: return
+        desktopMain(resident)
+    }
 }
 
 @OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
-fun desktopMain() = application {
+fun desktopMain() = desktopMain(null)
+
+@OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
+internal fun desktopMain(resident: ResidentRuntime?) = application {
     remember { ConfigGuard().startup(); Appearance.load() }
+    // Every close path goes through the resident policy: hide to the tray when it is installed and enabled, otherwise quit.
+    val closeWindow: () -> Unit = { if (resident != null) resident.closeRequested() else { ConsoleHost.close(); exitApplication() } }
+    val quitApp: () -> Unit = { if (resident != null) resident.quit() else { ConsoleHost.close(); exitApplication() } }
+    remember { resident?.attach(::exitApplication) }
     // The last placement when its display is still connected, otherwise a size that fits the primary display.
     val windowState = remember {
         val start = initialWindowBounds()
@@ -51,10 +62,21 @@ fun desktopMain() = application {
     var reduce by remember { mutableStateOf(preferences.read()) }
     var settings by remember { mutableStateOf(false) }
     var preferenceError by remember { mutableStateOf(false) }
-    Window(onCloseRequest = { ConsoleHost.close(); exitApplication() }, title = WindowTitle.text, icon = AppIcon.large, onPreviewKeyEvent = { desktopShortcuts?.invoke(it) ?: false },
+    Window(onCloseRequest = closeWindow, visible = resident?.windowVisible ?: true, title = WindowTitle.text, icon = AppIcon.large, onPreviewKeyEvent = { desktopShortcuts?.invoke(it) ?: false },
         // Compose's own undecorated resizer is off (zero thickness): WindowResizeFrame below is the only resizer.
         decoration = WindowDecoration.Undecorated(0.dp), resizable = true, state = windowState) {
         InstallDisplayFit(window, windowState) { Appearance.useDisplay(it) }
+        if (resident != null) {
+            LaunchedEffect(Unit) { resident.installTray() }
+            // Tray Open, tray Schedules and a second launch raise the window above others.
+            LaunchedEffect(resident.raiseToken) {
+                if (resident.raiseToken == 0) return@LaunchedEffect
+                windowState.isMinimized = false
+                window.toFront(); window.requestFocus()
+            }
+            val scheduled = resident.engine?.state?.collectAsState()
+            LaunchedEffect(scheduled?.value?.document, Appearance.showcase, resident.trayStatus) { resident.refreshTray() }
+        }
         // Every maximise goes through here, so the frame has the work area of its current monitor first (Windows).
         fun toggleMaximized() {
             if (windowState.placement == WindowPlacement.Maximized) windowState.placement = WindowPlacement.Floating
@@ -125,9 +147,10 @@ fun desktopMain() = application {
         val host = remember { DesktopAppHost(WindowControls(
             minimize = { windowState.isMinimized = true },
             maximize = { toggleMaximized() },
-            close = { ConsoleHost.close(); exitApplication() }
+            close = closeWindow,
+            quit = quitApp,
         )) }
-        MaterialTheme(colorScheme = ringColors) { CompositionLocalProvider(LocalReduceMotion provides reduce, LocalSetReduceMotion provides { value -> preferences.write(value); reduce=value }) { ThemeCrossfade(Modifier.fillMaxSize()) {  // theme changes crossfade the whole window
+        MaterialTheme(colorScheme = ringColors) { CompositionLocalProvider(LocalResident provides resident, LocalReduceMotion provides reduce, LocalSetReduceMotion provides { value -> preferences.write(value); reduce=value }) { ThemeCrossfade(Modifier.fillMaxSize()) {  // theme changes crossfade the whole window
             val base = androidx.compose.ui.platform.LocalDensity.current
             val composeChrome = native == null && (nativeFailed || !wantNative)
             val fitted = native
@@ -192,13 +215,13 @@ fun desktopMain() = application {
                                 else WindowControl(glyph) { toggleMaximized() }
                             }
                             Box(Modifier.onGloballyPositioned { closeRect = it.frameRect() }) {
-                                WindowControl(WindowGlyph.Close) { ConsoleHost.close();exitApplication() }
+                                WindowControl(WindowGlyph.Close, onClick = closeWindow)
                             }
                         }
                     }
                     if (composeChrome) WindowDraggableArea(Modifier.fillMaxWidth()) { row() } else row()
                 }
-                Box(Modifier.weight(1f)) { RingApp(host, windowState.isMinimized, focused, immersive) }
+                Box(Modifier.weight(1f)) { RingApp(host, windowState.isMinimized, focused, immersive, hidden = !(resident?.windowVisible ?: true)) }
             } } } }
             // Resize edges only while floating; they sit outside the interface-size scaling so they keep their physical width.
             // The native frame answers the same zones from WM_NCHITTEST, so the Compose grabs stay off while it is in.
@@ -209,7 +232,7 @@ fun desktopMain() = application {
 
 private var desktopShortcuts: ((KeyEvent) -> Boolean)? = null
 
-@Composable fun RingApp(host: AppHost, minimized: Boolean = false, focused: Boolean = true, immersive: ImmersiveState? = null, modals: ModalStack? = null) {
+@Composable fun RingApp(host: AppHost, minimized: Boolean = false, focused: Boolean = true, immersive: ImmersiveState? = null, modals: ModalStack? = null, hidden: Boolean = false) {
     val immersiveState = immersive ?: remember { ImmersiveState() }
     // One record of the open overlays for the window shortcuts, the browser key path and the overlays themselves.
     val modalStack = modals ?: remember { ModalStack() }
@@ -223,11 +246,11 @@ private var desktopShortcuts: ((KeyEvent) -> Boolean)? = null
     val base = androidx.compose.ui.platform.LocalDensity.current
     CompositionLocalProvider(androidx.compose.ui.platform.LocalDensity provides androidx.compose.ui.unit.Density(if(host.web) base.density * Appearance.uiScale else base.density, if (host.web) base.fontScale * Appearance.textScale else base.fontScale)) {
     // The motion system (tier, tokens, operating-system preference, the spark overlay) wraps the desktop app.
-    if (!host.web) ProvideMotionSystem { RingLeader(host, minimized, focused) } else ThemeCrossfade(Modifier.fillMaxSize()) { BackdropHost { Surface(Modifier.fillMaxSize(), color = androidx.compose.ui.graphics.Color.Transparent, contentColor = Tech.Ink) { Column { if (!immersiveState.active) Row(Modifier.fillMaxWidth().background(Tech.Raised).padding(6.dp), verticalAlignment = Alignment.CenterVertically) { androidx.compose.foundation.Image(AppIcon.small, contentDescription = null, modifier = Modifier.size(14.dp)); Spacer(Modifier.width(6.dp)); Text("RingMASTER / Browser", color = Tech.Amber, fontSize = 11.sp) }; Box(Modifier.weight(1f)) { RingLeader(host, minimized, focused) } } } } }
+    if (!host.web) ProvideMotionSystem { RingLeader(host, minimized || hidden, focused, hidden) } else ThemeCrossfade(Modifier.fillMaxSize()) { BackdropHost { Surface(Modifier.fillMaxSize(), color = androidx.compose.ui.graphics.Color.Transparent, contentColor = Tech.Ink) { Column { if (!immersiveState.active) Row(Modifier.fillMaxWidth().background(Tech.Raised).padding(6.dp), verticalAlignment = Alignment.CenterVertically) { androidx.compose.foundation.Image(AppIcon.small, contentDescription = null, modifier = Modifier.size(14.dp)); Spacer(Modifier.width(6.dp)); Text("RingMASTER / Browser", color = Tech.Amber, fontSize = 11.sp) }; Box(Modifier.weight(1f)) { RingLeader(host, minimized, focused) } } } } }
     } } }
 }
 
-@Composable private fun RingLeader(host: AppHost, minimized:Boolean, focused:Boolean) {
+@Composable private fun RingLeader(host: AppHost, minimized:Boolean, focused:Boolean, hidden: Boolean = false) {
     val platform = remember { platformLabel() }
     val reduceMotion = LocalReduceMotion.current
     val modals = LocalModalStack.current
@@ -242,6 +265,12 @@ private var desktopShortcuts: ((KeyEvent) -> Boolean)? = null
     val bluetoothScanner = remember { localBluetoothScanner() }
     val vpnSession = remember { VpnSession(scope, local.ringleader.core.localVpnBackend(host.hostActions), host.hostActions) }
     SideEffect { vpnSession.minimized = minimized }
+    // The heading's connection-route tag (ConnectionRouteTag.kt). Browser sessions never run host route reads for it.
+    val routeObserver = remember { ConnectionRouteObserver(scope, if (host.web) null else localRouteProbe(),
+        VpnInventorySource({ vpnSession.snapshot }, vpnSession.backend?.takeUnless { host.web }?.let { backend -> { backend.snapshot() } })) }
+    DisposableEffect(routeObserver) { onDispose { routeObserver.close() } }
+    LaunchedEffect(vpnSession.changes) { if (vpnSession.changes != 0) routeObserver.invalidate() }
+    val routeState by routeObserver.state.collectAsState()
     val toolsSession = remember { ToolsSession(scope) }
     var page by remember { mutableStateOf("Desk") }
     var fleetRequest by remember { mutableStateOf<FleetRequest?>(null) }
@@ -264,7 +293,17 @@ private var desktopShortcuts: ((KeyEvent) -> Boolean)? = null
     val state by workspace.state.collectAsState()
     val deskState by desk.state.collectAsState()
     SideEffect { desk.onWorkspace(state) }
-    if (settingsOpen) SettingsDialog(state, workspace, settingsSection, { settingsSection = it }, { settingsOpen = false }) { host.windowControls?.close?.invoke() }
+    if (settingsOpen) SettingsDialog(state, workspace, settingsSection, { settingsSection = it }, { settingsOpen = false }) { host.windowControls?.quit?.invoke() }
+    val resident = if (host.web) null else LocalResident.current
+    if (resident != null) {
+        // Tray "Schedules" and a second launch can ask for a page.
+        LaunchedEffect(resident.pageRequest) {
+            val wanted = resident.pageRequest ?: return@LaunchedEffect
+            resident.pageRequest = null
+            if (wanted in pagesFor(host)) page = wanted
+        }
+        if (resident.quitPrompt) QuitPrompt(resident)
+    }
     var search by remember { mutableStateOf("") }
     var filter by remember { mutableStateOf("All") }
     var seenEpoch by remember { mutableStateOf(state.connectionEpoch) }
@@ -292,7 +331,7 @@ private var desktopShortcuts: ((KeyEvent) -> Boolean)? = null
             }
         } else if(it.type == KeyEventType.KeyDown && it.isCtrlPressed) {
             val target=when(it.key) { Key.One, Key.Two, Key.Three, Key.Four, Key.Five, Key.Six, Key.Seven, Key.Eight, Key.Nine -> pagesFor(host).getOrNull(listOf(Key.One, Key.Two, Key.Three, Key.Four, Key.Five, Key.Six, Key.Seven, Key.Eight, Key.Nine).indexOf(it.key)); else -> null }
-            if(it.key==Key.Comma) { settingsOpen = true;true } else if(it.key==Key.F && page=="Fleet") { runCatching { searchFocus.requestFocus() };true } else if(target!=null) { page=target;true } else if(it.key==Key.B && it.isShiftPressed) { Appearance.toggleShowcase();true } else if(it.key==Key.Equals || it.key==Key.Plus || it.key==Key.NumPadAdd) { Appearance.zoom(1);true } else if(it.key==Key.Minus || it.key==Key.NumPadSubtract) { Appearance.zoom(-1);true } else if(it.key==Key.Zero || it.key==Key.NumPad0) { Appearance.chooseScale(null);true } else if(it.key==Key.B) { railToggle++;true } else false
+            if(it.key==Key.N && page=="Fleet") { openCreateFromFleet(state, workspace, if(it.isShiftPressed) local.ringleader.core.NewGuestKind.Container else local.ringleader.core.NewGuestKind.Vm);true } else if(it.key==Key.Comma) { settingsOpen = true;true } else if(it.key==Key.F && page=="Fleet") { runCatching { searchFocus.requestFocus() };true } else if(target!=null) { page=target;true } else if(it.key==Key.B && it.isShiftPressed) { Appearance.toggleShowcase();true } else if(it.key==Key.Equals || it.key==Key.Plus || it.key==Key.NumPadAdd) { Appearance.zoom(1);true } else if(it.key==Key.Minus || it.key==Key.NumPadSubtract) { Appearance.zoom(-1);true } else if(it.key==Key.Zero || it.key==Key.NumPad0) { Appearance.chooseScale(null);true } else if(it.key==Key.B) { railToggle++;true } else false
         } else false
     })
     DisposableEffect(host) { host.shortcuts = { Shortcuts.handle(it, pageKeys, modals) }; if (!host.web) desktopShortcuts = host.shortcuts; onDispose { host.shortcuts = null; if(!host.web) desktopShortcuts = null } }
@@ -336,21 +375,18 @@ private var desktopShortcuts: ((KeyEvent) -> Boolean)? = null
         fleetRequest = FleetRequest(guest.resource, if (pin.target == PIN_VIEW) pin.tab ?: "Summary" else "Summary", System.nanoTime())
     }
     val consoleImmersive = LocalImmersive.current?.active == true
+    // The route tag follows the session in view; it reads only while its heading is on screen.
+    val routeContext = when { state.demo -> RouteContext.Demo; host.web -> RouteContext.Browser
+        state.connected && state.address.isNotBlank() -> RouteContext.Server(session.id, state.connectionEpoch, state.address); else -> RouteContext.None }
+    LaunchedEffect(routeContext, page, minimized, consoleImmersive) { routeObserver.update(routeContext, page in sessionPages && !minimized && !consoleImmersive) }
     Row(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         val updateState by DesktopUpdates.checker.state.collectAsState()
         if (!consoleImmersive) NavigationRail(state,page,platform,workspace,railToggle, updateAvailable = !host.web && updateState is UpdateState.Available, onSettings = { settingsOpen = true }, onAbout = { settingsSection = SettingsSection.About; settingsOpen = true }, pins = pins, connectionKey = connectionKey, onPin = ::openPin,
             sessions = sessionsState.open, activeSession = session.id, profiles = deskState.profiles, onSession = sessions::show) { page=it }
         Column(Modifier.weight(1f).fillMaxHeight().padding(if (consoleImmersive) 0.dp else 16.dp), verticalArrangement = Arrangement.spacedBy(if (consoleImmersive) 0.dp else Tech.Space8)) {
             if (!consoleImmersive) {
-            Row(Modifier.fillMaxWidth().height(40.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    // With several connections open, the heading names the one in view.
-                    if (several && page in sessionPages) Text(sessionLabel(state, deskState.profiles.find { it.id == session.profileId }).uppercase(), Modifier.widthIn(max = 260.dp).border(1.dp, Tech.Amber.copy(alpha = .5f), Tech.Control).padding(horizontal = 6.dp, vertical = 2.dp).identity(),
-                        fontFamily = FontFamily.Monospace, fontSize = 10.sp, letterSpacing = 1.sp, color = Tech.Amber, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
-                    Text("WORKSPACE / ${page.uppercase()}${if(page == "Fleet" && state.selected != null) " / ${state.selected!!.kind} ${state.selected!!.id}" else if(page == "Fleet" && state.selectedNode != null) " / ${state.selectedNode}" else ""}", fontFamily = FontFamily.Monospace, fontSize = 10.sp, letterSpacing = 1.5.sp, color = Tech.Muted)
-                    Text(when (page) { "Fleet" -> state.selected?.name ?: state.selectedNode ?: "Fleet overview"; "Storage" -> "Storage contents"; "Activity" -> "Recent activity"; "Scan" -> "Network scan"; "Bluetooth" -> "Nearby devices"; "VPN" -> "Tunnels and VPN"; "Tools" -> "Network tools"; "Under the Hood" -> "Under the Hood"; else -> "Connection desk" }, modifier=Modifier.weight(1f).then(if (page == "Fleet" && (state.selected != null || state.selectedNode != null)) Modifier.identity() else Modifier), fontSize = Tech.Title, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
-                }
-            }
+            WorkspaceHeading(page, state, if (several && page in sessionPages) sessionLabel(state, deskState.profiles.find { it.id == session.profileId }) else null,
+                route = if (page in sessionPages) routeState.forContext(routeContext) else null)
             HorizontalDivider(color = Tech.Edge)
             SaveStatus.problem?.let { problem ->
                 Row(Modifier.fillMaxWidth().border(1.dp, Tech.Amber, Tech.Control).padding(horizontal = 10.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -367,7 +403,9 @@ private var desktopShortcuts: ((KeyEvent) -> Boolean)? = null
                 val motion = LocalMotion.current
                 val pageMs = if (reduceMotion || motion.reduced) 0 else PAGE_TRANSITION_MS
                 val slidePx = with(androidx.compose.ui.platform.LocalDensity.current) { pageSlideDp(reduceMotion, motion).dp.roundToPx() }
-                AnimatedContent(page,transitionSpec = { (fadeIn(tween(pageMs, easing = MotionEase.Standard)) + slideInHorizontally(tween(pageMs, easing = MotionEase.Standard)) { if(ringPages.indexOf(targetState)>ringPages.indexOf(initialState)) slidePx else -slidePx }) togetherWith fadeOut(tween(pageMs)) }) { targetPage ->
+                // Hidden in the notification area: the page leaves composition like switching away (an open console is kept
+                // paused for the Keep consoles time, then closed), and nothing on it animates. Sessions and the scheduler stay.
+                if (!hidden) AnimatedContent(page,transitionSpec = { (fadeIn(tween(pageMs, easing = MotionEase.Standard)) + slideInHorizontally(tween(pageMs, easing = MotionEase.Standard)) { if(ringPages.indexOf(targetState)>ringPages.indexOf(initialState)) slidePx else -slidePx }) togetherWith fadeOut(tween(pageMs)) }) { targetPage ->
                 when (targetPage) {
                     "Fleet" -> ChartLensHost(state, workspace) { InventoryScreen(state, workspace, activeProfile?.let { "${it.displayName} · ${it.origin}" }, search, { search = it }, filter, { filter = it }, { page = "Desk" }, disconnectInView, pins, connectionKey, fleetRequest) { fleetRequest = null } }
                     "Activity" -> ActivityScreen(state, workspace, activeProfile?.let { "${it.displayName} · ${it.origin}" }, { page = "Desk" }, disconnectInView)
@@ -376,11 +414,15 @@ private var desktopShortcuts: ((KeyEvent) -> Boolean)? = null
                     "VPN" -> VpnScreen(vpnSession, if (state.connected) state.address else null, deskState.profiles.map { it.origin }) { scannedSelection = it; desk.discardSecrets(); page = "Desk" }
                     "Tools" -> ToolsScreen(toolsSession)
                     "Under the Hood" -> UnderTheHoodScreen(state)
-                    "Storage" -> StoragePage(state, workspace)
+                    "Storage" -> StoragePage(state, workspace,profileLabel=activeProfile?.displayName ?: "Manual connection")
+                    "Schedules" -> SchedulesScreen(resident, onSettings = { settingsSection = SettingsSection.Background; settingsOpen = true })
                     else -> DeskScreen(state, deskState, desk, scannedSelection, onScan = { page = "Scan" }, sessions = sessionsState.open, activeSession = session.id, sessionNotice = sessionsState.notice,
                         onShowSession = sessions::show, onDisconnectSession = sessions::disconnect) { page = "Fleet" }
                 }
                 }
+                CreateGuestHost(state, workspace, activeProfile?.displayName ?: "Manual connection",
+                    onOpenGuest = { guest -> fleetRequest = FleetRequest(guest.resource, "Summary", System.nanoTime()); page = "Fleet" },
+                    onViewLog = { page = "Activity" })
             }
         }
     }

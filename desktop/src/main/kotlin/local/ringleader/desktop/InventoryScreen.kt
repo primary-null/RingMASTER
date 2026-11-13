@@ -72,7 +72,10 @@ internal fun guestHasPage(state: WorkspaceState, guest: Guest): Boolean = state.
     pins: PinStore? = null, connectionKey: String? = null, fleetRequest: FleetRequest? = null,
     onFleetHandled: () -> Unit = {},
 ) = ProvideMotionBook(state) {
-    InventoryScreenBody(state, workspace, sessionTitle, search, onSearch, filter, onFilter, onConnect, onDisconnect, pins, connectionKey, fleetRequest, onFleetHandled)
+    Column(Modifier.fillMaxSize()) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { CreateGuestActions(state, workspace) }
+        Box(Modifier.weight(1f)) { InventoryScreenBody(state, workspace, sessionTitle, search, onSearch, filter, onFilter, onConnect, onDisconnect, pins, connectionKey, fleetRequest, onFleetHandled) }
+    }
 }
 
 @Composable private fun InventoryScreenBody(
@@ -289,11 +292,11 @@ internal fun guestHasPage(state: WorkspaceState, guest: Guest): Boolean = state.
             SortHeader("ID", "ID", sort, descending, Modifier.width(TableCols.id), onSort = onSort)
             SortHeader("NAME", "Name", sort, descending, Modifier.weight(1f), onSort = onSort)
             SortHeader("CPU", "CPU", sort, descending, Modifier.width(TableCols.cpu), onSort = onSort)
-            SortHeader("MEMORY", "Memory", sort, descending, Modifier.width(TableCols.mem), onSort = onSort)
+            if (TableCols.mem > 0.dp) SortHeader("MEMORY", "Memory", sort, descending, Modifier.width(TableCols.mem), onSort = onSort)
             if (TableCols.net > 0.dp) SortHeader("NET", "Net", sort, descending, Modifier.width(TableCols.net), onSort = onSort)
             if (TableCols.disk > 0.dp) Text("DISK", Modifier.width(TableCols.disk), fontSize = 10.sp, letterSpacing = 1.sp, color = Tech.Muted, fontFamily = Tech.Mono, maxLines = 1)
-            SortHeader("UPTIME", "Uptime", sort, descending, Modifier.width(TableCols.up), onSort = onSort)
-            Text("STATUS", Modifier.width(TableCols.status), fontSize = 10.sp, letterSpacing = 1.sp, color = Tech.Muted, fontFamily = Tech.Mono)
+            if (TableCols.up > 0.dp) SortHeader("UPTIME", "Uptime", sort, descending, Modifier.width(TableCols.up), onSort = onSort)
+            Text("STATUS", Modifier.width(TableCols.status), fontSize = 10.sp, letterSpacing = 1.sp, color = Tech.Muted, fontFamily = Tech.Mono, maxLines = 1)
         }
         val narrowed = search.isNotBlank() || filter != "All"
         val remoteGroups = overview.remotes.filter { it.product != "pbs" }.associate { remote ->
@@ -406,12 +409,34 @@ internal class RowClicks(private val window: Long = doubleClickMillis()) {
 internal fun guestOpenTab(guest: Guest, demo: Boolean = false) = if (guest.status == "running" && !guest.template && !demo) "Console" else "Summary"
 
 /** Shared column widths so header and rows line up. Wider lists get wider CPU and memory cells and a network column. */
-private data class Cols(val tile: Dp = 22.dp, val id: Dp = 40.dp, val cpu: Dp = 138.dp, val mem: Dp = 132.dp, val net: Dp = 0.dp, val disk: Dp = 0.dp, val up: Dp = 66.dp, val status: Dp = 84.dp, val gap: Dp = 12.dp)
+private data class Cols(val tile: Dp = 22.dp, val id: Dp = 40.dp, val cpu: Dp = 138.dp, val mem: Dp = 132.dp, val net: Dp = 0.dp, val disk: Dp = 0.dp, val up: Dp = 66.dp, val status: Dp = 84.dp, val gap: Dp = 12.dp,
+    /** The node name cell of a node header row (it spans the ID and the start of the name column). */
+    val node: Dp = 120.dp,
+    /** How many chips (marks, then tags) a row may show beside the name; the rest is "+n". Decided by the room the name column has. */
+    val chips: Int = 3) {
+    /** The width of every fixed column, the gaps between the columns and the row's padding: what the name column does not get. */
+    val fixed: Dp get() {
+        val widths = listOf(tile, id, cpu, mem, net, disk, up, status).filter { it > 0.dp }
+        return widths.fold(0.dp) { sum, w -> sum + w } + gap * widths.size + 20.dp
+    }
+}
 private val LocalCols = staticCompositionLocalOf { Cols() }
-private fun colsFor(width: Dp) = when {
-    width >= 1250.dp -> Cols(cpu = 210.dp, mem = 170.dp, net = 100.dp, disk = 96.dp)
-    width >= 1000.dp -> Cols(net = 100.dp)
-    else -> Cols()
+
+/**
+ * The columns for a list [width] units wide. A table that does not fit squeezes the name column to nothing, and the name
+ * is what a row is for: the uptime goes first, then the memory column, so the name column keeps at least about 120 units.
+ * The number of chips beside the name follows the room that is left.
+ */
+private fun colsFor(width: Dp): Cols {
+    val cols = when {
+        width >= 1250.dp -> Cols(cpu = 210.dp, mem = 170.dp, net = 100.dp, disk = 96.dp)
+        width >= 1000.dp -> Cols(net = 100.dp)
+        width >= 720.dp -> Cols()
+        width >= 560.dp -> Cols(cpu = 100.dp, mem = 112.dp, up = 0.dp, node = 100.dp)
+        else -> Cols(cpu = 84.dp, mem = 0.dp, up = 0.dp, status = 76.dp, node = 90.dp)
+    }
+    val room = width - cols.fixed
+    return cols.copy(chips = when { room >= 330.dp -> 3; room >= 250.dp -> 2; room >= 190.dp -> 1; else -> 0 })
 }
 
 internal fun shortUptime(seconds: Long?): String = when {
@@ -433,9 +458,9 @@ internal fun shortUptime(seconds: Long?): String = when {
         .drawBehind { if (selected) drawRect(Tech.Amber, size = androidx.compose.ui.geometry.Size(2.dp.toPx(), size.height)); if (focused) focusRing() }.padding(horizontal = 10.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(TableCols.gap)) {
         Box(Modifier.width(TableCols.tile), contentAlignment = Alignment.Center) { Box(Modifier.size(7.dp).background(if (online) Tech.Green else if (member == null) Tech.Muted else Tech.Red)) }
-        Text(node.uppercase().ifBlank { "UNKNOWN" }, fontFamily = Tech.Mono, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp, modifier = Modifier.width(TableCols.id + 80.dp).identity(), maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(node.uppercase().ifBlank { "UNKNOWN" }, fontFamily = Tech.Mono, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp, modifier = Modifier.width(TableCols.node).identity(), maxLines = 1, overflow = TextOverflow.Ellipsis)
         Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text("$count guests", fontSize = 10.sp, color = Tech.Muted, fontFamily = Tech.Mono, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(if (count == 1) "1 guest" else "$count guests", fontSize = 10.sp, color = Tech.Muted, fontFamily = Tech.Mono, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
             member?.haState?.takeIf { !it.equals(member.status, ignoreCase = true) }?.let { state ->
                 TechTag(state, haTagTint(state), help = "HA state. $MEMBERSHIP_HA_NOTE")
             }
@@ -446,15 +471,15 @@ internal fun shortUptime(seconds: Long?): String = when {
         }
         val used = latestMemory(series, member?.memoryBytes)
         val cap = series?.samples?.lastOrNull()?.memMax ?: member?.maxMemoryBytes
-        Text(when {
+        if (TableCols.mem > 0.dp) Text(when {
             used != null && cap != null && cap > 0L -> "${gib(used)} / ${gib(cap)} GiB"
             cap != null && cap > 0L -> "${gib(cap)} GiB"
             else -> "—"
         }, fontSize = 10.sp, fontFamily = Tech.Mono, color = Tech.Muted, modifier = Modifier.width(TableCols.mem), maxLines = 1)
         if (TableCols.net > 0.dp) Spacer(Modifier.width(TableCols.net))
         if (TableCols.disk > 0.dp) Spacer(Modifier.width(TableCols.disk))
-        Spacer(Modifier.width(TableCols.up))
-        Text(if (online) "ONLINE" else member?.status?.uppercase() ?: "", fontSize = 10.sp, fontFamily = Tech.Mono, color = if (online) Tech.Green else Tech.Muted, modifier = Modifier.width(TableCols.status))
+        if (TableCols.up > 0.dp) Spacer(Modifier.width(TableCols.up))
+        Text(if (online) "ONLINE" else member?.status?.uppercase() ?: "", fontSize = 10.sp, fontFamily = Tech.Mono, color = if (online) Tech.Green else Tech.Muted, modifier = Modifier.width(TableCols.status), maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -558,10 +583,16 @@ private fun guestLockMark(guest: Guest): GuestMark? {
             Box(Modifier.width(TableCols.tile)) { IdentityTile(if (guest.kind == "VM") "VM" else "CT", guest.template) }
             Text("${guest.id}", fontFamily = Tech.Mono, fontSize = 11.sp, color = if (isSelected) Tech.Amber else Tech.Muted, modifier = Modifier.width(TableCols.id).identity())
             Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text(guest.name.ifBlank { "Guest ${guest.id}" }, fontWeight = FontWeight.SemiBold, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false).identity())
+                // The name keeps what the chips leave; the full name is in the tip, and the chips beyond the room are "+n" with theirs.
+                Box(Modifier.weight(1f, fill = false)) {
+                    HelpTip(guest.name.ifBlank { "Guest ${guest.id}" }, identity = true) {
+                        Text(guest.name.ifBlank { "Guest ${guest.id}" }, fontWeight = FontWeight.SemiBold, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.identity())
+                    }
+                }
                 if (stale) Text("STALE", fontSize = 9.sp, fontFamily = Tech.Mono, color = Tech.Amber)
-                GuestMarks(guest, if (guest.template) 2 else 3) { hidden ->
-                    Text("+${hidden.size}", fontSize = 9.sp, color = Tech.Muted, fontFamily = Tech.Mono)
+                val chips = (if (guest.template) minOf(2, TableCols.chips) else TableCols.chips).coerceAtLeast(if (guestPriorityMarks(guest).isNotEmpty()) 1 else 0)
+                GuestMarks(guest, chips) { hidden ->
+                    HelpTip(hidden.joinToString(", ")) { Text("+${hidden.size}", fontSize = 9.sp, color = Tech.Muted, fontFamily = Tech.Mono, maxLines = 1) }
                 }
             }
             Row(Modifier.width(TableCols.cpu), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -569,7 +600,7 @@ private fun guestLockMark(guest: Guest): GuestMark? {
                 Text(percent(cpu), fontSize = 11.sp, fontFamily = Tech.Mono, color = if (cpu != null) ramp(cpu) else Tech.Muted,
                     modifier = Modifier.width(40.dp), textAlign = androidx.compose.ui.text.style.TextAlign.End)
             }
-            Column(Modifier.width(TableCols.mem), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            if (TableCols.mem > 0.dp) Column(Modifier.width(TableCols.mem), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                 if (fraction != null && mem != null && memMax != null) {
                     Text("${gib(mem)} / ${gib(memMax)} GiB", fontSize = 10.sp, fontFamily = Tech.Mono, color = Tech.Ink.copy(alpha = .85f), maxLines = 1)
                     UsageBar(fraction, Modifier.fillMaxWidth())
@@ -589,8 +620,12 @@ private fun guestLockMark(guest: Guest): GuestMark? {
                     UsageBar(memoryFraction(disk.first, disk.second), Modifier.fillMaxWidth())
                 } else Text(metrics?.diskLimitBytes?.takeIf { it > 0L }?.let { "${gib(it)} GiB" } ?: "—", fontSize = 10.sp, fontFamily = Tech.Mono, color = Tech.Muted, maxLines = 1)
             }
-            Text(if (running) shortUptime(metrics?.uptimeSeconds) else "—", fontSize = 11.sp, fontFamily = Tech.Mono, color = Tech.Muted, modifier = Modifier.width(TableCols.up), maxLines = 1)
+            if (TableCols.up > 0.dp) Text(if (running) shortUptime(metrics?.uptimeSeconds) else "—", fontSize = 11.sp, fontFamily = Tech.Mono, color = Tech.Muted, modifier = Modifier.width(TableCols.up), maxLines = 1)
             Box(Modifier.width(TableCols.status)) { ActivityStatusTag(guest.status.ifBlank { "unknown" }, running, guest.resource, anchor = if (isSelected) RowAnchor(guest.resource) else null) }
+        }
+        if (TableCols.mem == 0.dp || TableCols.up == 0.dp) FlowRow(Modifier.fillMaxWidth().background(background).padding(start=10.dp,end=10.dp,bottom=6.dp).clickable { onSelect(guest) }, horizontalArrangement=Arrangement.spacedBy(12.dp)) {
+            if (TableCols.mem == 0.dp) Text("Memory ${gib(mem)} / ${gib(memMax)} GiB",fontSize=10.sp,fontFamily=Tech.Mono,color=Tech.Muted)
+            if (TableCols.up == 0.dp) Text("Uptime ${if (running) shortUptime(metrics?.uptimeSeconds) else "?"}",fontSize=10.sp,fontFamily=Tech.Mono,color=Tech.Muted)
         }
         Box(Modifier.fillMaxWidth().height(1.dp).background(Tech.Edge.copy(alpha = .45f)))
     }
@@ -598,9 +633,11 @@ private fun guestLockMark(guest: Guest): GuestMark? {
 
 @Composable private fun GuestDetailsPanel(state: WorkspaceState, workspace: Workspace, onOpenDetails: () -> Unit, onOpenConsole: () -> Unit, onPower: (PowerAction) -> Unit, pins: PinStore? = null, connectionKey: String? = null, onEngineProof: (Guest) -> Unit) {
     val guest = state.selected
-    Column(Modifier.fillMaxSize().padding(12.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(Tech.Space8)) {
+    val member = selectedRecordedMember(state)
+    // The body scrolls; the power actions of a guest are pinned under it, so they are in reach at any window height.
+    Column(Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(Tech.Space8)) {
+    Column(Modifier.weight(1f).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(Tech.Space8)) {
         SectionLabel("Inspector")
-        val member = selectedRecordedMember(state)
         if (member != null && guest == null) {
             NodeInspector(state, member, workspace)
         } else if (guest == null) {
@@ -608,12 +645,17 @@ private fun guestLockMark(guest: Guest): GuestMark? {
             Text("Select a guest or node for details", fontSize = 11.sp, color = Tech.Muted)
         } else {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Tech.Space12)) {
-                Text(guest.name.ifBlank { "Guest ${guest.id}" }, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false).identity())
+                Box(Modifier.weight(1f, fill = false)) {
+                    HelpTip(guest.name.ifBlank { "Guest ${guest.id}" }, identity = true) {
+                        Text(guest.name.ifBlank { "Guest ${guest.id}" }, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.identity())
+                    }
+                }
                 ActivityStatusTag(guest.status.ifBlank { "unknown" }, guest.status == "running", guest.resource, anchor = TagAnchor(guest.resource))
             }
             Text(listOfNotNull("${guest.kind.uppercase()} ${guest.id}", guest.node.ifBlank { "unknown node" }, guest.scope.takeIf { it.isNotEmpty() }?.let { "PDM remote $it" }).joinToString("  ·  "),
                 Modifier.identity(), fontFamily = FontFamily.Monospace, fontSize = Tech.Label, color = Tech.Muted, maxLines = 2, overflow = TextOverflow.Ellipsis)
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            // Wraps: with Console the five actions are wider than the panel (340 units, 400 on a wide window), and Close was squeezed to "CL".
+            FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp), itemVerticalAlignment = Alignment.CenterVertically) {
                 if (state.kind != PDM_KIND && guest.scope.isEmpty()) MiniAction("Open details", primary = true, onClick = onOpenDetails)
                 // Open details is the one amber action here. Console lights up when a guest is selected, then settles.
                 if (guest.kind == "VM" && state.kind != PDM_KIND && guest.scope.isEmpty()) ArrivalAction("Console", guest.resource, onClick = onOpenConsole)
@@ -665,8 +707,6 @@ private fun guestLockMark(guest: Guest): GuestMark? {
                     Column(Modifier.weight(1f)) { Text("UPTIME", fontSize = 9.sp, color = Tech.Muted, fontFamily = Tech.Mono); Text(shortUptime(guest.metrics?.uptimeSeconds), fontSize = 12.sp, fontFamily = Tech.Mono) }
                 }
             }
-            SectionLabel("Power")
-            PowerControls(state, guest, onPower)
             if (state.demo) Text("SAMPLE DETAILS", fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = Tech.Amber)
             state.overview?.remotes?.firstOrNull { it.scope == guest.scope && it.stale }?.let { remote ->
                 Text("Stale remote data. ${remote.error.orEmpty()}", color = Tech.Amber, fontSize = Tech.Label, maxLines = 3, overflow = TextOverflow.Ellipsis)
@@ -680,10 +720,11 @@ private fun guestLockMark(guest: Guest): GuestMark? {
             val disk = if (running) guestDiskUsage(details?.diskBytes?.takeIf { it > 0L } ?: guest.metrics?.diskBytes, diskLimit) else null
             val facts = listOf(Triple(if (disk != null) "Disk" else "Disk size", if (disk != null) "${bytes(disk.first)} / ${bytes(disk.second)}" else diskLimit?.takeIf { it > 0L }?.let(::bytes) ?: "—", disk?.let { memoryFraction(it.first, it.second) }),
                 Triple("Node", guest.node, null), Triple("Template", if (guest.template) "Yes" else "No", null))
-            Row(Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                facts.forEach { (label, value, fraction) -> Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            // Each fact is as wide as its value and the row wraps: three equal thirds cut "6.4 GiB / 64.0 GiB" to "6.4 GiB / 64.0".
+            FlowRow(Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                facts.forEach { (label, value, fraction) -> Column(Modifier.widthIn(max = 280.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     Text(label.uppercase(), fontSize = 9.sp, lineHeight = 11.sp, letterSpacing = 1.sp, color = Tech.Muted, fontFamily = Tech.Mono)
-                    Text(value, fontSize = 11.sp, lineHeight = 14.sp, fontFamily = Tech.Mono, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    HelpTip(value, identity = label == "Node") { Text(value, fontSize = 11.sp, lineHeight = 14.sp, fontFamily = Tech.Mono, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = if (label == "Node") Modifier.identity() else Modifier) }
                     if (fraction != null) UsageBar(fraction, Modifier.fillMaxWidth())
                 } }
             }
@@ -691,6 +732,14 @@ private fun guestLockMark(guest: Guest): GuestMark? {
             details?.provenance?.let { Text(it, fontSize = 11.sp, color = Tech.Muted); if (guest.kind == "VM") Text(PDM_DISK_NOTE, fontSize = 11.sp, color = Tech.Muted) }
 
         }
+    }
+    if (guest != null) {
+        HorizontalDivider(color = Tech.Edge)
+        Column(Modifier.heightIn(max = 190.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(Tech.Space8)) {
+            SectionLabel("Power")
+            PowerControls(state, guest, onPower)
+        }
+    }
     }
 }
 
@@ -776,19 +825,24 @@ private fun guestLockMark(guest: Guest): GuestMark? {
     val report = sharedStorageReport(state.overview?.storage.orEmpty().filter { it.remote == member.remote })
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(member.name, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, softWrap = false, modifier = Modifier.weight(1f, fill = false).identity())
+            Box(Modifier.weight(1f, fill = false)) {
+                HelpTip(member.name, identity = true) {
+                    Text(member.name, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, softWrap = false, modifier = Modifier.identity())
+                }
+            }
             member.haState?.takeIf { !it.equals(member.status, ignoreCase = true) }?.let { state ->
                 TechTag(state, haTagTint(state), help = "HA state. $MEMBERSHIP_HA_NOTE")
             }
             StatusTag(member.status.ifBlank { "unknown" }, member.status == "online")
         }
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp), itemVerticalAlignment = Alignment.CenterVertically) {
             if (liveNodeReadAvailable(state)) MiniAction("Refresh", primary = true, enabled = !state.nodeStatusLoading, onClick = workspace::refreshNodeStatus)
             Spacer(Modifier.weight(1f))
             if (state.kind != PDM_KIND && !state.demo && member.status == "online") MiniAction("Shell") { shell = true }
             WebUiAction(if (state.demo || state.kind == PDM_KIND) null else PveWebUi.node(state.address, member.name))
             MiniAction("Close", onClick = workspace::clearMember)
         }
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) { CreateGuestActions(state, workspace, member.name) }
         if (state.demo) Text(RECORDED_SAMPLE_CAPTION, fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = Tech.Amber)
         HorizontalDivider(color = Tech.Edge)
         val nodeSeries = state.history.nodes[member.name]

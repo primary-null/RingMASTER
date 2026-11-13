@@ -23,6 +23,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
@@ -329,7 +330,7 @@ fun Modifier.identity(): Modifier = composed {
     val radius by animateDpAsState(target.dp, tween(if (LocalReduceMotion.current) 0 else 320))
     val measured = this.onSizeChanged { heightPx = it.height }
     if (!on && radius.value == 0f) measured
-    else measured.hoverable(interaction).then(if (on && !revealed) Modifier.semantics { contentDescription = "Hidden" } else Modifier)
+    else measured.hoverable(interaction).then(if (on && !revealed) Modifier.clearAndSetSemantics { contentDescription = "Hidden" } else Modifier)
         .blur(radius, BlurredEdgeTreatment.Unbounded)
 }
 

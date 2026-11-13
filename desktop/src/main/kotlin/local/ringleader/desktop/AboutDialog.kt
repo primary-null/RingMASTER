@@ -112,6 +112,7 @@ import java.nio.file.Path
 
 /** The held-back wipe: lists what goes, keeps plugins, and only runs after CLEAR is typed. */
 @Composable private fun ClearEverythingDialog(onCancel: () -> Unit, onWiped: () -> Unit) {
+    val resident = LocalResident.current
     var typed by remember { mutableStateOf("") }
     var failed by remember { mutableStateOf<List<String>?>(null) }
     var clearing by remember { mutableStateOf(false) }
@@ -127,7 +128,9 @@ import java.nio.file.Path
             clearing = true
             // Off the UI thread: forgetting remembered secrets can wait on the password safe.
             scope.launch {
-                val left = withContext(Dispatchers.IO) { AppData.clearAll() }
+                val left = withContext(Dispatchers.IO) {
+                    resident?.clearData({ AppData.clearAll() }) ?: AppData.clearAll()
+                }
                 if (left.isEmpty()) onWiped() else {
                     failed = left
                     clearing = false

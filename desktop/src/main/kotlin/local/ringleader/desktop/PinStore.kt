@@ -153,7 +153,42 @@ internal fun serviceAddressError(url: String): String? {
     if (uri.rawUserInfo != null || uri.userInfo != null) return "An address cannot include a username or password."
     if ('?' in trimmed || '#' in trimmed || uri.rawQuery != null || uri.rawFragment != null) return "An address cannot include a query or a fragment."
     if (uri.host.isNullOrBlank()) return "Use an http or https address with a host."
+    pathSecretError(uri.rawPath.orEmpty())?.let { return it }
     return null
+}
+
+/** A JSON Web Token: three base64url parts, the first starting with `eyJ` ({"). */
+private val JWT_SEGMENT = Regex("eyJ[A-Za-z0-9_-]{8,}[.][A-Za-z0-9_-]{8,}([.][A-Za-z0-9_-]*)?")
+private val UUID_SEGMENT = Regex("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+
+/**
+ * A token can hide in the path too: `;jsessionid=…`, a `key=value` segment, an encoded `?` or `#`, a JSON Web Token,
+ * or a long random segment (a webhook id or an API key). Those are refused so pins.json never holds one. A UUID is
+ * an identifier, not a secret, and is allowed.
+ */
+internal fun pathSecretError(rawPath: String): String? {
+    val lower = rawPath.lowercase()
+    if ("%3f" in lower || "%23" in lower) return "An address cannot include a query or a fragment."
+    if (';' in rawPath || '=' in rawPath || "%3b" in lower || "%3d" in lower) return "An address cannot include a key or token in its path."
+    val tokenLike = rawPath.split('/').any { segment ->
+        JWT_SEGMENT.matches(segment) || (segment.length >= 32 && !UUID_SEGMENT.matches(segment) &&
+            segment.all { it.isLetterOrDigit() || it == '-' || it == '_' } && segment.count { it.isDigit() } >= 2 && segment.count { it.isLetter() } >= 2)
+    }
+    return if (tokenLike) "An address cannot include a key or token in its path." else null
+}
+
+/**
+ * [url] without what [serviceAddressError] refuses for secrecy: the query, the fragment and `;` parameters. Null when
+ * there is nothing to strip, or when what is left would still be refused.
+ */
+internal fun withoutSecretParts(url: String): String? {
+    val trimmed = url.trim()
+    val cut = trimmed.indexOfFirst { it == '?' || it == '#' }.let { if (it < 0) trimmed else trimmed.substring(0, it) }
+    val schemeEnd = cut.indexOf("://")
+    val pathStart = if (schemeEnd < 0) -1 else cut.indexOf('/', schemeEnd + 3)
+    val clean = if (pathStart < 0) cut else cut.substring(0, pathStart) + cut.substring(pathStart).split('/').joinToString("/") { it.substringBefore(';') }
+    if (clean == trimmed || serviceAddressError(clean) != null) return null
+    return clean
 }
 
 /** Host portion of a reported guest address ("192.0.2.8", "192.0.2.8/24", "100.64.0.7 (Tailscale)"). */
@@ -220,6 +255,22 @@ class PinStore(private val file: Path = pinsFile()) {
         val current = list(connectionKey)
         if (current.any { it.target == PIN_SERVICE && it.serviceUrl == cleanUrl && it.matches(guest) }) return "That address is already pinned for this guest."
         replace(connectionKey, current + pin(guest, PIN_SERVICE, serviceName = cleanName, serviceUrl = cleanUrl))
+        return null
+    }
+
+    /** Changes a pinned service's name and address. Null when stored; otherwise why not. The same rules as [addService]. */
+    fun updateService(connectionKey: String, id: String, name: String, url: String): String? {
+        refuse()?.let { return it }
+        if (!keyOk(connectionKey)) return "This pin cannot be changed."
+        serviceNameError(name)?.let { return it }
+        serviceAddressError(url)?.let { return it }
+        val current = list(connectionKey)
+        val pin = current.firstOrNull { it.id == id && it.target == PIN_SERVICE } ?: return "This pin is no longer there."
+        val cleanUrl = url.trim()
+        if (current.any { it.id != id && it.target == PIN_SERVICE && it.serviceUrl == cleanUrl && it.guestKind == pin.guestKind && it.vmid == pin.vmid && it.scope == pin.scope }) {
+            return "That address is already pinned for this guest."
+        }
+        replace(connectionKey, current.map { if (it.id == id) it.copy(serviceName = name.trim(), serviceUrl = cleanUrl) else it })
         return null
     }
 

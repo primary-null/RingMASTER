@@ -202,12 +202,18 @@ fun parseNodeStatus(node: String, body: String): NodeLiveStatus {
     )
 }
 
-/** Exact `/nodes` and `/nodes/{node}/storage` reads. The storage index activates storage, so it is never a direct path we send. */
+/**
+ * Exact `/nodes`, `/nodes/{node}/storage` and `/nodes/{node}/storage/{storage}/status` reads, never sent as direct paths. The
+ * storage index activates every enabled storage on the node. So does one storage's status read: pve-storage `read_status`
+ * calls `storage_info` for every id and then picks one (research section 6). A trailing slash does not make either allowed.
+ */
 internal fun isForbiddenNodeRead(path: String): Boolean {
-    val bare = path.substringBefore('?')
+    val bare = path.substringBefore('?').trimEnd('/')
     if (bare == "/api2/json/nodes") return true
-    return bare.matches(Regex("^/api2/json/nodes/[^/]+/storage$"))
+    return bare.matches(forbiddenStorageRead)
 }
+
+private val forbiddenStorageRead = Regex("^/api2/json/nodes/[^/]+/storage(/[^/]+/status)?$")
 
 fun selectedRecordedMember(state: WorkspaceState): RecordedMember? {
     val name = state.selectedNode ?: return null
