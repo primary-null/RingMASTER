@@ -1,0 +1,25 @@
+RingMASTER
+Copyright (C) 2026 primary-null
+
+This program is free software: you can redistribute it and/or modify it
+under the terms of the GNU Affero General Public License, version 3 only,
+as published by the Free Software Foundation.
+
+This program is distributed in the hope that it will be useful, but
+WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public
+License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program (the LICENSE file). If not, see
+<https://www.gnu.org/licenses/>.
+
+SPDX-License-Identifier: AGPL-3.0-only
+Source code: https://github.com/primary-null/RingMASTER
+
+RingMASTER 0.25.0 and earlier were published under the Apache License,
+Version 2.0. Those versions stay available under that licence. Every later
+version is under the GNU Affero General Public License, version 3 only.
+
+Third-party components keep their own licences. They are listed in
+desktop/resources/common/THIRD-PARTY-NOTICES.txt.

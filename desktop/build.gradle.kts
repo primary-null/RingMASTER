@@ -1,0 +1,162 @@
+import org.jetbrains.compose.desktop.application.dsl.TargetFormat
+
+plugins {
+    kotlin("jvm")
+    id("org.jetbrains.kotlin.plugin.compose")
+    id("org.jetbrains.compose")
+}
+val generatedVersionDir = layout.buildDirectory.dir("generated/sources/appVersion/kotlin")
+val generateAppVersion by tasks.registering {
+    val appVersion = project.version.toString()
+    inputs.property("appVersion", appVersion)
+    outputs.dir(generatedVersionDir)
+    doLast {
+        val file = generatedVersionDir.get().file("local/ringleader/desktop/AppVersion.kt").asFile
+        file.parentFile.mkdirs()
+        file.writeText("package local.ringleader.desktop\n\ninternal object AppVersion { const val value = \"$appVersion\" }\n")
+    }
+}
+kotlin {
+    jvmToolchain(21)
+    sourceSets.main { kotlin.srcDir(generateAppVersion) }
+}
+// The app's own licence travels inside the app jar, so About can show it on every platform and in browser mode.
+// Its own folder and name: other jars also carry a LICENSE at their root.
+tasks.processResources {
+    from(rootProject.file("LICENSE")) { into("legal"); rename { "RingMASTER-LICENSE.txt" } }
+}
+dependencies {
+    implementation("org.jetbrains.jediterm:jediterm-core:3.69")
+    testImplementation(kotlin("test"))
+    implementation(project(":core"))
+    testImplementation(testFixtures(project(":core")))
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
+    implementation("io.ktor:ktor-server-cio:3.6.0")
+    implementation("io.ktor:ktor-server-netty:3.6.0")
+    implementation("io.ktor:ktor-server-websockets:3.6.0")
+    implementation(compose.desktop.currentOs)
+    implementation(compose.material3)
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-swing:1.11.0")
+    implementation("me.friwi:jcefmaven:152.0.6")
+    implementation("net.java.dev.jna:jna:5.19.1")
+}
+// Windows Bluetooth helper (Rust, native/ringmaster-bt). Built when cargo is available on a Windows build host and
+// shipped through the app resources; without it the app falls back to the bundled PowerShell scanner.
+val bluetoothHelper = layout.projectDirectory.file("resources/windows/ringmaster-bt.exe")
+val buildBluetoothHelper by tasks.registering {
+    val crate = rootProject.layout.projectDirectory.dir("native/ringmaster-bt").asFile
+    val home = System.getProperty("user.home")
+    val cargo = File(home, ".cargo/bin/cargo.exe").takeIf { it.isFile }
+        ?: System.getenv("PATH").orEmpty().split(File.pathSeparator).map { File(it, "cargo.exe") }.firstOrNull { it.isFile }
+    val windowsHost = System.getProperty("os.name").startsWith("Windows")
+    val out = bluetoothHelper.asFile
+    inputs.dir(File(crate, "src")); inputs.file(File(crate, "Cargo.toml")); inputs.file(File(crate, "Cargo.lock"))
+    outputs.file(out)
+    onlyIf("Windows host with cargo") { windowsHost && cargo != null }
+    doLast {
+        // The GNU toolchain's self-contained tools (dlltool, linker) live next to the target's rustlib.
+        val selfContained = File(home, ".rustup/toolchains").listFiles().orEmpty()
+            .map { File(it, "lib/rustlib/x86_64-pc-windows-gnu/bin/self-contained") }.filter { it.isDirectory }
+        val pb = ProcessBuilder(cargo!!.path, "build", "--release", "--locked", "--manifest-path", File(crate, "Cargo.toml").path).inheritIO()
+        pb.environment()["PATH"] = (listOf(cargo.parentFile.path) + selfContained.map { it.path } + System.getenv("PATH")).joinToString(File.pathSeparator)
+        // A forced progress bar writes only carriage returns. The build queue captures that pipe and the compile stalls.
+        pb.environment()["CARGO_TERM_PROGRESS_WHEN"] = "never"
+        // Panic locations would otherwise carry this computer's paths (and so the account name) into the shipped exe.
+        // The later, more specific prefix wins. The \u001f-separated form keeps paths with spaces intact.
+        // +crt-static has to live here. Cargo uses only one rustflags source, and this variable wins over .cargo/config.toml.
+        pb.environment()["CARGO_ENCODED_RUSTFLAGS"] = listOf(
+            "-Ctarget-feature=+crt-static",
+            "--remap-path-prefix=$home=~",
+            "--remap-path-prefix=${crate.path}=ringmaster-bt",
+        ).joinToString("\u001f")
+        check(pb.start().waitFor() == 0) { "cargo build failed for native/ringmaster-bt" }
+        out.parentFile.mkdirs()
+        File(crate, "target/release/ringmaster-bt.exe").copyTo(out, overwrite = true)
+    }
+}
+tasks.matching { it.name == "prepareAppResources" }.configureEach { dependsOn(buildBluetoothHelper) }
+
+// Windows notification helper (Rust, native/ringmaster-notify): WinRT app notifications under RingMASTER's own
+// AppUserModelID. Built the same way as the Bluetooth helper and shipped beside it. Without it the app reports
+// Windows notifications as unsupported; the in-app notification center is unaffected.
+val notifyHelper = layout.projectDirectory.file("resources/windows/ringmaster-notify.exe")
+val buildNotifyHelper by tasks.registering {
+    val crate = rootProject.layout.projectDirectory.dir("native/ringmaster-notify").asFile
+    val home = System.getProperty("user.home")
+    val cargo = File(home, ".cargo/bin/cargo.exe").takeIf { it.isFile }
+        ?: System.getenv("PATH").orEmpty().split(File.pathSeparator).map { File(it, "cargo.exe") }.firstOrNull { it.isFile }
+    val windowsHost = System.getProperty("os.name").startsWith("Windows")
+    val out = notifyHelper.asFile
+    inputs.dir(File(crate, "src")); inputs.file(File(crate, "Cargo.toml")); inputs.file(File(crate, "Cargo.lock"))
+    outputs.file(out)
+    onlyIf("Windows host with cargo") { windowsHost && cargo != null }
+    doLast {
+        // Unlike the Bluetooth task, the GNU "self-contained" folders are not put on PATH: a linker found on PATH
+        // makes rustc assume an external MinGW and drop its own CRT objects, which fails to link ("cannot find
+        // crt2.o") when more than one toolchain is installed. rustc finds its self-contained linker by itself.
+        // Output is drained into the Gradle log; inheriting the daemon's stdio stalled on a full pipe.
+        val pb = ProcessBuilder(cargo!!.path, "build", "--release", "--locked", "--manifest-path", File(crate, "Cargo.toml").path)
+            .redirectErrorStream(true)
+            .redirectInput(ProcessBuilder.Redirect.from(File(if (windowsHost) "NUL" else "/dev/null")))
+        pb.environment()["PATH"] = (listOf(cargo.parentFile.path) + System.getenv("PATH")).joinToString(File.pathSeparator)
+        pb.environment()["CARGO_TERM_PROGRESS_WHEN"] = "never"
+        pb.environment()["CARGO_TERM_COLOR"] = "never"
+        // Same reasons as the Bluetooth helper: static CRT, and no build-host paths (account name) in the shipped exe.
+        pb.environment()["CARGO_ENCODED_RUSTFLAGS"] = listOf(
+            "-Ctarget-feature=+crt-static",
+            "--remap-path-prefix=$home=~",
+            "--remap-path-prefix=${crate.path}=ringmaster-notify",
+        ).joinToString("\u001f")
+        val process = pb.start()
+        process.inputStream.bufferedReader().useLines { lines -> lines.forEach { logger.lifecycle("cargo: {}", it.take(400)) } }
+        check(process.waitFor() == 0) { "cargo build failed for native/ringmaster-notify" }
+        out.parentFile.mkdirs()
+        File(crate, "target/release/ringmaster-notify.exe").copyTo(out, overwrite = true)
+    }
+}
+tasks.matching { it.name == "prepareAppResources" }.configureEach { dependsOn(buildNotifyHelper) }
+
+compose.desktop {
+    application {
+        mainClass = "local.ringleader.desktop.MainKt"
+        nativeDistributions {
+            targetFormats(TargetFormat.Deb, TargetFormat.Rpm, TargetFormat.Msi)
+            appResourcesRootDir.set(project.layout.projectDirectory.dir("resources"))
+            packageName = "ringmaster"
+            packageVersion = project.version.toString()
+            description = "RingMASTER desktop infrastructure client"
+            vendor = "RingMASTER"
+            // Without this the packages say only "Copyright (C) <year>", with no holder.
+            copyright = "Copyright (C) 2026 primary-null"
+            licenseFile.set(rootProject.file("LICENSE"))
+            modules("java.net.http", "jdk.crypto.ec", "jdk.unsupported", "java.management", "java.naming", "java.logging")
+            linux {
+                shortcut = true
+                menuGroup = "System;"
+                appCategory = "System"
+                debMaintainer = "RingMASTER <285952344+primary-null@users.noreply.github.com>"
+                rpmLicenseType = "AGPL-3.0-only"
+                iconFile.set(project.file("icons/ringmaster.png"))
+            }
+            windows {
+                // Per-user install: no administrator prompt; Start menu and desktop shortcuts.
+                perUserInstall = true
+                iconFile.set(project.file("icons/ringmaster.ico"))
+                menu = true
+                menuGroup = "RingMASTER"
+                shortcut = true
+                dirChooser = false
+                // Fixed so each newer MSI upgrades the installed one in place.
+                upgradeUuid = "3f6c2a7e-8f4b-4d1e-9b2a-52c0d7e1a9b4"
+            }
+        }
+    }
+}
+
+tasks.test {
+    useJUnitPlatform()
+    systemProperty("ringleader.buildVersion", project.version.toString())
+    // Skia unpacks its native library under user.home/.skiko by default. Keep it in the build folder so tests never
+    // write to the real home and still run for accounts whose home is not writable (sandboxed CI and build runners).
+    systemProperty("skiko.data.path", layout.buildDirectory.dir("skiko").get().asFile.absolutePath)
+}

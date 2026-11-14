@@ -1,0 +1,22 @@
+.gradle/
+.kotlin/
+**/build/
+.idea/
+*.log
+.local/
+__pycache__/
+*.py[cod]
+
+# Rust helper build output; the exe is rebuilt by :desktop:buildBluetoothHelper
+native/*/target/
+desktop/resources/windows/ringmaster-bt.exe
+desktop/resources/windows/ringmaster-notify.exe
+
+# makepkg working copies next to the PKGBUILD
+packaging/arch/src/
+packaging/arch/pkg/
+packaging/arch/*.tar.gz
+packaging/arch/*.pkg.tar.zst
+packaging/arch/LICENSE
+packaging/arch/NOTICE
+packaging/arch/ringmaster.png

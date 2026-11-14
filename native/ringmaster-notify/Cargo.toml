@@ -1,0 +1,30 @@
+[package]
+name = "ringmaster-notify"
+version = "0.1.0"
+edition = "2024"
+
+# Same windows/serde_json versions as ringmaster-bt, so both helpers build from one set of crates.
+[dependencies]
+serde_json = "1.0.154"
+windows = { version = "0.58", features = [
+    "Foundation",
+    "Data_Xml_Dom",
+    "UI_Notifications",
+    "Win32_Foundation",
+    "Win32_Storage_EnhancedStorage",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+    "Win32_System_WinRT",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_PropertiesSystem",
+] }
+
+# Small, self-contained helper: size-optimised, no unwinding tables, symbols stripped.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

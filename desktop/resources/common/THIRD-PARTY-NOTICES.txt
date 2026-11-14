@@ -1,0 +1,64 @@
+RingMASTER third-party notices
+==============================
+
+RingMASTER itself is licensed under the GNU Affero General Public License,
+version 3 only (AGPL-3.0-only). The components below are not RingMASTER's
+own work. Each keeps its own licence, and each of those licences allows
+the component to be shipped with an AGPL-3.0 program.
+
+JediTerm (org.jetbrains.jediterm:jediterm-core 3.69)
+  Terminal emulation for container, node and serial consoles.
+  Copyright JetBrains s.r.o. and contributors.
+  License: GNU Lesser General Public License, version 3 (LGPL-3.0).
+  https://github.com/JetBrains/jediterm
+  https://www.gnu.org/licenses/lgpl-3.0.html
+
+  RingMASTER uses JediTerm unmodified, as a separate library jar
+  (app\jediterm-core-3.69-<hash>.jar) in the install folder. You may
+  replace it with a compatible build of your own: overwrite that file,
+  or point its entry in app\ringmaster.cfg at your jar. The LGPL-3.0
+  text and the GNU GPL-3.0 text it builds on are available at the
+  links above; write to the RingMASTER maintainer for a copy of the
+  corresponding JediTerm source if the links stop working.
+
+JNA (net.java.dev.jna:jna 5.19.1)
+  Calls the Windows credential store and libsecret for Remember on this computer.
+  Copyright the Java Native Access authors and contributors.
+  License: Apache License 2.0. JNA is dual-licensed Apache-2.0 or
+  LGPL-2.1-or-later; RingMASTER uses it under Apache-2.0.
+  https://github.com/java-native-access/jna
+  https://www.apache.org/licenses/LICENSE-2.0
+
+Apache HttpComponents Core 5.4.4 (org.apache.httpcomponents.core5:httpcore5)
+  HTTP/1.1 framing for single-connection storage operations.
+  Copyright 2005-2021 The Apache Software Foundation.
+  This product includes software developed at
+  The Apache Software Foundation (http://www.apache.org/).
+  License: Apache License 2.0.
+  https://hc.apache.org/httpcomponents-core-5.4.x/
+  https://www.apache.org/licenses/LICENSE-2.0
+
+Other libraries (Kotlin, kotlinx, Compose Multiplatform, AndroidX, Ktor,
+Netty, Gson, Typesafe Config, Apache Commons, JCEF, Skiko) are
+distributed under the Apache License 2.0 or BSD-style licenses. SLF4J
+is under the MIT License. The Jetty ALPN API is offered under Apache
+License 2.0 or the Eclipse Public License 1.0; RingMASTER uses it under
+Apache-2.0. See each project's repository for its notice.
+
+Java runtime (OpenJDK)
+  The installed app includes a Java runtime in its runtime folder.
+  License: GNU General Public License, version 2, with the Classpath
+  Exception. Its licence files are in the runtime's legal folder.
+  https://openjdk.org/legal/gplv2+ce.html
+
+windows-rs (windows 0.58)
+  Windows API bindings used by the Bluetooth and notification helpers.
+  Copyright Microsoft Corporation and contributors.
+  License: MIT OR Apache-2.0.
+  https://github.com/microsoft/windows-rs
+
+serde_json (1.0.154)
+  JSON messages exchanged with the native helpers.
+  Copyright the serde_json contributors.
+  License: MIT OR Apache-2.0.
+  https://github.com/serde-rs/json
