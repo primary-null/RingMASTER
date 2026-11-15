@@ -165,7 +165,7 @@ private fun statusColor(outcome: TaskOutcome) = when (outcome) {
                     }
                     }
                     }
-                    if (!compact) item { Row(Modifier.fillMaxWidth().heightIn(min = 28.dp).padding(horizontal=10.dp), verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(12.dp)) {
+                    if (showsTaskColumns(compact, tasks.size)) item { Row(Modifier.fillMaxWidth().heightIn(min = 28.dp).padding(horizontal=10.dp), verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(12.dp)) {
                         Spacer(Modifier.width(18.dp))
                         Text("TYPE",Modifier.width(activityCols().type),fontSize=10.sp,color=Tech.Muted,fontFamily=Tech.Mono)
                         Text("TARGET",Modifier.weight(1f),fontSize=10.sp,color=Tech.Muted,fontFamily=Tech.Mono)
@@ -333,6 +333,9 @@ private val CompactActivity = ActivityColumns(150.dp, 110.dp, 0.dp, 96.dp, 60.dp
 /** Narrow windows drop the user column and show only the age, so the target column keeps its room. */
 /** True while the task log panel shares the row with the table, so the table uses its compact columns. */
 private val LocalActivitySplit = androidx.compose.runtime.staticCompositionLocalOf { false }
+
+/** The column headings belong to rows: an empty list shows its one line and nothing under it. */
+internal fun showsTaskColumns(compact: Boolean, tasks: Int) = !compact && tasks > 0
 
 @Composable private fun activityCols(): ActivityColumns {
     val density = androidx.compose.ui.platform.LocalDensity.current

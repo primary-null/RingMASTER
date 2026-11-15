@@ -24,6 +24,12 @@ class ActivityElapsedTest {
         assertEquals(Tech.Red, counterColor(TaskOutcome.Unsuccessful, 1))
     }
 
+    @Test fun columnHeadingsShowOnlyAboveRows() {
+        assertTrue(showsTaskColumns(compact = false, tasks = 3))
+        assertFalse(showsTaskColumns(compact = false, tasks = 0), "no headings under the empty-list line")
+        assertFalse(showsTaskColumns(compact = true, tasks = 3))
+    }
+
     @Test fun submissionsBannerNoLongerSaysCheckReadsOnce() {
         assertFalse(SUBMISSIONS_EXPLANATION.contains("reads once"))
         assertTrue(SUBMISSIONS_EXPLANATION.contains("until it stops"))

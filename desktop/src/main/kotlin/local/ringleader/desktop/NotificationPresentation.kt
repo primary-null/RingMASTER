@@ -222,7 +222,8 @@ fun noticeText(notice: NoticeView, privacy: Boolean, showcase: Boolean = false):
     val hideIds = privacy || showcase
     val detail = notice.detail?.takeIf { !privacy && it.isNotBlank() }
     val source = if (privacy) null else notice.sourceLabel
-    val target = notice.target?.let { if (privacy) null else "${it.kind.label} ${it.label}" }
+    // A task or schedule notice has no name of its own, so its label is the kind's word: say it once.
+    val target = notice.target?.let { if (privacy) null else if (it.label.equals(it.kind.label, ignoreCase = true)) it.kind.label else "${it.kind.label} ${it.label}" }
     val spoken = buildList {
         add(notice.severity.label)
         add(notice.headline)

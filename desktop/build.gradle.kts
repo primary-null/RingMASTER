@@ -32,7 +32,11 @@ dependencies {
     testImplementation(testFixtures(project(":core")))
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
     implementation("io.ktor:ktor-server-cio:3.6.0")
-    implementation("io.ktor:ktor-server-netty:3.6.0")
+    implementation("io.ktor:ktor-server-netty:3.6.0") {
+        // HTTP/3 is not used. Its native libraries come as one jar per operating system, and every package carried all of
+        // them (about 11 MB). The classes stay; WebTlsEngineTest proves the TLS engine starts without the natives.
+        exclude(group = "io.netty", module = "netty-codec-native-quic")
+    }
     implementation("io.ktor:ktor-server-websockets:3.6.0")
     implementation(compose.desktop.currentOs)
     implementation(compose.material3)
@@ -116,9 +120,75 @@ val buildNotifyHelper by tasks.registering {
 }
 tasks.matching { it.name == "prepareAppResources" }.configureEach { dependsOn(buildNotifyHelper) }
 
+// Class-data archive. The bundled runtime starts without one, so every start parsed and verified some 7,000 classes
+// again (Java's, Compose's and the app's). The archive holds them ready-made: on the test systems the window appears in
+// about half the time and start-up uses about 40% less processor time.
+//
+// It is built at packaging time from the list of classes the app loads while starting (cds/<os>.classlist; class names
+// only). A static dump needs no display and runs no application code. Java accepts the archive only for the same class
+// path, in the same order, so it is dumped against the app image's own launcher configuration; the jar names carry a
+// content hash, which ties the archive to exactly these jars. The file goes into the runtime folder of the app image
+// (the Arch package is built from that image) and of the jlink image (MSI, DEB and RPM are built from that one).
+// If anything does not match on a user's system, Java ignores the archive and starts as it did before.
+val classArchiveName = "ringmaster.jsa"
+val appClassArchive by tasks.registering {
+    val windows = System.getProperty("os.name").startsWith("Windows")
+    val list = layout.projectDirectory.file("cds/${if (windows) "windows" else "linux"}.classlist")
+    val jlinkImage = layout.buildDirectory.dir("compose/tmp/main/runtime")
+    val appImage = layout.buildDirectory.dir("compose/binaries/main/app/ringmaster")
+    val jdk = File(System.getProperty("java.home"))
+    dependsOn("createDistributable")
+    inputs.file(list)
+    onlyIf("a class list for this operating system") { list.asFile.isFile }
+    doLast {
+        val root = appImage.get().asFile
+        val appDir = File(root, if (windows) "app" else "lib/app")
+        val runtime = File(root, if (windows) "runtime" else "lib/runtime")
+        fun version(home: File) = File(home, "release").takeIf { it.isFile }?.readLines()?.firstOrNull { it.startsWith("JAVA_VERSION=") }
+        // Only the JDK that built the runtime can write an archive for it. With any other, the package is built without
+        // one and the app starts as it did before.
+        if (version(runtime) == null || version(runtime) != version(jdk)) {
+            logger.warn("Class-data archive skipped: runtime image {} and build JDK {} differ", version(runtime), version(jdk)); return@doLast
+        }
+        val launcherPath = File(appDir, "ringmaster.cfg").readLines().filter { it.startsWith("app.classpath=") }
+            .map { File(appDir, it.substringAfter('=').removePrefix("\$APPDIR").trimStart('\\', '/')) }
+        check(launcherPath.isNotEmpty() && launcherPath.all { it.isFile }) { "Could not read the class path from the app image" }
+        // The packaging plugin strips Skia's native library out of its jar and writes the empty rest anew in every
+        // packaging task, stamped with the current time, so that one jar's hashed name differs between the app image
+        // and each installer. Java accepts an archive whose class path is a leading part of the real one, so the
+        // archive covers the entries before that jar (alphabetical order puts about 83% of the start-up classes there).
+        val classPath = launcherPath.takeWhile { !it.name.startsWith("skiko-awt-runtime-") }
+        check(classPath.size > launcherPath.size / 2) { "The class path order changed; the archive would cover too little" }
+        // jlink strips the `java` launcher from the runtime; lend the build JDK's own for the dump.
+        val name = if (windows) "java.exe" else "java"
+        val lent = File(runtime, "bin/$name")
+        val own = lent.isFile
+        if (!own) { lent.parentFile.mkdirs(); File(jdk, "bin/$name").copyTo(lent); lent.setExecutable(true) }
+        val archive = File(runtime, classArchiveName)
+        val arguments = File(temporaryDir, "dump.args")
+        fun quoted(file: File) = "\"" + file.path.replace("\\", "\\\\") + "\""
+        arguments.writeText(listOf("-Xshare:dump", "-XX:SharedClassListFile=" + quoted(list.asFile), "-XX:SharedArchiveFile=" + quoted(archive),
+            "-cp", "\"" + classPath.joinToString(File.pathSeparator) { it.path.replace("\\", "\\\\") } + "\"").joinToString("\n"))
+        try {
+            archive.delete()
+            val process = ProcessBuilder(lent.path, "@" + arguments.path).redirectErrorStream(true).start()
+            val output = process.inputStream.bufferedReader().readText()
+            check(process.waitFor() == 0) { "Class-data archive dump failed: ${output.takeLast(800)}" }
+        } finally { if (!own) lent.delete() }
+        check(archive.isFile && archive.length() > 10_000_000) { "Class-data archive was not written at $archive" }
+        archive.copyTo(File(jlinkImage.get().asFile, classArchiveName), overwrite = true)
+        logger.lifecycle("Class-data archive: {} MB for the first {} of {} class path entries", archive.length() / 1_048_576, classPath.size, launcherPath.size)
+    }
+}
+tasks.matching { it.name == "createDistributable" }.configureEach { finalizedBy(appClassArchive) }
+tasks.matching { it.name in setOf("packageMsi", "packageDeb", "packageRpm") }.configureEach { dependsOn(appClassArchive) }
+
 compose.desktop {
     application {
         mainClass = "local.ringleader.desktop.MainKt"
+        // $APPDIR is the launcher's own token; app and runtime folders are neighbours on every system. A developer run
+        // has no such file, and Java then starts without the archive.
+        jvmArgs += "-XX:SharedArchiveFile=\$APPDIR/../runtime/$classArchiveName"
         nativeDistributions {
             targetFormats(TargetFormat.Deb, TargetFormat.Rpm, TargetFormat.Msi)
             appResourcesRootDir.set(project.layout.projectDirectory.dir("resources"))

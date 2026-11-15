@@ -51,6 +51,16 @@ class NotificationPresentationTest {
         assertTrue(showcase.spoken.contains("details hidden"))
     }
 
+    @Test fun aTargetWithoutItsOwnNameSaysItsKindOnce() {
+        val task = AlertsFixtures.notice("t", target = NoticeTarget(NoticeTargetKind.Task, "Task", NoticeRoute.None))
+        assertEquals("Task", noticeText(task, privacy = false).target)
+        assertFalse(noticeText(task, privacy = false).spoken.contains("Task Task"))
+        val schedule = AlertsFixtures.notice("s", target = NoticeTarget(NoticeTargetKind.Schedule, "Schedule", NoticeRoute.None))
+        assertEquals("Schedule", noticeText(schedule, privacy = false).target)
+        val guest = AlertsFixtures.notice("g", target = NoticeTarget(NoticeTargetKind.Guest, "Container 991", NoticeRoute.None))
+        assertEquals("Guest Container 991", noticeText(guest, privacy = false).target)
+    }
+
     @Test fun readStateIncidentStateAndOsDismissalAreSeparate() {
         val recovered = items.first { it.id == "n4" }
         assertTrue(recovered.read && recovered.osDismissed)
