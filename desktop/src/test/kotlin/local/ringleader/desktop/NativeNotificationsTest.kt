@@ -153,7 +153,9 @@ class NativeNotificationsTest {
             backend.callback(backend.delivered[1].handle)
             backend.callback(9_999)
             notifier.withdraw("incident:7")
-            Thread.sleep(100)
+            // The withdrawal runs on the notifier's own thread; on a busy computer a fixed 100 ms was not always enough.
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+            while (backend.withdrawn.isEmpty() && System.nanoTime() < deadline) Thread.sleep(20)
             assertEquals(listOf(NativeActivation("incident:7", "evt_7"), NativeActivation("plain", null)), seen.toList())
             assertEquals(listOf(NativeNotificationText.tagFor("incident:7")), backend.withdrawn.toList())
         }

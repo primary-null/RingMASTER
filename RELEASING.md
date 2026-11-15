@@ -43,14 +43,6 @@ sha256sum -c SHA256SUMS --ignore-missing
 gh attestation verify RingMASTER-<version>.msi --repo primary-null/RingMASTER
 ```
 
-## The start-up class archive
-
-Each package carries `ringmaster.jsa` in its runtime folder. It is a Java class-data archive of the classes the app loads while it starts, so Java does not parse and verify them again on every start. Packaging builds it (`appClassArchive` in `desktop/build.gradle.kts`) from `desktop/cds/windows.classlist` or `desktop/cds/linux.classlist`, with the JDK that built the bundled runtime. The archive covers the class path entries before the Skia runtime jar, because the packaging plugin gives that one jar a new name in every packaging task. If the archive does not match the installed files, Java ignores it and the app starts as it would without one.
-
-To check a built package, copy its app folder, add `java-options=-Xlog:class+load:file=<file>` to the copy's `ringmaster.cfg`, start it, and count the lines that end in `source: shared objects file`. About 5,000 means the archive is in use. None means Java ignored it.
-
-Refresh a class list when start-up changes a lot, for example after a toolkit upgrade or a new first screen. Start a packaged app once with `java-options=-Xshare:off` and `java-options=-XX:DumpLoadedClassList=<file>`, wait for the first screen, close the app, remove the lines that start with `#`, and replace the list. The lists hold class names only.
-
 ## The signing key
 
 Use JDK 21. Keep the private key offline, outside the repository and outside CI. Only the public key (SPKI, base64) goes into `ReleaseKeys.publicKeys`, a list so that keys can be rotated. An empty list turns network checks off.
