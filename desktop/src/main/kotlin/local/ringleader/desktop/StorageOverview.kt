@@ -93,9 +93,9 @@ internal fun storageFilteredVolumes(volumes: List<StorageVolume>, type: String, 
 private fun storageContentTint(content: String): Color = when(content) {
     "images" -> Tech.Green
     "rootdir" -> Tech.Amber
-    "backup" -> if(Appearance.isLight) Color(0xff185ca6) else Color(0xff66b5ff)
-    "iso" -> if(Appearance.isLight) Color(0xff7540a0) else Color(0xffca99ff)
-    "vztmpl" -> if(Appearance.isLight) Color(0xff007379) else Color(0xff58c9cd)
+    "backup" -> if(Tech.Light) Color(0xff185ca6) else Color(0xff66b5ff)
+    "iso" -> if(Tech.Light) Color(0xff7540a0) else Color(0xffca99ff)
+    "vztmpl" -> if(Tech.Light) Color(0xff007379) else Color(0xff58c9cd)
     else -> Tech.Ink
 }
 

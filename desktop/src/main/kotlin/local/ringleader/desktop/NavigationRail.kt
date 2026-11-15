@@ -199,7 +199,7 @@ private fun DrawScope.railIcon(kind: String, c: Color) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(label, fontSize = 13.sp, lineHeight = 16.sp, color = if (active) Tech.Ink else tint, modifier = Modifier.weight(1f), maxLines = 2, overflow = TextOverflow.Ellipsis)
                     if (badge > 0) Box(Modifier.background(Tech.Amber, Tech.Control).padding(horizontal = 5.dp, vertical = 1.dp)) { Text(noticeBadgeText(badge) ?: "", fontSize = 9.sp, color = Tech.OnAccent, fontWeight = FontWeight.Bold, fontFamily = Tech.Mono) }
-                    hint?.let { Text(it, fontSize = 9.sp, color = Tech.Muted.copy(alpha = .7f), fontFamily = Tech.Mono) }
+                    hint?.let { Text(it, fontSize = 9.sp, color = Tech.Muted.dimmed(.7f), fontFamily = Tech.Mono) }
                 }
             }
         }

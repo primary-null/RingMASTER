@@ -43,6 +43,7 @@ import kotlinx.coroutines.withContext
             val swatch = when (mode) {
                 ThemeMode.Dark -> listOf(DarkPalette); ThemeMode.Light -> listOf(LightPalette); ThemeMode.PitchBlack -> listOf(PitchBlackPalette)
                 ThemeMode.System -> listOf(DarkPalette, LightPalette)
+                ThemeMode.HighContrast -> listOf(HighContrastDarkPalette, HighContrastLightPalette)
             }
             Column(Modifier.width(150.dp).clip(Tech.Control).border(1.dp, if (selected) Tech.Amber else Tech.Edge, Tech.Control)
                 .clickable { Appearance.chooseTheme(mode) }.padding(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -63,7 +64,18 @@ import kotlinx.coroutines.withContext
             }
         }
     }
-    Caption("Light uses soft greys with deeper accents for contrast. Pitch Black uses true black for OLED screens. System follows the operating system. Changes fade in.")
+    Caption("Light uses soft greys with deeper accents for contrast. Pitch Black uses true black for OLED screens. System follows the operating system. High Contrast uses pure black or white with the strongest text and edges, following the system's light or dark. Changes fade in.")
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        TechSwitch(Appearance.followContrast, { Appearance.chooseFollowContrast(it) })
+        Column(Modifier.weight(1f)) {
+            Text("Follow the system's high contrast", fontSize = 13.sp)
+            Caption(when {
+                Appearance.systemContrast && Appearance.followContrast -> "The operating system asks for high contrast now, so its colours are used instead of the theme above and no background image is drawn."
+                Appearance.systemContrast -> "The operating system asks for high contrast now. The theme above is kept."
+                else -> "When Windows contrast themes or a Linux desktop's high contrast are on, RingMASTER uses those colours whatever theme is chosen."
+            })
+        }
+    }
 }
 
 @Composable internal fun SizeSettingsSection() {
@@ -97,6 +109,7 @@ import kotlinx.coroutines.withContext
     var busy by remember { mutableStateOf(false) }
     val name = Appearance.background
     SectionLabel("Background")
+    if (Appearance.targetPalette.highContrast) Caption("High contrast draws no background image. The picture is kept and returns with another theme.")
     FlowRow(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         val preview by produceState<ImageBitmap?>(null, name) { value = name?.let { withContext(Dispatchers.IO) { Backgrounds.render(it, 0f) } } }
         Box(Modifier.size(176.dp, 99.dp).clip(Tech.Control).background(Tech.Black).border(1.dp, Tech.Edge, Tech.Control), contentAlignment = Alignment.Center) {

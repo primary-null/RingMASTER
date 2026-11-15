@@ -652,7 +652,7 @@ private fun guestLockMark(guest: Guest): GuestMark? {
             }
             if (TableCols.mem > 0.dp) Column(Modifier.width(TableCols.mem), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                 if (fraction != null && mem != null && memMax != null) {
-                    Text("${gib(mem)} / ${gib(memMax)} GiB", fontSize = 10.sp, fontFamily = Tech.Mono, color = Tech.Ink.copy(alpha = .85f), maxLines = 1)
+                    Text("${gib(mem)} / ${gib(memMax)} GiB", fontSize = 10.sp, fontFamily = Tech.Mono, color = Tech.Ink.dimmed(.85f), maxLines = 1)
                     UsageBar(fraction, Modifier.fillMaxWidth())
                 } else Text(if (memMax != null && memMax > 0) "${gib(memMax)} GiB" else "—", fontSize = 10.sp, fontFamily = Tech.Mono, color = Tech.Muted)
             }
@@ -666,7 +666,7 @@ private fun guestLockMark(guest: Guest): GuestMark? {
             if (TableCols.disk > 0.dp) Column(Modifier.width(TableCols.disk), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                 val disk = if (metering) guestDiskUsage(metrics?.diskBytes, metrics?.diskLimitBytes) else null
                 if (disk != null) {
-                    Text("${gib(disk.first)}/${gib(disk.second)}G", fontSize = 10.sp, fontFamily = Tech.Mono, color = Tech.Ink.copy(alpha = .85f), maxLines = 1)
+                    Text("${gib(disk.first)}/${gib(disk.second)}G", fontSize = 10.sp, fontFamily = Tech.Mono, color = Tech.Ink.dimmed(.85f), maxLines = 1)
                     UsageBar(memoryFraction(disk.first, disk.second), Modifier.fillMaxWidth())
                 } else Text(metrics?.diskLimitBytes?.takeIf { it > 0L }?.let { "${gib(it)} GiB" } ?: "—", fontSize = 10.sp, fontFamily = Tech.Mono, color = Tech.Muted, maxLines = 1)
             }
@@ -743,7 +743,7 @@ private fun guestLockMark(guest: Guest): GuestMark? {
                 listOf("CPU" to (vcpus?.let { "$it vCPU" } ?: "—"), "MEMORY" to (memMax?.takeIf { it > 0L }?.let { "${gib(it)} GiB" } ?: "—")).forEach { (label, value) ->
                     Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         Text(label, fontSize = 9.sp, letterSpacing = 1.sp, color = Tech.Muted, fontFamily = Tech.Mono)
-                        Text(value, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, fontFamily = Tech.Mono, color = Tech.Ink.copy(alpha = .8f))
+                        Text(value, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, fontFamily = Tech.Mono, color = Tech.Ink.dimmed(.8f))
                     }
                 }
             }
@@ -946,7 +946,7 @@ private fun guestLockMark(guest: Guest): GuestMark? {
                 }
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     UsageBar(fraction, Modifier.weight(1f))
-                    Text("${storageSize(row.diskBytes)} / ${storageSize(row.maxDiskBytes)}", fontFamily = Tech.Mono, fontSize = 10.sp, color = Tech.Ink.copy(alpha = .85f), maxLines = 1)
+                    Text("${storageSize(row.diskBytes)} / ${storageSize(row.maxDiskBytes)}", fontFamily = Tech.Mono, fontSize = 10.sp, color = Tech.Ink.dimmed(.85f), maxLines = 1)
                 }
                 row.content?.let { Text(it, fontFamily = Tech.Mono, fontSize = 9.sp, lineHeight = 11.sp, color = Tech.Muted, maxLines = 1, overflow = TextOverflow.Ellipsis) }
                 if (row.shared == true && row.id in report.disagreements) {

@@ -56,8 +56,15 @@ data class TechPalette(
     val materialPanel: Color = panel,  // always opaque: menus and dialogs stay readable over a background image
     val materialRaised: Color = raised,
     val ground: Color = canvas,        // always opaque: the window's own background, behind a background image too
+    val highContrast: Boolean = false, // strongest text and edges; secondary text is not dimmed and no background image is drawn
 ) {
     /** Over a background image the window clears and surfaces turn glassy; edges and text keep full strength. */
+    /** A disabled control's label: faded in the ordinary themes; in high contrast the weakest shade of the text colour that still reads at 4.5:1. */
+    val disabled: Color by lazy {
+        if (!highContrast) muted.copy(alpha = .5f)
+        else listOf(.45f, .35f, .25f, .15f).map { androidx.compose.ui.graphics.lerp(ink, ground, it) }.firstOrNull { contrastRatio(it, ground) >= 4.5f } ?: ink
+    }
+
     fun withBackdrop() = copy(canvas = Color.Transparent, panel = panel.copy(alpha = if (light) .80f else .74f), raised = raised.copy(alpha = if (light) .86f else .82f),
         materialPanel = panel, materialRaised = raised)
 }
@@ -85,15 +92,19 @@ val PitchBlackPalette = TechPalette(false,
     onAccent = Color(0xFF000000), amberWash = Color(0xFF241A0C),
     materialPanel = Color(0xFF0A0B0B), materialRaised = Color(0xFF151717))
 
-enum class ThemeMode(val label: String) { System("System"), Dark("Dark"), Light("Light"), PitchBlack("Pitch Black") }
+enum class ThemeMode(val label: String) { System("System"), Dark("Dark"), Light("Light"), PitchBlack("Pitch Black"), HighContrast("High Contrast") }
 
-/** The palette a theme draws with, before any background image. System follows the operating system's light or dark. */
+/** The palette a theme draws with, before any background image. System and High Contrast follow the operating system's light or dark. */
 fun basePalette(theme: ThemeMode, systemLight: Boolean): TechPalette = when (theme) {
     ThemeMode.Light -> LightPalette
     ThemeMode.PitchBlack -> PitchBlackPalette
     ThemeMode.Dark -> DarkPalette
     ThemeMode.System -> if (systemLight) LightPalette else DarkPalette
+    ThemeMode.HighContrast -> if (systemLight) HighContrastLightPalette else HighContrastDarkPalette
 }
+/** Over a background image surfaces turn glassy, except in high contrast, where every surface stays opaque. */
+internal fun shownPalette(base: TechPalette, backgroundImage: Boolean): TechPalette = if (backgroundImage && !base.highContrast) base.withBackdrop() else base
+
 /** Blur radius as a fraction of the text size, so large titles hide as well as small labels. */
 enum class ShowcaseStrength(val label: String, val factor: Float) { Light("Light", .22f), Medium("Medium", .32f), Strong("Strong", .45f) }
 
@@ -138,14 +149,28 @@ object Appearance {
     var revealHeld by mutableStateOf(false)
     private var systemLight = false
     private var loaded = false
+    /** The operating system asks for high contrast (Windows contrast themes, a Linux desktop's high contrast). */
+    var systemContrast by mutableStateOf(false); private set
+    /** Use the system's high contrast when it is on, whatever theme is chosen. Off keeps the chosen theme. */
+    var followContrast by mutableStateOf(true); private set
+    private var systemColors: SystemContrastColors? = null
+    private var linuxContrast = false
+    private var watching = false
+    private val linux = System.getProperty("os.name").orEmpty().contains("linux", ignoreCase = true)
+    /** Themes whose palette depends on the system's light or dark. */
+    private val followsSystemLight get() = theme == ThemeMode.System || theme == ThemeMode.HighContrast
 
     fun load() {
         if (loaded) return
         loaded = true
         val p = ConfigSchemas.properties(file)
         theme = runCatching { ThemeMode.valueOf(p.getProperty("theme", "Dark")) }.getOrDefault(ThemeMode.Dark)
+        followContrast = p.getProperty("followContrast") != "false"
+        // Windows answers at once and reports later changes itself.
+        readWindowsContrast()
+        if (!watching) { watching = true; SystemContrast.watchWindows { readWindowsContrast(); refresh() } }
         // Start-up waits a moment for the OS theme only when it is used; a slow tool never holds the window for long.
-        detectSystemLight(if (theme == ThemeMode.System) 400 else 0)
+        detectSystem(if (followsSystemLight || (linux && followContrast)) 400 else 0)
         textScale = normalizeTextScale(p.getProperty("textScale")?.toFloatOrNull() ?: 1f)
         showcase = p.getProperty("showcase") == "true"
         strength = runCatching { ShowcaseStrength.valueOf(p.getProperty("strength", "Strong")) }.getOrDefault(ShowcaseStrength.Strong)
@@ -162,7 +187,7 @@ object Appearance {
         refresh()
     }
 
-    val isLight get() = theme == ThemeMode.Light || (theme == ThemeMode.System && systemLight)
+    val isLight get() = targetPalette.light
 
     /** Screenshot tests: switch theme and showcase in memory only; nothing is read from or written to disk. */
     internal fun preview(light: Boolean, showcase: Boolean = false, textScale: Float = 1f) =
@@ -171,8 +196,17 @@ object Appearance {
     /** As [preview], for any theme. [ease] lets an attached [ThemeCrossfade] fade to it instead of switching at once. */
     internal fun preview(theme: ThemeMode, showcase: Boolean = false, textScale: Float = 1f, ease: Boolean = false) {
         this.textScale = normalizeTextScale(textScale)
+        // The computer running the tests may itself be in high contrast or light, and an earlier preview may have said so; a preview shows the theme it names, on a dark system.
+        systemContrast = false; systemColors = null; linuxContrast = false; followContrast = true; systemLight = false
         loaded = true; this.theme = theme; this.showcase = showcase; background = null; refresh()
         if (!ease) palette = targetPalette
+    }
+
+    /** Screenshot tests: the system asks for high contrast, with its own colours (Windows) or without (Linux). In memory only. */
+    internal fun previewSystemContrast(colors: SystemContrastColors?, light: Boolean = false, theme: ThemeMode = ThemeMode.Dark, follow: Boolean = true) {
+        preview(theme)
+        systemLight = light; systemColors = colors; linuxContrast = colors == null; systemContrast = true; followContrast = follow
+        refresh(); palette = targetPalette
     }
 
     internal fun attachTransition(owner: Any): Boolean = synchronized(this) {
@@ -192,12 +226,18 @@ object Appearance {
     private var systemCheckedAt = 0L
     /** System theme: ask the operating system again (the window came back to the front), at most every 20 s. A changed answer fades in. */
     fun recheckSystemTheme(now: Long = System.currentTimeMillis()) {
-        if (theme != ThemeMode.System || now - systemCheckedAt < 20_000) return
+        if (!(followsSystemLight || (linux && followContrast)) || now - systemCheckedAt < 20_000) return
         systemCheckedAt = now
-        detectSystemLight(0)
+        detectSystem(0)
     }
 
-    fun chooseTheme(value: ThemeMode) { theme = value; refresh(); save(); if (value == ThemeMode.System) detectSystemLight(0) }
+    fun chooseTheme(value: ThemeMode) { theme = value; refresh(); save(); if (followsSystemLight) detectSystem(0) }
+    fun chooseFollowContrast(on: Boolean) {
+        followContrast = on
+        if (on) readWindowsContrast()
+        refresh(); save()
+        if (on) detectSystem(0)
+    }
     fun chooseShowcase(on: Boolean) { showcase = on; save() }
     fun toggleShowcase() = chooseShowcase(!showcase)
     fun chooseStrength(value: ShowcaseStrength) { strength = value; save() }
@@ -223,8 +263,9 @@ object Appearance {
     const val MAX_SCALE = 2f
 
     private fun refresh() {
-        val base = basePalette(theme, systemLight)
-        targetPalette = if (background != null) base.withBackdrop() else base
+        val base = if (followContrast && systemContrast) contrastPalette(systemColors, systemLight) else basePalette(theme, systemLight)
+        // High contrast keeps every surface opaque: the picture stays stored and returns with another theme.
+        targetPalette = shownPalette(base, background != null)
         // Without a driver (start-up, tests, a window that is not composed) the palette switches at once.
         if (transitionOwner == null) palette = targetPalette
     }
@@ -236,6 +277,7 @@ object Appearance {
         p.setProperty("schema", "1")
         p.setProperty("textScale", textScale.toString())
         p.setProperty("theme", theme.name); p.setProperty("showcase", showcase.toString()); p.setProperty("strength", strength.name)
+        p.setProperty("followContrast", followContrast.toString())
         background?.let { p.setProperty("background", it) }
         p.setProperty("blur", blur.toString()); p.setProperty("dim", dim.toString()); p.setProperty("vignette", vignette.toString())
         displayScales.forEach { (k, v) -> p.setProperty("uiScale.$k", v.toString()) }
@@ -250,10 +292,21 @@ object Appearance {
      * (start-up waits briefly only when the theme is System, so the first frame is already right); a slower answer
      * applies when it arrives. The tools themselves are killed after a few seconds, so nothing is left hanging.
      */
-    private fun detectSystemLight(wait: Long) {
-        val pending = java.util.concurrent.CompletableFuture.supplyAsync { SystemTheme.detect() }
-        if (wait > 0) runCatching { systemLight = pending.get(wait, java.util.concurrent.TimeUnit.MILLISECONDS) }
-        pending.thenAccept { light -> javax.swing.SwingUtilities.invokeLater { if (light != systemLight) { systemLight = light; refresh() } } }
+    private fun detectSystem(wait: Long) {
+        val pending = java.util.concurrent.CompletableFuture.supplyAsync { SystemTheme.detect() to SystemContrast.detect() }
+        fun apply(answer: Pair<Boolean, Boolean>) {
+            if (answer.first == systemLight && answer.second == linuxContrast) return
+            systemLight = answer.first; linuxContrast = answer.second
+            systemContrast = systemColors != null || linuxContrast
+            refresh()
+        }
+        if (wait > 0) runCatching { apply(pending.get(wait, java.util.concurrent.TimeUnit.MILLISECONDS)) }
+        pending.thenAccept { answer -> javax.swing.SwingUtilities.invokeLater { apply(answer) } }
+    }
+
+    private fun readWindowsContrast() {
+        systemColors = SystemContrast.windowsColors()
+        systemContrast = systemColors != null || linuxContrast
     }
 }
 
@@ -281,8 +334,8 @@ internal object SystemTheme {
         else -> null
     }
 
-    /** `xfconf-query -c xsettings -p /Net/ThemeName`: a theme with "dark" in its name is dark, any other is light. */
-    fun parseXfceTheme(output: String): Boolean? = output.trim().takeIf { it.isNotEmpty() }?.let { !it.contains("dark", ignoreCase = true) }
+    /** `xfconf-query -c xsettings -p /Net/ThemeName`: a theme with "dark" (or HighContrastInverse's "inverse") in its name is dark, any other is light. */
+    fun parseXfceTheme(output: String): Boolean? = output.trim().takeIf { it.isNotEmpty() }?.let { !it.contains("dark", ignoreCase = true) && !it.contains("inverse", ignoreCase = true) }
 
     /** [run] returns a tool's output, or null when it is missing, failed or timed out. [desktop] is `XDG_CURRENT_DESKTOP`. */
     fun detect(osName: String, desktop: String?, run: (List<String>) -> String?): Boolean {
@@ -301,7 +354,7 @@ internal object SystemTheme {
 
     fun detect(): Boolean = runCatching { detect(System.getProperty("os.name").orEmpty(), System.getenv("XDG_CURRENT_DESKTOP"), ::runTool) }.getOrDefault(false)
 
-    private fun runTool(command: List<String>): String? = try {
+    internal fun runTool(command: List<String>): String? = try {
         val process = ProcessBuilder(command).redirectErrorStream(true).start()
         process.outputStream.close()
         if (!process.waitFor(3, java.util.concurrent.TimeUnit.SECONDS)) { process.destroyForcibly(); null }
@@ -404,7 +457,7 @@ object Backgrounds {
  * grey in light), and a vignette toward the edges. The ground under it is the theme's own and fades with a theme change. Content draws on top; Tech surfaces are glassy while a background is set.
  */
 @Composable fun BackdropHost(content: @Composable BoxScope.() -> Unit) {
-    val name = Appearance.background
+    val name = Appearance.background.takeIf { !Appearance.palette.highContrast }
     val blur = Appearance.blur
     val image by produceState<ImageBitmap?>(null, name, blur) {
         value = if (name == null) null else kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { Backgrounds.render(name, blur) }

@@ -23,6 +23,8 @@ class TrayMenuNativeTest {
         org.junit.jupiter.api.Assumptions.assumeTrue(folder != null && !java.awt.GraphicsEnvironment.isHeadless())
         val dir = Path.of(folder!!)
         Files.createDirectories(dir)
+        // As the app: Compose installs the system look and feel before any Swing component exists.
+        SwingUtilities.invokeAndWait { javax.swing.UIManager.setLookAndFeel(javax.swing.UIManager.getSystemLookAndFeelClassName()) }
         val robot = Robot().apply { autoDelay = 70 }
         val host = TrayMenuWindow()
         val seen = java.util.concurrent.CopyOnWriteArrayList<TrayDestination>()

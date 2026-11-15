@@ -244,19 +244,19 @@ private val ConnectPanelWidth = 520.dp
     )
     steps.forEach { (n, title, body) ->
         Row(Modifier.fillMaxWidth().border(1.dp, Tech.Edge, Tech.Control).background(Tech.Black.copy(alpha = .4f)).padding(10.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text(n, fontFamily = Tech.Mono, fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Tech.Amber.copy(alpha = .8f))
+            Text(n, fontFamily = Tech.Mono, fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Tech.Amber.dimmed(.8f))
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(title, fontFamily = Tech.Mono, fontSize = 10.sp, letterSpacing = 1.sp, fontWeight = FontWeight.Bold, color = Tech.Muted)
-                Text(body, fontFamily = Tech.Mono, fontSize = 11.sp, lineHeight = 16.sp, color = Tech.Ink.copy(alpha = .85f))
+                Text(body, fontFamily = Tech.Mono, fontSize = 11.sp, lineHeight = 16.sp, color = Tech.Ink.dimmed(.85f))
             }
         }
     }
     Row(Modifier.fillMaxWidth().border(1.dp, Tech.Edge, Tech.Control).background(Tech.Black.copy(alpha = .4f)).padding(10.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text("04", fontFamily = Tech.Mono, fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Tech.Amber.copy(alpha = .8f))
+        Text("04", fontFamily = Tech.Mono, fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Tech.Amber.dimmed(.8f))
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text("NOT SURE OF THE ADDRESS?", fontFamily = Tech.Mono, fontSize = 10.sp, letterSpacing = 1.sp, fontWeight = FontWeight.Bold, color = Tech.Muted)
-            Text("Scan the local network for PVE (8006) and PDM (8443). No credentials are sent.", fontFamily = Tech.Mono, fontSize = 11.sp, lineHeight = 16.sp, color = Tech.Ink.copy(alpha = .85f))
+            Text("Scan the local network for PVE (8006) and PDM (8443). No credentials are sent.", fontFamily = Tech.Mono, fontSize = 11.sp, lineHeight = 16.sp, color = Tech.Ink.dimmed(.85f))
         }
         MiniAction("Scan · Ctrl ${ringPages.indexOf("Scan") + 1}", primary = true, onClick = onScan)
     }
@@ -709,7 +709,7 @@ private fun sessionText(state: WorkspaceState, active: ConnectionProfile?) = whe
         Text(label, fontFamily = Tech.Mono, fontSize = 11.sp, color = Tech.Muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
         Box(Modifier.fillMaxWidth().height(30.dp).border(1.dp, Tech.Edge, Tech.Control).padding(horizontal = 8.dp), contentAlignment = Alignment.CenterStart) {
             if (value.isEmpty() && placeholder != null) {
-                Text(placeholder, fontFamily = Tech.Mono, fontSize = 12.sp, color = Tech.Muted.copy(alpha = .55f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(placeholder, fontFamily = Tech.Mono, fontSize = 12.sp, color = Tech.Muted.dimmed(.55f), maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             BasicTextField(value, onValue, Modifier.fillMaxWidth()
                 .then(if (concealed) Modifier.blur(3.dp, androidx.compose.ui.draw.BlurredEdgeTreatment.Unbounded).semantics { contentDescription = "Hidden" } else Modifier)

@@ -199,7 +199,7 @@ internal fun pinnedHost(url: String?): String? = url?.let { runCatching { java.n
                 Text(status, Modifier.weight(1f).testTag("service-find"), fontSize = 11.sp, color = if (findFailed != null) Tech.Red else Tech.Muted, maxLines = 2)
             }
             if (progress != null && !progress.finished && findJob?.isActive == true) TechProgress(fraction = if (progress.total == 0) 0f else progress.checked / progress.total.toFloat())
-            Text(serviceProbeHelp(ports.size, probeHosts.size.coerceAtLeast(1)), fontSize = 10.sp, lineHeight = 13.sp, color = Tech.Muted.copy(alpha = .8f))
+            Text(serviceProbeHelp(ports.size, probeHosts.size.coerceAtLeast(1)), fontSize = 10.sp, lineHeight = 13.sp, color = Tech.Muted.dimmed(.8f))
         } else {
             Text(probeUnavailable, fontSize = 11.sp, color = Tech.Muted)
         }

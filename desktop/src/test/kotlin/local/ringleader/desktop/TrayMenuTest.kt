@@ -41,6 +41,63 @@ class TrayMenuTest {
         }
     }
 
+    /**
+     * The app runs under the system look and feel, whose themed popup painting ignored the menu's own colours (a white
+     * header with white text on Windows 11). Every look and feel this Java has must now draw the same menu, in each theme.
+     */
+    @Test fun everyLookAndFeelDrawsTheSameMenuInTheAppColours() {
+        SwingUtilities.invokeAndWait {
+            val before = javax.swing.UIManager.getLookAndFeel()
+            val theme = Appearance.theme
+            val names = (javax.swing.UIManager.getInstalledLookAndFeels().map { it.className } + javax.swing.UIManager.getSystemLookAndFeelClassName()).distinct()
+            try {
+                for (mode in listOf(ThemeMode.Dark, ThemeMode.Light, ThemeMode.HighContrast)) {
+                    Appearance.preview(mode)
+                    val colors = TrayMenuColors.current()
+                    if (mode == ThemeMode.HighContrast) {
+                        assertEquals(java.awt.Color.WHITE, colors.text); assertEquals(java.awt.Color.WHITE, colors.border)
+                    }
+                    var size: Dimension? = null
+                    for (name in names) {
+                        // A look and feel that cannot start on this system (GTK without its library) is not one the app can run under.
+                        if (runCatching { javax.swing.UIManager.setLookAndFeel(name) }.isFailure) continue
+                        val short = name.substringAfterLast('.')
+                        val menu = createTrayMenu("0.25.4", "No active schedules", TrayDestination.entries.toSet(), {}, {}, {}, colors)
+                        fun check(popup: JPopupMenu, part: String) {
+                            popup.setSize(popup.preferredSize)
+                            popup.doLayout()
+                            val image = BufferedImage(popup.width, popup.height, BufferedImage.TYPE_INT_RGB)
+                            val g = image.createGraphics()
+                            try { popup.printAll(g) } finally { g.dispose() }
+                            System.getenv("RINGMASTER_TRAY_MENU_SHOTS")?.let { folder ->
+                                val dir = java.nio.file.Path.of(folder)
+                                Files.createDirectories(dir)
+                                ImageIO.write(image, "png", dir.resolve("tray-$mode-$short-$part.png").toFile())
+                            }
+                            val expected = colors.background.rgb and 0xffffff
+                            val what = "$mode $short $part"
+                            // The border line, then the padding inside it; row 9 crosses the first row above its text.
+                            assertEquals(colors.border.rgb and 0xffffff, image.getRGB(popup.width / 2, 0) and 0xffffff, "$what border")
+                            for (y in listOf(3, 9)) for (x in 2 until popup.width - 2) {
+                                assertEquals(expected, image.getRGB(x, y) and 0xffffff, "$what pixel $x,$y is the menu background")
+                            }
+                            // The left and right padding beside the rows, down the whole menu: no theme gutter, no icon column.
+                            for (y in 2 until popup.height - 2) for (x in listOf(3, popup.width - 4)) {
+                                assertEquals(expected, image.getRGB(x, y) and 0xffffff, "$what pixel $x,$y is the menu background")
+                            }
+                            // Rows start where the header does.
+                            val rows = popup.components.filterIsInstance<JMenuItem>()
+                            assertTrue(rows.all { it.x == rows.first().x && it.insets.left == 14 }, "$what rows align")
+                        }
+                        check(menu, "main")
+                        check(menu.components.filterIsInstance<JMenu>().single().popupMenu, "more")
+                        if (size == null) size = menu.preferredSize else assertEquals(size, menu.preferredSize, "$mode $short has the size of the others")
+                    }
+                }
+            } finally { javax.swing.UIManager.setLookAndFeel(before); Appearance.preview(theme) }
+        }
+    }
+
     @Test fun readableRowsAndSubmenusInBothThemesAndAtLargeText() {
         SwingUtilities.invokeAndWait {
             val before = Appearance.theme

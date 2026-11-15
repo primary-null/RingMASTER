@@ -592,7 +592,7 @@ internal fun shortRate(value: Double?): String = when {
 @Composable fun RateLine(label: String, value: Double?, tint: Color, fontSize: TextUnit = 10.sp) = Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
     // The label grows with the text size: a fixed 26 units cut "OUT" to "OU" at 150 % text.
     Text(label, Modifier.widthIn(min = 26.dp), fontSize = fontSize, lineHeight = fontSize * 1.2f, fontFamily = Tech.Mono, color = tint, maxLines = 1, softWrap = false)
-    Text(formatRate(value), fontSize = fontSize, lineHeight = fontSize * 1.2f, fontFamily = Tech.Mono, color = Tech.Ink.copy(alpha = .85f), maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
+    Text(formatRate(value), fontSize = fontSize, lineHeight = fontSize * 1.2f, fontFamily = Tech.Mono, color = Tech.Ink.dimmed(.85f), maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
 }
 
 /** 240° gauge that eases to new values without overshoot, number in the centre, caption and detail below. Hover names the exact value. */
@@ -606,7 +606,7 @@ internal fun shortRate(value: Double?): String = when {
             ArcGaugeFace(value, caption, size)
             GaugeTip(hovered, value, detail, series, metric)
         }
-        detail?.let { Text(it, fontSize = 10.sp, lineHeight = 12.sp, color = Tech.Ink.copy(alpha = .8f), fontFamily = Tech.Mono, maxLines = 1) }
+        detail?.let { Text(it, fontSize = 10.sp, lineHeight = 12.sp, color = Tech.Ink.dimmed(.8f), fontFamily = Tech.Mono, maxLines = 1) }
     }
 }
 
@@ -677,7 +677,7 @@ internal fun shortRate(value: Double?): String = when {
             Row(Modifier.fillMaxSize().padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Canvas(Modifier.size(12.dp)) { drawCircle(Tech.Muted, size.minDimension * .36f, Offset(size.width * .42f, size.height * .42f), style = Stroke(1.4f)); drawLine(Tech.Muted, Offset(size.width * .68f, size.height * .68f), Offset(size.width, size.height), 1.6f) }
                 Box(Modifier.weight(1f)) { if (value.isEmpty()) Text(placeholder, color = Tech.Muted, fontSize = 12.sp, maxLines = 1); inner() }
-                Text("Ctrl F", fontSize = 9.sp, color = Tech.Muted.copy(alpha = .7f), fontFamily = Tech.Mono)
+                Text("Ctrl F", fontSize = 9.sp, color = Tech.Muted.dimmed(.7f), fontFamily = Tech.Mono)
             }
         })
 }

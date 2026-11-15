@@ -88,8 +88,9 @@ internal fun serviceName(hit: ScanHit): String = scanHostname(hit).takeUnless { 
 internal fun scanInterfaceLabel(name: String) = name.split(' ').filter { it.isNotBlank() }.distinct().joinToString(" ")
 internal val ScanKind.short get() = when (this) { ScanKind.PVE -> "PVE"; ScanKind.PBS -> "PBS"; ScanKind.PDM -> "PDM"; ScanKind.PIHOLE, ScanKind.ADGUARD -> "DNS"; ScanKind.HOME_ASSISTANT -> "HA"; ScanKind.WEB -> "WEB" }
 internal val ScanKind.tint get() = when (this) {
-    ScanKind.PVE -> Tech.Amber; ScanKind.PDM -> Tech.Green; ScanKind.PBS -> androidx.compose.ui.graphics.Color(0xFF6BB8FF)
-    ScanKind.PIHOLE, ScanKind.ADGUARD -> androidx.compose.ui.graphics.Color(0xFFB39DDB); ScanKind.HOME_ASSISTANT -> androidx.compose.ui.graphics.Color(0xFF4FC3F7); ScanKind.WEB -> Tech.Muted
+    ScanKind.PVE -> Tech.Amber; ScanKind.PDM -> Tech.Green; ScanKind.PBS -> if (Tech.Light) androidx.compose.ui.graphics.Color(0xFF185CA6) else androidx.compose.ui.graphics.Color(0xFF6BB8FF)
+    ScanKind.PIHOLE, ScanKind.ADGUARD -> if (Tech.Light) androidx.compose.ui.graphics.Color(0xFF7540A0) else androidx.compose.ui.graphics.Color(0xFFB39DDB)
+    ScanKind.HOME_ASSISTANT -> if (Tech.Light) androidx.compose.ui.graphics.Color(0xFF007379) else androidx.compose.ui.graphics.Color(0xFF4FC3F7); ScanKind.WEB -> Tech.Muted
 }
 internal fun scanCounts(hits: List<ScanHit>) = listOf(hits.size, hits.count { it.proxmox }, hits.count { !it.proxmox })
 internal fun sortedServices(hits: List<ScanHit>, address: Boolean) = hits.filter { !it.proxmox }.sortedBy { if(address) it.ip.split('.').joinToString(".") { part -> part.padStart(3,'0') } + ":" + it.port.toString().padStart(5,'0') else scanHostname(it).lowercase() }
@@ -249,7 +250,7 @@ internal fun scanConnectable(hit: ScanHit) = hit.kind == ScanKind.PVE || hit.kin
                 val fp = hit.fingerprint
                 HelpTip(if (fp == null) "No certificate was observed on this port." else "Unverified. Compare with the server's own fingerprint (node > System > Certificates) before trusting it.") {
                     Text(if (fp == null) "No certificate" else "SHA-256  " + (if (expanded) fp else fp.take(23) + "…"),
-                        fontFamily=androidx.compose.ui.text.font.FontFamily.Monospace, fontSize=Tech.Label, color=Tech.Ink.copy(alpha=.85f),
+                        fontFamily=androidx.compose.ui.text.font.FontFamily.Monospace, fontSize=Tech.Label, color=Tech.Ink.dimmed(.85f),
                         modifier=Modifier.clickable(enabled=fp != null) { expanded = !expanded })
                 }
                 Text(certificateNote(hit), fontSize=11.sp, color=if ((hit.notAfter ?: Long.MAX_VALUE) < System.currentTimeMillis()) Tech.Amber else Tech.Muted,

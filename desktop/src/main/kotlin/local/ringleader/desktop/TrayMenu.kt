@@ -1,16 +1,22 @@
 package local.ringleader.desktop
 
 import androidx.compose.ui.graphics.toArgb
+import java.awt.BasicStroke
 import java.awt.Color
+import java.awt.Component
 import java.awt.Dimension
 import java.awt.Font
+import java.awt.Graphics
+import java.awt.Graphics2D
 import java.awt.GraphicsEnvironment
 import java.awt.Point
 import java.awt.Rectangle
 import java.awt.Toolkit
 import java.awt.event.WindowAdapter
 import java.awt.event.WindowEvent
+import java.awt.RenderingHints
 import javax.swing.BorderFactory
+import javax.swing.Icon
 import javax.swing.JLabel
 import javax.swing.JDialog
 import javax.swing.JMenu
@@ -21,8 +27,11 @@ import javax.swing.MenuSelectionManager
 import javax.swing.SwingUtilities
 import javax.swing.event.PopupMenuEvent
 import javax.swing.event.PopupMenuListener
+import javax.swing.plaf.basic.BasicLabelUI
 import javax.swing.plaf.basic.BasicMenuItemUI
 import javax.swing.plaf.basic.BasicMenuUI
+import javax.swing.plaf.basic.BasicPanelUI
+import javax.swing.plaf.basic.BasicPopupMenuUI
 
 /** Navigation only. Opening a tray shortcut never starts a scan, signs in, or changes a guest. */
 internal enum class TrayDestination(val label: String, val page: String? = null, val settings: SettingsSection? = null) {
@@ -52,9 +61,49 @@ internal fun trayPopupPosition(anchor: Point, size: Dimension, work: Rectangle):
     (anchor.y - size.height).coerceIn(work.y, (work.y + work.height - size.height).coerceAtLeast(work.y)),
 )
 
+/** Not a look-and-feel key: rows take no icon column, offsets or colours from the system theme. */
+private const val TRAY_PREFIX = "RingMasterTray"
+
+/** The submenu arrow, drawn in the row's own text colour instead of the system theme's glyph. */
+private class TrayArrow(private val colors: TrayMenuColors, private val size: Int) : Icon {
+    override fun getIconWidth() = size
+    override fun getIconHeight() = size
+    override fun paintIcon(c: Component, g: Graphics, x: Int, y: Int) {
+        val item = c as? JMenuItem
+        val g2 = g.create() as Graphics2D
+        try {
+            g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+            g2.color = when {
+                item?.isEnabled == false -> colors.muted
+                item?.model?.let { it.isArmed || it.isSelected } == true -> colors.onSelected
+                else -> colors.text
+            }
+            g2.stroke = BasicStroke(size / 6f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND)
+            val left = x + size * 3 / 10; val right = x + size * 7 / 10
+            g2.drawPolyline(intArrayOf(left, right, left), intArrayOf(y + size / 6, y + size / 2, y + size * 5 / 6), 3)
+        } finally { g2.dispose() }
+    }
+}
+
+/**
+ * A popup the system theme cannot repaint. The app runs under the system look and feel, whose popup painter (Windows
+ * visual styles, GTK) draws its own background and icon gutter over the colours set here: a white header with white
+ * text on Windows 11, a stray gutter line on Windows 10. The Basic painter fills with the background and nothing else.
+ */
+private fun plainPopup(popup: JPopupMenu, colors: TrayMenuColors) {
+    popup.setUI(BasicPopupMenuUI())
+    popup.isOpaque = true
+    popup.background = colors.background
+    popup.foreground = colors.text
+    popup.border = BorderFactory.createCompoundBorder(BorderFactory.createLineBorder(colors.border),
+        BorderFactory.createEmptyBorder(6, 6, 6, 6))
+    popup.isLightWeightPopupEnabled = false
+}
+
 /**
  * A per-popup Swing menu: readable row padding, app colours and real menu keyboard/accessibility behavior.
- * No global LookAndFeel/UIManager changes; the rest of the desktop is unaffected.
+ * Every part has its own Basic painter, so it looks the same under Windows visual styles, Windows high contrast, GTK
+ * and the Java look and feels. No global LookAndFeel/UIManager changes; the rest of the desktop is unaffected.
  */
 internal fun createTrayMenu(
     version: String,
@@ -69,25 +118,24 @@ internal fun createTrayMenu(
     val systemFont = runCatching { Toolkit.getDefaultToolkit().getDesktopProperty("win.menu.font") as? Font }.getOrNull()
         ?: Font(Font.DIALOG, Font.PLAIN, 13)
     val font = systemFont.deriveFont((systemFont.size2D.coerceAtLeast(13f) * textScale).coerceIn(11f, 24f))
-    val menu = JPopupMenu().apply {
-        background = colors.background
-        foreground = colors.text
-        border = BorderFactory.createCompoundBorder(BorderFactory.createLineBorder(colors.border),
-            BorderFactory.createEmptyBorder(6, 6, 6, 6))
-        isLightWeightPopupEnabled = false
-    }
+    val menu = JPopupMenu().apply { plainPopup(this, colors) }
+    val arrow = TrayArrow(colors, (font.size2D * .8f).toInt().coerceAtLeast(9))
     fun style(item: JMenuItem) {
         if (item is JMenu) item.setUI(object : BasicMenuUI() {
+            override fun getPropertyPrefix() = TRAY_PREFIX
             override fun installDefaults() {
                 super.installDefaults()
                 selectionBackground = colors.selected; selectionForeground = colors.onSelected
                 disabledForeground = colors.muted
+                checkIcon = null; arrowIcon = arrow
             }
         }) else item.setUI(object : BasicMenuItemUI() {
+            override fun getPropertyPrefix() = TRAY_PREFIX
             override fun installDefaults() {
                 super.installDefaults()
                 selectionBackground = colors.selected; selectionForeground = colors.onSelected
                 disabledForeground = colors.muted
+                checkIcon = null; arrowIcon = null
             }
         })
         item.font = font
@@ -104,17 +152,24 @@ internal fun createTrayMenu(
     fun destination(where: TrayDestination) = action(where.label) { onNavigate(where) }.apply { isEnabled = where in available }
     fun separator(target: JPopupMenu = menu) {
         target.add(JPanel().apply {
+            setUI(BasicPanelUI())
+            isOpaque = true
             background = colors.border
             preferredSize = Dimension(1, 1)
             border = BorderFactory.createEmptyBorder()
         })
     }
-    menu.add(JLabel("RingMASTER   ·   $version").apply {
+    fun heading(text: String) = JLabel(text).apply {
+        setUI(BasicLabelUI())
+        isOpaque = true
+        background = colors.background
+    }
+    menu.add(heading("RingMASTER   ·   $version").apply {
         this.font = font.deriveFont(Font.BOLD)
         foreground = colors.text
         border = BorderFactory.createEmptyBorder(8, 14, 4, 14)
     })
-    menu.add(JLabel(status).apply {
+    menu.add(heading(status).apply {
         this.font = font.deriveFont((font.size2D - 1).coerceAtLeast(11f))
         foreground = colors.muted
         border = BorderFactory.createEmptyBorder(0, 14, 10, 14)
@@ -126,9 +181,7 @@ internal fun createTrayMenu(
     }
     fun submenu(label: String): JMenu = JMenu(label).apply {
         style(this)
-        popupMenu.background = colors.background
-        popupMenu.border = menu.border
-        popupMenu.isLightWeightPopupEnabled = false
+        plainPopup(popupMenu, colors)
     }
     val more = submenu("More shortcuts")
     for (where in listOf(TrayDestination.Connections, TrayDestination.Storage, TrayDestination.Watcher)) more.add(destination(where))
@@ -186,6 +239,9 @@ internal class TrayMenuWindow {
             name = "RingMASTER tray menu"
             isAlwaysOnTop = true
             focusableWindowState = true
+            // One pixel, but in the menu's colour: the dialog's own default is the system's window colour.
+            background = menu.background
+            contentPane.background = menu.background
             setBounds(location.x, location.y, 1, 1)
         }
         owner = anchor

@@ -61,9 +61,14 @@ object Tech {
     val OnAccent: Color get() = Appearance.palette.onAccent
     val AmberWash: Color get() = Appearance.palette.amberWash
     val Light: Boolean get() = Appearance.palette.light
+    /** A disabled control's label. High contrast keeps it readable (at least 4.5:1) instead of fading it out. */
+    val Disabled: Color get() = Appearance.palette.disabled
     val Plate = CutCornerShape(bottomEnd = 18.dp)
     val Control = CutCornerShape(bottomEnd = 8.dp)
 }
+
+/** Dimmed text (secondary values, placeholders, hints). High contrast never dims text. */
+fun Color.dimmed(alpha: Float): Color = if (Appearance.palette.highContrast) this else copy(alpha = alpha)
 
 /** Material colours from the active palette. Surfaces stay opaque even over a background image, so menus and dialogs read cleanly. */
 val ringColors: ColorScheme get() = Appearance.palette.let { p ->
@@ -87,7 +92,8 @@ val ringColors: ColorScheme get() = Appearance.palette.let { p ->
     OutlinedButton(interactionSource = interaction, onClick = onClick, enabled = enabled, modifier = modifier.heightIn(min = 32.dp),
         shape = Tech.Control, border = BorderStroke(1.dp, tint),
         colors = ButtonDefaults.outlinedButtonColors(containerColor = if (active) Tech.AmberWash else Color.Transparent,
-            contentColor = if (active) Tech.Amber else Tech.Ink), contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp)) {
+            contentColor = if (active) Tech.Amber else Tech.Ink, disabledContentColor = if (Appearance.palette.highContrast) Tech.Disabled else Tech.Ink.copy(alpha = .38f)),
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp)) {
         Text(label.uppercase(), fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 12.sp, letterSpacing = 0.6.sp)
     }
 }
@@ -242,7 +248,7 @@ fun Modifier.focusRing(focused: Boolean, shape: androidx.compose.ui.graphics.Sha
     val focused by interaction.collectIsFocusedAsState()
     TextButton(onClick=onClick, enabled=enabled, shape=Tech.Control, contentPadding=PaddingValues(horizontal=if (width != null) 0.dp else 10.dp, vertical=0.dp), interactionSource=interaction,
         modifier=Modifier.heightIn(min = 26.dp).then(if (width != null) Modifier.width(width) else Modifier).focusRing(focused, Tech.Control, gap = 2.dp).border(1.dp, if (enabled) androidx.compose.ui.graphics.lerp(Tech.Edge, Tech.Amber, lit) else Tech.Edge, Tech.Control),
-        colors=ButtonDefaults.textButtonColors(contentColor=androidx.compose.ui.graphics.lerp(Tech.Ink, Tech.Amber, lit), disabledContentColor=Tech.Muted.copy(alpha=.5f))) {
+        colors=ButtonDefaults.textButtonColors(contentColor=androidx.compose.ui.graphics.lerp(Tech.Ink, Tech.Amber, lit), disabledContentColor=Tech.Disabled)) {
         Text(label.uppercase(), fontFamily=FontFamily.Monospace, fontSize=11.sp, fontWeight=FontWeight.Bold, letterSpacing=.5.sp)
     }
 }
@@ -539,7 +545,7 @@ internal const val DIALOG_MORE_TAG = "dialog-more-below"
         Box(Modifier.fillMaxWidth().then(if (singleLine) Modifier.height(32.dp) else Modifier.heightIn(min = 64.dp, max = 140.dp))
             .border(1.dp, edge, Tech.Control).padding(horizontal = 8.dp, vertical = if (singleLine) 0.dp else 7.dp),
             contentAlignment = if (singleLine) Alignment.CenterStart else Alignment.TopStart) {
-            if (value.isEmpty() && placeholder != null) Text(placeholder, fontFamily = Tech.Mono, fontSize = 12.sp, color = Tech.Muted.copy(alpha = .55f), maxLines = 1)
+            if (value.isEmpty() && placeholder != null) Text(placeholder, fontFamily = Tech.Mono, fontSize = 12.sp, color = Tech.Muted.dimmed(.55f), maxLines = 1)
             androidx.compose.foundation.text.BasicTextField(value, onValue, Modifier.fillMaxWidth(), enabled = enabled, singleLine = singleLine,
                 textStyle = androidx.compose.ui.text.TextStyle(color = if (enabled) Tech.Ink else Tech.Muted, fontSize = 12.sp, fontFamily = Tech.Mono),
                 cursorBrush = androidx.compose.ui.graphics.SolidColor(Tech.Amber), interactionSource = interaction)
