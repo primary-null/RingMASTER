@@ -90,6 +90,11 @@ internal fun guestHasPage(state: WorkspaceState, guest: Guest): Boolean = state.
     val motion = LocalMotion.current
     val sparks = LocalSparks.current
     val motionBook = LocalMotionBook.current
+    val host = LocalAppHost.current
+    val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
+    val scope = rememberCoroutineScope()
+    var diagnosticStatus by remember { mutableStateOf<String?>(null) }
+    val diagnosticSessions = LocalDiagnosticSessions.current
     // Where the Send button is, so the spark can leave from it after the dialog has closed.
     val sendButton = remember { arrayOfNulls<androidx.compose.ui.layout.LayoutCoordinates>(1) }
     var detailOpen by remember(state.connectionEpoch) { mutableStateOf(false) }
@@ -228,18 +233,39 @@ internal fun guestHasPage(state: WorkspaceState, guest: Guest): Boolean = state.
     val short = maxHeight < 400.dp
     val pageScroll = rememberScrollState()
     Column(Modifier.fillMaxSize().then(if (compact) Modifier.padding(end = 12.dp).verticalScroll(pageScroll) else Modifier), verticalArrangement = Arrangement.spacedBy(if (short) 4.dp else Tech.Space8)) {
-        TelemetryStrip(state, workspace, onDisconnect, short = short)
+        if (state.connected || state.demo) TelemetryStrip(state, workspace, onDisconnect, short = short)
         if (state.loading) TechProgress()
-        state.error?.let { Text(it, color = Tech.Red, fontSize = 13.sp) }
+        // A closed session's reason is on the failure card below, not repeated above it.
+        state.error?.takeIf { state.connected || state.demo || state.overview != null }?.let { Text(it, color = Tech.Red, fontSize = 13.sp) }
         if (state.connected && state.lostPowerResults.isNotEmpty()) LostPowerResults(state, workspace)
         val overview = state.overview
         if (overview == null) {
-            if (!state.loading) TechPanel(Modifier.fillMaxWidth(), rail = Tech.Amber) {
-                Text("Open your infrastructure workspace", fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
-                Spacer(Modifier.height(12.dp))
-                Text("Connect to a Proxmox server to inspect its guests, or explore the demo.", color = Tech.Muted)
-                Spacer(Modifier.height(18.dp))
-                TechAction("Desk", active = true, onClick = onConnect)
+            if (!state.loading) TechPanel(Modifier.fillMaxWidth(), rail = if (!state.connected && state.error != null) Tech.Red else Tech.Amber) {
+                if (!state.connected && state.error != null) {
+                    Text("Connection failed", fontSize = 20.sp, fontWeight = FontWeight.SemiBold, color = Tech.Red)
+                    Spacer(Modifier.height(8.dp))
+                    Text(state.error.orEmpty(), color = Tech.Ink)
+                    if (state.failedAddress.isNotEmpty()) Text(if (Appearance.showcase) "Hidden server" else state.failedAddress, Modifier.identity(), color = Tech.Muted, fontSize = 12.sp, fontFamily = Tech.Mono)
+                    diagnosticStatus?.let {
+                        Spacer(Modifier.height(8.dp))
+                        Text(it, color = Tech.Amber, fontSize = 12.sp, fontFamily = Tech.Mono)
+                    }
+                    Spacer(Modifier.height(18.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        TechAction("Return to Desk", active = true, onClick = onConnect)
+                        TechAction("Export diagnostics…", onClick = {
+                            exportDiagnosticsBundle(scope, host, clipboard, diagnosticSessions()) {
+                                diagnosticStatus = it
+                            }
+                        })
+                    }
+                } else {
+                    Text("Open your infrastructure workspace", fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.height(12.dp))
+                    Text("Connect to a Proxmox server to inspect its guests, or explore the demo.", color = Tech.Muted)
+                    Spacer(Modifier.height(18.dp))
+                    TechAction("Desk", active = true, onClick = onConnect)
+                }
             }
         } else {
             val guests = overview.guests.filter { guestVisible(it, filter, search) }

@@ -25,6 +25,10 @@ import java.nio.file.Path
 /** Version, where things live, licences, and the deliberate wipe. [onWiped] runs after Clear everything (the app quits). */
 @Composable internal fun AboutSettingsSection(onWiped: () -> Unit) {
     val host = LocalAppHost.current
+    val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
+    val scope = rememberCoroutineScope()
+    var diagStatus by remember { mutableStateOf<String?>(null) }
+    val diagnosticSessions = LocalDiagnosticSessions.current
     var legal by remember { mutableStateOf<Legal?>(null) }
     val notices = remember(legal) {
         when (legal) {
@@ -47,6 +51,17 @@ import java.nio.file.Path
                 ProjectLinkRow()
             }
         }
+        HorizontalDivider(color = Tech.Edge)
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            SectionLabel("Diagnostics and support", Modifier.weight(1f))
+            MiniAction("Export diagnostics…") {
+                exportDiagnosticsBundle(scope, host, clipboard, diagnosticSessions()) {
+                    diagStatus = it
+                }
+            }
+        }
+        diagStatus?.let { Text(it, color = Tech.Amber, fontSize = 11.sp, fontFamily = Tech.Mono) }
+        Text("One file for a bug report: app, system and display facts, each open server's address, sign-in type, route and a fresh reachability and certificate check, and the redacted trace. It names your servers. It never holds a user name, password, token or ticket.", fontSize = 11.sp, color = Tech.Muted)
         HorizontalDivider(color = Tech.Edge)
         SectionLabel("Stored on this computer")
         Place("Settings and connections", AppData.configDir, host.web)

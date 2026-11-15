@@ -898,7 +898,7 @@ internal fun fleetDigest(state: WorkspaceState, total: FleetTotals?): String {
     val actions: @Composable (Modifier) -> Unit = { modifier ->
         Row(modifier.padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             HelpTip("Sync now (F5)") {
-                Box(Modifier.size(28.dp).border(1.dp, Tech.Edge, Tech.Control).clickable(enabled = (state.connected || state.demo) && !state.loading, onClick = workspace::refresh), contentAlignment = Alignment.Center) {
+                Box(Modifier.size(28.dp).border(1.dp, Tech.Edge, Tech.Control).clickable(enabled = state.connected || state.demo, onClick = { workspace.refresh(force = true) }), contentAlignment = Alignment.Center) {
                     Canvas(Modifier.size(14.dp)) {
                         val spin = if (spinning) phase.spin.floatValue else 0f
                         val st = Stroke(1.6.dp.toPx(), cap = StrokeCap.Round)

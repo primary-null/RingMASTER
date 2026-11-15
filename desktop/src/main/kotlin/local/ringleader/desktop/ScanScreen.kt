@@ -30,16 +30,28 @@ class ScanSession(private val scope: CoroutineScope) {
     var running by mutableStateOf(false); private set
     var message by mutableStateOf(""); private set
     var durationSeconds by mutableStateOf(0L); private set
+    /** A private subnet beyond this computer's own networks, typed by the user. Blank for none. */
+    var extraSubnet by mutableStateOf("")
+    /** Why the typed subnet is not swept as written. Blank when it is, or when there is none. */
+    var extraNote by mutableStateOf(""); private set
     private var job: Job? = null
 
     fun start(origins: List<String>) {
         if (running) return
+        val extra = listOfNotNull(extraSubnet.trim().takeIf { it.isNotEmpty() })
+        val planned = extra.firstOrNull()?.let { ScanRules.planSubnet(it) }
+        if (extra.isNotEmpty() && planned == null) {
+            // Nothing starts: a typo must not look like a scan that found nothing there.
+            extraNote = "Not a private IPv4 subnet. Use a form like 192.168.20.0/24 (10.x, 172.16-31.x or 192.168.x only)."
+            return
+        }
+        extraNote = if (planned != null && ScanRules.subnetNarrowed(extra.first())) "Only ${planned.cidr} is swept: an additional subnet is limited to 254 addresses." else ""
         running = true; message = ""; progress = null; durationSeconds = 0
         val started = System.nanoTime()
         job = scope.launch {
             // The elapsed time counts up while the scan runs, not only when it ends.
             val clock = launch { while (true) { delay(1000); durationSeconds = (System.nanoTime()-started)/1_000_000_000 } }
-            try { NetworkScanner().scan(origins = origins).collect { progress = it } }
+            try { NetworkScanner().scan(origins = origins, extraSubnets = extra).collect { progress = it } }
             catch (e: CancellationException) { message = "Cancelled"; throw e }
             catch (e: Exception) { message = "Scan failed: ${e.javaClass.simpleName}" }
             finally { clock.cancel(); durationSeconds = (System.nanoTime()-started)/1_000_000_000; running = false }
@@ -116,10 +128,13 @@ internal fun certificateNote(hit: ScanHit, now: Long = System.currentTimeMillis(
             HelpTip(SCAN_HELP) { MiniAction(if (info) "Hide trust info" else "Scan & trust info", primary = info) { info = !info } }
         }
         if(info) Text(SCAN_HELP,color=Tech.Muted)
-        Row(horizontalArrangement = Arrangement.spacedBy(Tech.Space8)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(Tech.Space8), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
             TechAction("Start scan", enabled = !session.running) { session.start(origins) }
             TechAction("Cancel", enabled = session.running) { session.cancel() }
+            Spacer(Modifier.width(8.dp))
+            TechField(session.extraSubnet, { session.extraSubnet = it }, "Additional subnet", placeholder = "e.g. 192.168.20.0/24", modifier = Modifier.width(220.dp))
         }
+        if (session.extraNote.isNotEmpty()) Text(session.extraNote, color = Tech.Amber, fontSize = 12.sp)
         if (session.message.isNotEmpty()) TechPanel(Modifier.fillMaxWidth()) { Text(session.message); Text("Results remain available. Start a new scan when ready.",color=Tech.Muted) }
         if(session.progress == null) TechPanel(Modifier.fillMaxWidth()) { SectionLabel("Ready to discover"); Text("Start a scan to find Proxmox servers and other services.",color=Tech.Muted,fontFamily=Tech.Mono,fontSize=12.sp) }
         session.progress?.let { p ->

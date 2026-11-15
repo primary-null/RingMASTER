@@ -139,6 +139,8 @@ data class WorkspaceState(
     val connected: Boolean = false, val demo: Boolean = false, val address: String = "",
     val overview: Overview? = null, val loading: Boolean = false, val updatedAt: Instant? = null,
     val error: String? = null, val stale: Boolean = false, val selected: Guest? = null,
+    /** The server whose session a refused or expired sign-in just closed ([error] says why). Blank otherwise. */
+    val failedAddress: String = "",
     val details: GuestDetails? = null, val detailsLoading: Boolean = false,
     val detailsError: String? = null, val detailsUpdatedAt: Instant? = null,
     val connectionEpoch: Long = 0,
@@ -355,6 +357,7 @@ class Workspace(
 
     fun connect(value: Connection) {
         closeSession()
+        lastFailure = null
         Trace.emit(TraceSource.App, "connect", "Connecting", mapOf("url" to Redact.url(value.address), "kind" to value.kind))
         connection = value
         mutableState.value = WorkspaceState(
@@ -370,12 +373,14 @@ class Workspace(
 
     fun disconnect() {
         closeSession()
+        lastFailure = null
         mutableState.value = WorkspaceState()
         Trace.emit(TraceSource.App, "disconnect", "Disconnected")
     }
 
     fun exploreDemo() {
         closeSession()
+        lastFailure = null
         resetDemoMotion()
         val now = clock()
         mutableState.value = WorkspaceState(
@@ -414,7 +419,7 @@ class Workspace(
         if (enabled) startTaskLoop()
     }
 
-    fun refresh() {
+    fun refresh(force: Boolean = false) {
         if (mutableState.value.demo) {
             dropNodeRead()
             resetDemoMotion()
@@ -427,7 +432,14 @@ class Workspace(
             return
         }
         val current = connection ?: return
-        if (inventoryJob?.isActive == true || liveTick?.isActive == true) return
+        if (inventoryJob?.isActive == true || liveTick?.isActive == true) {
+            if (force) {
+                inventoryJob?.cancel()
+                liveTick?.cancel()
+            } else {
+                return
+            }
+        }
         val expected = generation
         val order = ++inventoryOrder
         val remote = current.remoteKey
@@ -453,6 +465,7 @@ class Workspace(
             } catch (e: CancellationException) { throw e }
             catch (e: SessionExpiredException) { if (generation == expected) expire() }
             catch (e: TwoFactorRequiredException) { if (generation == expected) expire(e.message) }
+            catch (e: LoginRefusedException) { if (generation == expected) expire(e.message) }
             catch (e: Exception) {
                 if (generation == expected && inventoryOrder == order) mutableState.update {
                     it.copy(loading = false, stale = it.overview != null, error = readableError(e), nodeStatusLoading = false, nodeStatusStale = it.nodeStatus != null || it.nodeStatusStale)
@@ -462,8 +475,15 @@ class Workspace(
     }
 
     /** Manual Activity read. Independent of inventory refresh, and a duplicate call does not queue another request. */
-    fun refreshTasks() {
-        if (taskJob?.isActive == true || taskTick?.isActive == true) return
+    fun refreshTasks(force: Boolean = false) {
+        if (taskJob?.isActive == true || taskTick?.isActive == true) {
+            if (force) {
+                taskJob?.cancel()
+                taskTick?.cancel()
+            } else {
+                return
+            }
+        }
         if (mutableState.value.demo) {
             mutableState.update { it.copy(tasks = demoTasks, tasksLoading = false, tasksStale = false, tasksError = null, tasksUpdatedAt = Instant.now()) }
             return
@@ -485,6 +505,7 @@ class Workspace(
                 mutableState.update { it.copy(tasks = tasks, tasksLoading = false, tasksStale = false, tasksError = null, tasksUpdatedAt = Instant.now()) }
             } catch (e: CancellationException) { throw e }
             catch (e: SessionExpiredException) { if (generation == session) expire() }
+            catch (e: LoginRefusedException) { if (generation == session) expire(e.message) }
             catch (e: Exception) {
                 if (generation == session && taskGeneration == expectedTask) mutableState.update {
                     it.copy(tasksLoading = false, tasksStale = it.tasks != null, tasksError = readableError(e))
@@ -557,6 +578,7 @@ class Workspace(
                     if (!taskLogKeepsPolling(status)) return@launch
                 } catch (e: CancellationException) { throw e }
                 catch (e: SessionExpiredException) { if (generation == session) expire(); return@launch }
+                catch (e: LoginRefusedException) { if (generation == session) expire(e.message); return@launch }
                 catch (e: GuestPermissionException) { failLog(token, session, epoch, task, TASK_LOG_AUDIT_DENIED); return@launch }
                 catch (e: Exception) {
                     failures++
@@ -608,6 +630,7 @@ class Workspace(
                 publishLog(token, session, epoch, task, mutableState.value.taskLog?.status, page)
             } catch (e: CancellationException) { throw e }
             catch (e: SessionExpiredException) { if (generation == session) expire() }
+            catch (e: LoginRefusedException) { if (generation == session) expire(e.message) }
             catch (e: GuestPermissionException) { failLog(token, session, epoch, task, TASK_LOG_AUDIT_DENIED) }
             // One failed Load more keeps the lines and any running follow; the button can be used again.
             catch (e: Exception) { retryLog(token, session, epoch, task, readableError(e)) }
@@ -1963,7 +1986,8 @@ class Workspace(
             while (isActive && tasksLive && generation == session && mutableState.value.connectionEpoch == epoch) {
                 delay(LIVE_TASK_INTERVAL_SECONDS * 1000L)
                 if (!isActive || !tasksLive || generation != session || mutableState.value.connectionEpoch != epoch) break
-                if (taskJob?.isActive == true || taskTick?.isActive == true) continue
+                if (mutableState.value.overview == null && !mutableState.value.demo) continue
+                if (taskJob?.isActive == true || taskTick?.isActive == true || inventoryJob?.isActive == true) continue
                 Trace.emit(TraceSource.Task, "poll", "Poll cluster tasks")
                 val tick = launch { quietTasks(session, epoch) }
                 taskTick = tick
@@ -1990,6 +2014,8 @@ class Workspace(
         } catch (e: SessionExpiredException) {
             if (generation == session) expire()
         } catch (e: TwoFactorRequiredException) {
+            if (generation == session) expire(e.message)
+        } catch (e: LoginRefusedException) {
             if (generation == session) expire(e.message)
         } catch (e: Exception) {
             if (generation == session && mutableState.value.connectionEpoch == epoch) markLiveFailure(e)
@@ -2120,6 +2146,7 @@ class Workspace(
             gateway.details(current, guest)
         } catch (e: CancellationException) { throw e }
         catch (e: SessionExpiredException) { throw e }
+        catch (e: LoginRefusedException) { throw e }
         catch (e: Exception) {
             if (stillCurrent(mutableState.value)) mutableState.update { state -> if (!stillCurrent(state)) state else state.copy(detailsError = readableError(e)) }
             return
@@ -2148,6 +2175,7 @@ class Workspace(
             nodeStatusGateway.status(current, member.remote, name, "")
         } catch (e: CancellationException) { throw e }
         catch (e: SessionExpiredException) { throw e }
+        catch (e: LoginRefusedException) { throw e }
         catch (e: Exception) {
             if (stillCurrent(mutableState.value)) mutableState.update {
                 if (!stillCurrent(it)) it
@@ -2188,6 +2216,8 @@ class Workspace(
             throw e
         } catch (e: SessionExpiredException) {
             if (generation == session) expire()
+        } catch (e: LoginRefusedException) {
+            if (generation == session) expire(e.message)
         } catch (e: Exception) {
             if (generation == session && mutableState.value.connectionEpoch == epoch) {
                 mutableState.update { it.copy(tasksStale = it.tasks != null, tasksError = readableError(e)) }
@@ -2252,6 +2282,7 @@ class Workspace(
             if (live()) publish(value)
         } catch (e: CancellationException) { throw e }
         catch (e: SessionExpiredException) { if (generation == session) expire() }
+        catch (e: LoginRefusedException) { if (generation == session) expire(e.message) }
         catch (e: GuestPermissionException) { if (live()) fail(deniedMessage, true) }
         catch (e: Exception) { if (live()) fail(readableError(e), false) }
     }
@@ -2723,8 +2754,22 @@ class Workspace(
      * (the code is used once). Close it like Disconnect and show [message], so the desk's code field is usable again.
      */
     private fun expire(message: String? = SessionExpiredException().message) {
+        val failed = connection
         closeSession()
-        mutableState.value = WorkspaceState(error = message)
+        lastFailure = failed?.let { DiagnosticSessionInfo(it.address, authLabel(it), connected = false, overviewLoaded = false, lastError = message, kind = it.kind, pin = it.fingerprint.ifEmpty { null }) }
+        mutableState.value = WorkspaceState(error = message, failedAddress = failed?.address.orEmpty())
+    }
+
+    /** The session a refused or expired sign-in just closed. Kept until the next connect or disconnect, for the failure card and diagnostics. */
+    private var lastFailure: DiagnosticSessionInfo? = null
+    private fun authLabel(c: Connection) = if (c.passwordLogin) "Password" else "API token"
+
+    /** This session for a diagnostics bundle: server, kind and sign-in type. Never a user name, token name or secret. */
+    fun diagnostic(): DiagnosticSessionInfo? {
+        val now = mutableState.value
+        if (now.demo) return DiagnosticSessionInfo("", "Demo", connected = false, overviewLoaded = now.overview != null)
+        return connection?.let { DiagnosticSessionInfo(it.address, authLabel(it), now.connected, now.overview != null, now.error, kind = it.kind, pin = it.fingerprint.ifEmpty { null }) }
+            ?: lastFailure
     }
     override fun close() { mutationLeases.unregister(foregroundView); disconnect() }
 }

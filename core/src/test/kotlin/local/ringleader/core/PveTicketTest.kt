@@ -79,6 +79,49 @@ class PveTicketTest {
     @Test fun wrongPassword() = fixture({ 401 to "{}" }) { c ->
         assertEquals("The server refused this user name or password.", assertFailsWith<LoginRefusedException> { c.tickets.get(c) }.message)
     }
+    @Test fun refusedLoginIsLatchedAndNeverRetried() {
+        var attempts = 0
+        fixture({ e ->
+            attempts++
+            401 to "{}"
+        }) { c ->
+            assertFailsWith<LoginRefusedException> { c.tickets.get(c) }
+            assertEquals(1, attempts)
+            assertFailsWith<LoginRefusedException> { c.tickets.get(c) }
+            assertEquals(1, attempts)
+        }
+    }
+    @Test fun probeTlsFingerprintMatchesServerCertificate() = fixture({ 200 to "{}" }) { c ->
+        kotlinx.coroutines.runBlocking {
+            val probed = probeTlsFingerprint(c.address)
+            assertNotNull(probed)
+            assertEquals(c.fingerprint.lowercase(), probed.replace(":", "").lowercase())
+            // The bare form a user types reads the same certificate once completed, and never on its own.
+            val bare = c.address.removePrefix("https://")
+            assertNull(probeTlsFingerprint(bare))
+            assertEquals(probed, probeTlsFingerprint(completeServerAddress(bare)))
+        }
+    }
+    @Test fun diagnosticsCheckEachSessionAndCompareItsPin() = fixture({ 401 to "{}" }) { c ->
+        kotlinx.coroutines.runBlocking {
+            val good = DiagnosticSessionInfo(c.address, "Password", connected = false, overviewLoaded = false, lastError = "refused", kind = DIRECT_PVE_KIND, pin = c.fingerprint)
+            val report = createDiagnosticReport("test", sessions = listOf(good))
+            val seen = report.reachability.single()
+            assertEquals(c.address, seen.address)
+            assertTrue(seen.tcpSuccess); assertTrue(seen.tlsHandshakeSuccess)
+            assertEquals(true, seen.tlsMatchesPin)
+            assertEquals(401, seen.httpStatusCode)
+            val json = report.toJsonString()
+            assertTrue(Regex("\"tlsMatchesPin\":\\s*true").containsMatchIn(json))
+            assertTrue(Regex("\"certificatePinned\":\\s*true").containsMatchIn(json))
+            assertTrue(Regex("\"authKind\":\\s*\"Password\"").containsMatchIn(json))
+            // Nothing of the account: the fixture's user and password never reach the bundle, and the pin is not repeated as one.
+            assertFalse("root@pam" in json); assertFalse("pass & word" in json); assertFalse("\"pin\"" in json)
+            val changed = createDiagnosticReport("test", sessions = listOf(good.copy(pin = "00".repeat(32)))).reachability.single()
+            assertEquals(false, changed.tlsMatchesPin)
+            assertNull(createDiagnosticReport("test", sessions = listOf(good.copy(pin = null))).reachability.single().tlsMatchesPin)
+        }
+    }
     @Test fun retryExactlyOnce() {
         var logins = 0; var reads = 0
         fixture({ e -> if (e.requestURI.path.endsWith("/ticket")) { logins++; 200 to success }

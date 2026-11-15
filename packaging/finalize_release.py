@@ -35,6 +35,14 @@ def api(repo: str, path: str, *, payload: dict | None = None) -> dict:
     return json.loads(result.stdout)
 
 
+def find_release(repo: str, tag: str) -> dict:
+    """The release for a tag, draft or published. GitHub answers 404 to releases/tags/<tag> for a draft, so read the list."""
+    found = [r for r in api(repo, "releases?per_page=100") if r.get("tag_name") == tag]
+    if len(found) != 1:
+        raise ValueError(f"Expected exactly one release for {tag}, found {len(found)}")
+    return found[0]
+
+
 def digest(path: Path) -> str:
     with path.open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
@@ -89,7 +97,7 @@ def run(args: argparse.Namespace) -> dict:
     source_version = re.search(r'version = "([0-9.]+)"', (ROOT / "build.gradle.kts").read_text())[1]
     if source_version != args.tag[1:]:
         raise ValueError("Use a checkout of the version being finalized")
-    release = api(args.repo, "releases/tags/" + args.tag)
+    release = find_release(args.repo, args.tag)
     if not release["draft"] and args.publish:
         raise ValueError("Already published; this tool never replaces a published asset")
     ref = api(args.repo, "git/ref/tags/" + args.tag)["object"]

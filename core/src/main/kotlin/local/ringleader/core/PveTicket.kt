@@ -48,6 +48,7 @@ internal class TicketStore(private val clock: () -> Instant = Instant::now) {
     private val entries = mutableMapOf<Pair<String, String>, PveTicket>()
     private val flights = mutableMapOf<Pair<String, String>, Flight>()
     private var closed = false
+    @Volatile private var refused: LoginRefusedException? = null
 
     /** Drop the cached ticket because the server refused it. A login already in flight carries on. */
     fun clear() = synchronized(lock) { entries.clear() }
@@ -69,6 +70,7 @@ internal class TicketStore(private val clock: () -> Instant = Instant::now) {
         var renew: String? = null
         val joined = synchronized(lock) {
             check(!closed) { CLOSED }
+            refused?.let { throw it }
             val old = entries[key]
             if (old != null) {
                 val age = Duration.between(old.issued, clock())
@@ -82,6 +84,11 @@ internal class TicketStore(private val clock: () -> Instant = Instant::now) {
         val result = runCatching { login(connection, renew) }
         val open = synchronized(lock) {
             if (flights[key] === mine) flights.remove(key)
+            result.exceptionOrNull()?.let { failure ->
+                if (failure is LoginRefusedException) {
+                    refused = failure
+                }
+            }
             if (!closed) result.onSuccess { entries[key] = it }
             !closed
         }

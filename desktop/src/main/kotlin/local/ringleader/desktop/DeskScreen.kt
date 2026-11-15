@@ -93,6 +93,8 @@ import local.ringleader.core.ScanHit
 import local.ringleader.core.ScanKind
 import local.ringleader.core.WorkspaceState
 import local.ringleader.core.connectionKindLabel
+import local.ringleader.core.completeServerAddress
+import local.ringleader.core.probeTlsFingerprint
 
 private val DeskContentWidth = 1180.dp
 private val DeskSplitWidth = 1000.dp
@@ -450,19 +452,50 @@ private fun rememberHelp(vaultName: String): String = when {
     val passwordMode = passwordChoice && kind == DIRECT_PVE_KIND
     // An edit permanently invalidates this scan offer, even if the address is later restored.
     val scanOffer = remember(scanned) { ScannedPinOffer(scanned?.origin.orEmpty(), kind, scanned?.fingerprint) }
+    var manualOffer by remember(scanned) { mutableStateOf<ScannedPinOffer?>(null) }
     var scanExpired by remember(scanned) { mutableStateOf(false) }
     var scanValid by remember(scanned) { mutableStateOf(true) }
+    var probingCert by remember { mutableStateOf(false) }
+    var probeError by remember { mutableStateOf<String?>(null) }
     var replacementChecked by remember(scanned, address, kind) { mutableStateOf(false) }
     var trustRevision by remember { mutableStateOf(0) }
-    val observed = scanOffer.current(address, kind).takeIf { scanValid }
+    val currentOffer = manualOffer ?: scanOffer
+    val observed = currentOffer.current(address, kind).takeIf { scanValid }
     val trust = remember(address, observed, deskState.profiles, deskState.saveBlocked, trustRevision) { desk.manualTrust(address, observed) }
+    // A host typed without https://. The certificate check completes it; until then it is not yet a server address.
+    val bare = address.isNotBlank() && "://" !in address
+    val scope = rememberCoroutineScope()
+    val probeAction = {
+        // A bare host becomes https://host:8006 (8443 for PDM); an address with a scheme is checked as typed.
+        val typed = address
+        val probeKind = kind
+        val target = completeServerAddress(typed, probeKind)
+        if (target.isNotEmpty() && !probingCert) {
+            scope.launch {
+                probingCert = true
+                probeError = null
+                val fp = try { probeTlsFingerprint(target) } finally { probingCert = false }
+                // The answer belongs to the address and kind it was asked for; an edit made meanwhile wins.
+                if (address != typed || kind != probeKind) return@launch
+                address = target
+                if (fp != null) {
+                    manualOffer = ScannedPinOffer(target, probeKind, fp)
+                    scanValid = true
+                    scanExpired = false
+                    trustRevision++
+                } else {
+                    probeError = "No certificate could be read from ${if (Appearance.showcase) "this server" else target}. Check the address and port (Proxmox VE uses 8006), and that this computer can reach it."
+                }
+            }
+        }
+    }
     TechPanel(modifier) {
         Column(verticalArrangement = Arrangement.spacedBy(Tech.Space8)) {
             SectionLabel("Connect")
             HelpTip("A new connection opens beside the ones already open; nothing is replaced. Verify private certificate fingerprints with your administrator.") {
                 Text(if (anyOpen) "Opens beside the open connection · secrets stay in memory" else "Connect without saving a profile · secrets stay in memory", fontSize = 11.sp, lineHeight = 15.sp, color = Tech.Muted, fontFamily = Tech.Mono)
             }
-            KindChoice(kind) { if (kind != it) { scanValid = false; scanOffer.invalidate(); fingerprint = "" }; kind = it }
+            KindChoice(kind) { if (kind != it) { scanValid = false; scanOffer.invalidate(); manualOffer = null; fingerprint = "" }; kind = it }
             if (kind == DIRECT_PVE_KIND) AuthChoice(passwordMode) { chosen ->
                 passwordChoice = chosen
                 motion.put(DESK_PASSWORD_MODE, chosen)
@@ -471,7 +504,7 @@ private fun rememberHelp(vaultName: String): String = when {
             val login = passwordMode && kind == DIRECT_PVE_KIND
             val canConnect = address.isNotBlank() && (if (passwordMode) user else tokenId).isNotBlank() && deskState.manualSecretPresent
             val connect: (Boolean, Boolean) -> Unit = { approve, normalTls ->
-                if (observed != null && scanOffer.current(address, kind) == null) {
+                if (observed != null && currentOffer.current(address, kind) == null) {
                     scanExpired = true; scanValid = false
                 } else if (canConnect) {
                     val completed = if (login) completeLoginUser(user) else tokenId
@@ -483,10 +516,18 @@ private fun rememberHelp(vaultName: String): String = when {
                     if (opened) onOpenWorkspace()
                 }
             }
-            // Enter in a secret field never approves new or changed trust.
-            val submit = { if (!trust.needsApproval && !trust.conflict && trust.error == null) connect(false, false) }
+            // Enter in a secret field never approves new or changed trust; probes unknown cert first.
+            // After a failed check the same button connects anyway, so the connection's own error is shown.
+            val submit = {
+                val unchecked = observed == null && trust.known.isEmpty() && fingerprint.isBlank() && address.isNotBlank() && probeError == null
+                if (bare || unchecked) {
+                    probeAction()
+                } else if (!trust.needsApproval && !trust.conflict && trust.error == null) {
+                    connect(false, false)
+                }
+            }
             CompactDeskField(address, {
-                if (address != it) { scanValid = false; scanOffer.invalidate(); fingerprint = "" }
+                if (address != it) { scanValid = false; scanOffer.invalidate(); manualOffer = null; probeError = null; fingerprint = "" }
                 address = it
             }, "Server address", identity = true)
             if (passwordMode) {
@@ -498,9 +539,15 @@ private fun rememberHelp(vaultName: String): String = when {
                 SecretField(deskState.secretGeneration, "API token secret", onSubmit = submit) { desk.setManualSecret(it) }
             }
             CompactDeskField(fingerprint, { fingerprint = it }, "Trusted certificate SHA-256 · optional")
+            if (probingCert) Text("Checking server certificate…", color = Tech.Muted, fontSize = 12.sp)
+            probeError?.let { Text(it, color = Tech.Red, fontSize = 12.sp) }
+            if (address.isNotBlank() && observed == null && !probingCert) {
+                MiniAction(if (trust.known.isEmpty()) "Check server certificate" else "Re-check server certificate", onClick = probeAction)
+            }
             if (scanExpired) Text("Scan offer expired. Scan again before trusting a certificate.", color = Tech.Red, fontSize = 12.sp)
             if (address.isNotBlank()) {
-                trust.error?.let { Text(it, color = Tech.Red, fontSize = 12.sp) }
+                if (bare) Text("Will be checked as ${if (Appearance.showcase) "an HTTPS address" else completeServerAddress(address, kind)}", color = Tech.Muted, fontSize = 11.sp, fontFamily = Tech.Mono)
+                else trust.error?.let { Text(it, color = Tech.Red, fontSize = 12.sp) }
                 trust.known.forEach { known ->
                     Text("Known SHA-256: ${if (Appearance.showcase) "Hidden" else known}", fontFamily = Tech.Mono, fontSize = 11.sp, color = Tech.Muted)
                 }
@@ -515,7 +562,7 @@ private fun rememberHelp(vaultName: String): String = when {
                 }
                 if (trust.conflict) Text("Saved pins conflict. Review saved connections and remembered trust before connecting.", color = Tech.Red, fontSize = 12.sp)
                 if (trust.changed && trust.canApprove) TechCheck(replacementChecked, { replacementChecked = it }, "Replace the known certificate with this scanned certificate")
-                if (trust.needsApproval) MiniAction("Cancel scanned certificate") { scanValid = false; scanOffer.invalidate(); replacementChecked = false }
+                if (trust.needsApproval) MiniAction("Cancel scanned certificate") { scanValid = false; scanOffer.invalidate(); manualOffer = null; replacementChecked = false }
             }
             if (trust.needsApproval) Column(verticalArrangement = Arrangement.spacedBy(Tech.Space8)) {
                 TechAction(if (trust.changed) "Replace trust and connect" else "Trust and connect", active = true,
@@ -524,7 +571,7 @@ private fun rememberHelp(vaultName: String): String = when {
                 TechAction("Explore demo") { if (desk.exploreDemo()) onOpenWorkspace() }
             } else FlowRow(horizontalArrangement = Arrangement.spacedBy(Tech.Space12), verticalArrangement = Arrangement.spacedBy(Tech.Space8)) {
                 TechAction(if (anyOpen) "Add connection" else "Connect", active = true,
-                    enabled = canConnect && !trust.conflict && trust.error == null, onClick = submit)
+                    enabled = canConnect && !trust.conflict && (trust.error == null || bare), onClick = submit)
                 TechAction("Explore demo") { if (desk.exploreDemo()) onOpenWorkspace() }
             }
         }

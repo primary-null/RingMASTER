@@ -114,4 +114,76 @@ class NetworkScanTest {
         assertEquals(0,values.first().scanned); assertEquals(2,values.last().scanned)
         assertTrue(values.last().finished); assertTrue(values.last().hits.first().saved)
     }
+    @Test fun planSubnetValidatesAndExpandsCidr() {
+        val s1 = ScanRules.planSubnet("192.168.20.0/24")
+        assertNotNull(s1)
+        assertEquals("192.168.20.0/24", s1.cidr)
+        assertEquals(254, s1.addresses.size)
+        assertEquals("192.168.20.1", s1.addresses.first())
+        assertEquals("192.168.20.254", s1.addresses.last())
+
+        val s2 = ScanRules.planSubnet("10.50.1.5")
+        assertNotNull(s2)
+        assertEquals("10.50.1.0/24", s2.cidr)
+        assertEquals(254, s2.addresses.size)
+
+        // Non-RFC1918 rejected
+        assertNull(ScanRules.planSubnet("8.8.8.8/24"))
+        assertNull(ScanRules.planSubnet("invalid"))
+        // A prefix that is not a prefix is a typo, not a /24.
+        assertNull(ScanRules.planSubnet("192.168.20.0/abc"))
+        assertNull(ScanRules.planSubnet("192.168.20.0/33"))
+        assertNull(ScanRules.planSubnet("192.168.20.0/"))
+        assertNull(ScanRules.planSubnet("100.64.0.0/24"))
+        assertFalse(ScanRules.subnetNarrowed("192.168.20.0/24"))
+        assertFalse(ScanRules.subnetNarrowed("192.168.20.7"))
+        assertTrue(ScanRules.subnetNarrowed("172.16.0.0/16"))
+
+        // Broad /16 clamped to /24
+        val sBroad = ScanRules.planSubnet("172.16.0.0/16")
+        assertNotNull(sBroad)
+        assertEquals(24, sBroad.source.prefix)
+        assertEquals(254, sBroad.addresses.size)
+    }
+    @Test fun tailnetPeerAllowedIpsIncludedInDiscovery() = runBlocking {
+        val peer = TailscalePeer("1", "pve-router", null, "linux", true, listOf("100.64.0.2"), false, false, "dfw", null, null, null, null, allowedIps = listOf("192.168.20.44/32"))
+        val status = TailscaleStatus("Running", null, null, null, null, listOf(peer), null, emptyList())
+        val seen = mutableListOf<String>()
+        val scanner = NetworkScanner(TAILNET_CONNECT_TIMEOUT_MS) { ip, port -> synchronized(seen) { seen += ip }; if (port == 8006) listOf(ScanHit(ip, port, true, ScanKind.PVE)) else emptyList() }
+        val found = findTailnetProxmox(status, scanner).toList().last()
+        assertTrue(seen.contains("192.168.20.44"))
+        assertTrue(seen.contains("100.64.0.2"))
+        assertEquals(2, found.size)
+    }
+    @Test fun tailnetRoutedSubnetsAndExitRoutesAreNotProbedAsHosts() = runBlocking {
+        // A subnet router and an exit node: neither a network address nor 0.0.0.0 is a host to connect to.
+        val router = TailscalePeer("1", "router", null, "linux", true, listOf("100.64.0.2"), false, false, "dfw", null, null, null, null,
+            allowedIps = listOf("100.64.0.2/32", "fd7a:115c:a1e0::2/128", "192.168.20.0/24", "10.20.0.0/16", "0.0.0.0/0", "::/0", "0.0.0.0/32"))
+        val status = TailscaleStatus("Running", null, null, null, null, listOf(router), null, emptyList())
+        val seen = mutableListOf<String>()
+        val scanner = NetworkScanner(TAILNET_CONNECT_TIMEOUT_MS) { ip, _ -> synchronized(seen) { seen += ip }; emptyList() }
+        findTailnetProxmox(status, scanner).toList()
+        assertEquals(setOf("100.64.0.2"), seen.toSet())
+    }
+    @Test fun typedServerAddressIsCompletedOnlyWhenItHasNoScheme() {
+        assertEquals("https://192.168.20.44:8006", completeServerAddress(" 192.168.20.44 "))
+        assertEquals("https://192.168.20.44:8443", completeServerAddress("192.168.20.44", PDM_KIND))
+        assertEquals("https://pve.example.test:8006", completeServerAddress("pve.example.test/"))
+        assertEquals("https://192.168.20.44:9000", completeServerAddress("192.168.20.44:9000"))
+        assertEquals("https://[fd00::5]:8006", completeServerAddress("fd00::5"))
+        assertEquals("https://[fd00::5]:8007", completeServerAddress("[fd00::5]:8007"))
+        // Typed with a scheme: left alone. No port there means 443, as the connection reads it.
+        assertEquals("https://pve.example.test", completeServerAddress("https://pve.example.test"))
+        assertEquals("http://192.168.20.44:8006", completeServerAddress("http://192.168.20.44:8006"))
+        assertEquals("", completeServerAddress("  "))
+        // Every completed address is one the connection accepts.
+        listOf("192.168.20.44", "pve.example.test", "fd00::5", "10.0.0.5:8006").forEach { serverOrigin(completeServerAddress(it)) }
+    }
+    @Test fun certificateProbeRefusesWhatTheConnectionWouldNotUse() = runBlocking {
+        val closed = java.net.ServerSocket(0).use { it.localPort }
+        assertNull(probeTlsFingerprint("https://127.0.0.1:$closed", timeoutMs = 500))
+        assertNull(probeTlsFingerprint("http://127.0.0.1:$closed", timeoutMs = 500))
+        assertNull(probeTlsFingerprint("127.0.0.1:$closed", timeoutMs = 500))
+        assertNull(probeTlsFingerprint("", timeoutMs = 500))
+    }
 }

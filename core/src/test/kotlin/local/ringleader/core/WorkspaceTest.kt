@@ -182,6 +182,19 @@ class WorkspaceTest {
         workspace.close()
     }
 
+    @Test fun forcedRefreshCancelsActiveJobAndRestarts() = runTest {
+        val gate = CompletableDeferred<Overview>()
+        var calls = 0
+        val fake = Fake().apply { inventory = { calls++; gate.await() } }
+        val workspace = Workspace(this, fake)
+        workspace.connect(connection()); runCurrent()
+        assertEquals(1, calls)
+        workspace.refresh(force = true); runCurrent()
+        assertEquals(2, calls)
+        gate.complete(Overview(2, listOf(first, second))); runCurrent()
+        workspace.close()
+    }
+
     @Test fun migrationMatchesTheSameRemoteWhileAForeignVmIdDoesNot() {
         val moved = first.copy(node = "node-c")
         val foreign = Guest(remoteB, first.id, "other", "node-c", first.kind, "running")
@@ -256,6 +269,35 @@ class WorkspaceTest {
         assertEquals(listOf(first), workspace.state.value.overview!!.guests)
         assertTrue(workspace.state.value.stale)
         assertNotNull(workspace.state.value.error)
+        workspace.close()
+    }
+
+    @Test fun loginRefusedExpiresSessionAndClearsConnectedState() = runTest {
+        val fake = Fake().apply { inventory = { throw LoginRefusedException("The server refused this user name or password.") } }
+        val workspace = Workspace(this, fake)
+        val conn = connection()
+        workspace.connect(conn)
+        runCurrent()
+        assertFalse(workspace.state.value.connected)
+        assertNull(workspace.state.value.overview)
+        assertEquals("The server refused this user name or password.", workspace.state.value.error)
+        // The closed session stays describable: which server, and the sign-in type, for the failure card and diagnostics.
+        assertEquals(remoteA, workspace.state.value.failedAddress)
+        val failed = assertNotNull(workspace.diagnostic())
+        assertEquals(remoteA, failed.address); assertEquals("API token", failed.authKind); assertFalse(failed.connected)
+        assertEquals("The server refused this user name or password.", failed.lastError)
+        workspace.disconnect()
+        assertNull(workspace.diagnostic()); assertEquals("", workspace.state.value.failedAddress)
+        workspace.close()
+    }
+
+    @Test fun diagnosticDescribesAnOpenSessionWithoutItsAccount() = runTest {
+        val workspace = Workspace(this, Fake().apply { inventory = { Overview(2, listOf(first, second)) } })
+        assertNull(workspace.diagnostic())
+        workspace.connect(Connection(remoteA, "root@pam", "test-only-secret", "ab".repeat(32))); runCurrent()
+        val open = assertNotNull(workspace.diagnostic())
+        assertEquals(DiagnosticSessionInfo(remoteA, "Password", connected = true, overviewLoaded = true, kind = DIRECT_PVE_KIND, pin = "ab".repeat(32)), open)
+        assertFalse("root@pam" in open.toString()); assertFalse("test-only-secret" in open.toString())
         workspace.close()
     }
 

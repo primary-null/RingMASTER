@@ -4,6 +4,7 @@ import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
+import re
 from unittest.mock import patch
 
 SPEC = importlib.util.spec_from_file_location("finalizer", Path(__file__).with_name("finalize_release.py"))
@@ -52,12 +53,30 @@ class FinalizeReleaseTest(unittest.TestCase):
         self.release["assets"].pop()
         with self.assertRaises(ValueError): self.check()
 
+    def source_tag(self):
+        """run() insists on a checkout of the version being finalized, so use this checkout's own version."""
+        text = (Path(__file__).resolve().parents[1] / "build.gradle.kts").read_text(encoding="utf-8")
+        return "v" + re.search(r'version = "([0-9.]+)"', text)[1]
+
     def test_published_release_is_never_modified(self):
-        args = SimpleNamespace(repo=self.repo, tag=self.tag, publish=True)
-        with patch.object(FINALIZER, "api", return_value={"draft": False}) as api:
+        tag = self.source_tag()
+        args = SimpleNamespace(repo=self.repo, tag=tag, publish=True)
+        with patch.object(FINALIZER, "api", return_value=[{"tag_name": tag, "draft": False}]) as api:
             with self.assertRaisesRegex(ValueError, "Already published"):
                 FINALIZER.run(args)
-            api.assert_called_once_with(self.repo, "releases/tags/" + self.tag)
+            api.assert_called_once_with(self.repo, "releases?per_page=100")
+
+    def test_draft_is_found_in_the_release_list(self):
+        # GitHub answers 404 to releases/tags/<tag> for a draft; the list includes drafts.
+        releases = [{"tag_name": "v0.1.0", "draft": False}, {"tag_name": self.tag, "draft": True, "id": 7}]
+        with patch.object(FINALIZER, "api", return_value=releases):
+            self.assertEqual(7, FINALIZER.find_release(self.repo, self.tag)["id"])
+
+    def test_missing_or_duplicate_release_is_refused(self):
+        for releases in ([], [{"tag_name": self.tag}, {"tag_name": self.tag}]):
+            with patch.object(FINALIZER, "api", return_value=releases):
+                with self.assertRaisesRegex(ValueError, "exactly one release"):
+                    FINALIZER.find_release(self.repo, self.tag)
 
 
 if __name__ == "__main__": unittest.main()

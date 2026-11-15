@@ -281,6 +281,8 @@ private var desktopShortcuts: ((KeyEvent) -> Boolean)? = null
     DisposableEffect(routeObserver) { onDispose { routeObserver.close() } }
     LaunchedEffect(vpnSession.changes) { if (vpnSession.changes != 0) routeObserver.invalidate() }
     val routeState by routeObserver.state.collectAsState()
+    // Read when a diagnostics export starts: every open session, with the route tag's observation where it is for that server.
+    val diagnosticSessions = remember(sessions, routeObserver) { { sessions.state.value.open.mapNotNull { it.workspace.diagnostic() }.map { withRoute(it, routeObserver.state.value) } } }
     val toolsSession = remember { ToolsSession(scope) }
     var page by remember { mutableStateOf("Desk") }
     var fleetRequest by remember { mutableStateOf<FleetRequest?>(null) }
@@ -325,7 +327,7 @@ private var desktopShortcuts: ((KeyEvent) -> Boolean)? = null
     val watcherOn = alerts?.watcher != null
     LaunchedEffect(watcherOn) { if (!watcherOn && page == WATCHER_PAGE) page = "Desk" }
     LaunchedEffect(alerts?.notices != null) { if (alerts?.notices == null) noticesOpen = false }
-    if (settingsOpen) SettingsDialog(state, workspace, settingsSection, { settingsSection = it }, { settingsOpen = false }) { host.windowControls?.quit?.invoke() }
+    if (settingsOpen) CompositionLocalProvider(LocalDiagnosticSessions provides diagnosticSessions) { SettingsDialog(state, workspace, settingsSection, { settingsSection = it }, { settingsOpen = false }) { host.windowControls?.quit?.invoke() } }
     if (resident != null) {
         val immersive = LocalImmersive.current
         LaunchedEffect(resident.trayRequest) {
@@ -371,7 +373,7 @@ private var desktopShortcuts: ((KeyEvent) -> Boolean)? = null
     LaunchedEffect(state.connectionEpoch) { if (!host.web) ConsoleHost.release() }
     LaunchedEffect(page) { if (page != "Desk") desk.leaveDesk() }
     val searchFocus=remember { androidx.compose.ui.focus.FocusRequester() }
-    CompositionLocalProvider(LocalSearchFocus provides searchFocus) {
+    CompositionLocalProvider(LocalSearchFocus provides searchFocus, LocalDiagnosticSessions provides diagnosticSessions) {
     ProvideDeskClock(animations = !reduceMotion && focused && !minimized, tickSeconds = !minimized) {
     // Task moments (spark, breathing dot, glow, nudge) fire from real changes in this state, never from a refresh.
     ProvideMotionBook(state) {
@@ -380,9 +382,9 @@ private var desktopShortcuts: ((KeyEvent) -> Boolean)? = null
         if (page == "Fleet" && ConsoleKeys.handler?.invoke(it) == true) true
         else if (it.type == KeyEventType.KeyDown && it.key == Key.F5) {
             when (page) {
-                "Fleet" -> { workspace.refresh(); true }
+                "Fleet" -> { workspace.refresh(force = true); true }
                 "Storage" -> { workspace.refreshStorageContent(); true }
-                "Activity" -> { workspace.refreshTasks(); true }
+                "Activity" -> { workspace.refreshTasks(force = true); true }
                 else -> false
             }
         } else if(it.type == KeyEventType.KeyDown && it.isCtrlPressed) {

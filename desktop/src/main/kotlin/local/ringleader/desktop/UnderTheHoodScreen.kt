@@ -126,6 +126,13 @@ private val hoodTime = DateTimeFormatter.ofPattern("HH:mm:ss.SSS").withZone(Zone
                             }
                             dialog.dispose()
                         }
+                        val host = LocalAppHost.current
+                        val diagnosticSessions = LocalDiagnosticSessions.current
+                        MiniAction("Diagnostics…") {
+                            exportDiagnosticsBundle(scope, host, clipboard, diagnosticSessions()) {
+                                exportStatus = it
+                            }
+                        }
                         TechCheck(errors,{ errors=it },"Errors only")
                     }
                     if(exportStatus.isNotEmpty()) DataText(exportStatus)

@@ -63,6 +63,8 @@ data class TailscalePeer(
     val lastHandshake: Instant? = null,
     /** Tailscale's "Active": traffic with this peer recently. Null when the status did not say. */
     val active: Boolean? = null,
+    /** Advertised/allowed IPs (subnet routes or peer addresses, e.g. 192.168.20.0/24 or 100.x.y.z/32). */
+    val allowedIps: List<String> = emptyList(),
 )
 
 data class TailscaleStatus(
