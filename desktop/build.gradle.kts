@@ -134,6 +134,9 @@ compose.desktop {
             copyright = "Copyright (C) 2026 primary-null"
             licenseFile.set(rootProject.file("LICENSE"))
             modules("java.net.http", "jdk.crypto.ec", "jdk.unsupported", "java.management", "java.naming", "java.logging")
+            // Windows only (the module exists only in Windows JDKs): the Windows-ROOT key store, so normal TLS also trusts
+            // what this computer trusts (PlatformTrust.kt).
+            if (System.getProperty("os.name").startsWith("Windows")) modules("jdk.crypto.mscapi")
             linux {
                 shortcut = true
                 menuGroup = "System;"

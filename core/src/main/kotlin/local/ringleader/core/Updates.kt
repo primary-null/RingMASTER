@@ -20,6 +20,18 @@ import kotlinx.serialization.json.*
 
 const val UPDATE_FEED = "https://github.com/primary-null/RingMASTER/releases/latest/download/ringmaster-update.json"
 const val RELEASE_PAGE = "https://github.com/primary-null/RingMASTER/releases/latest"
+/**
+ * The only hosts an update check talks to, on the default HTTPS port: the release host, and the file host it hands a download
+ * on to. From a real check's redirect chain (network audit 2026-11-16), per file:
+ *   GET github.com/primary-null/RingMASTER/releases/latest/download/<file>   -> 302 to github.com/.../releases/download/<tag>/<file>
+ *   GET github.com/.../releases/download/<tag>/<file>                        -> 302 to release-assets.githubusercontent.com/...
+ *   GET release-assets.githubusercontent.com/...                             -> 200
+ * Two files (the feed and its signature), three requests each: six requests to two hosts. A redirect to any other host or port
+ * ends the check; so does one to http. If GitHub changes its file host, the check fails with a plain sentence and the release page
+ * link, and this list is the one place to change.
+ */
+val UPDATE_HOSTS = setOf("github.com", "release-assets.githubusercontent.com")
+fun updateHostAllowed(uri: URI): Boolean = uri.scheme == "https" && uri.host?.lowercase() in UPDATE_HOSTS && (uri.port == -1 || uri.port == 443)
 const val MANIFEST_LIMIT = 256 * 1024
 const val SIGNATURE_LIMIT = 1024
 private val platforms = setOf(
@@ -99,20 +111,31 @@ fun updatePlatform(os: String, osRelease: String, arch: String = System.getPrope
     }
 }
 data class UpdateResponse(val status: Int, val bytes: ByteArray = byteArrayOf(), val location: String? = null)
-fun interface UpdateTransport { fun get(url: String, limit: Int, userAgent: String): UpdateResponse }
+fun interface UpdateTransport {
+    fun get(url: String, limit: Int, userAgent: String): UpdateResponse
+    /**
+     * Ends a [get] that is blocked, from another thread: the check's deadline calls it. A thread blocked in a socket read is not
+     * freed by an interrupt, so the transport has to close what it is blocked in. A transport that cannot get stuck has nothing to do.
+     */
+    fun abort() {}
+}
 class HttpsUpdateTransport : UpdateTransport {
+    @Volatile private var active: HttpURLConnection? = null
     override fun get(url: String, limit: Int, userAgent: String): UpdateResponse {
         val c = updateHttps(url).toURL().openConnection() as HttpURLConnection
         c.instanceFollowRedirects = false; c.connectTimeout = 10_000; c.readTimeout = 20_000
         c.setRequestProperty("User-Agent", userAgent)
+        active = c
         try {
             val status = c.responseCode
             if (status != 200) return UpdateResponse(status, location = c.getHeaderField("Location"))
             val bytes = c.inputStream.use { it.readNBytes(limit + 1) }
             require(bytes.size <= limit)
             return UpdateResponse(status, bytes)
-        } finally { c.disconnect() }
+        } finally { c.disconnect(); if (active === c) active = null }
     }
+    /** Closes the connection a [get] is blocked in, which makes that read fail at once. (One still being made cannot be closed: its 10 s connect limit ends it.) */
+    override fun abort() { active?.disconnect() }
 }
 sealed interface UpdateState {
     data object Disabled : UpdateState
@@ -126,12 +149,13 @@ sealed interface UpdateState {
     data class Failed(val reason: String, val releasePage: String? = null) : UpdateState
 }
 private class UpdateHttpStatus(val status: Int) : Exception()
-private class UpdateFetchFailure(message: String) : Exception(message)
+private class UpdateFetchFailure(message: String, val releasePage: String? = null) : Exception(message)
 private const val UPDATE_CORRUPT = "updates.properties could not be read and is left untouched."
 private const val UPDATE_NEWER = "updates.properties was written by a newer RingMASTER and is left untouched."
 private const val UPDATE_UNVERIFIED = "The update feed could not be verified."
 private const val UPDATE_UNREACHABLE = "The update feed could not be reached. Check the network and try again."
 private const val UPDATE_INSECURE = "The update feed redirected to an address that is not HTTPS. This can happen on a captive portal."
+private const val UPDATE_STRANGE_HOST = "The update feed redirected to a server RingMASTER does not use for updates, so the check stopped. This can happen on a captive portal or a filtered network."
 
 /** Session latch also protects a newer file if it is replaced or removed after loading. */
 class UpdatePreferences(val file: Path, private val report: (String) -> Unit = {}) {
@@ -192,6 +216,8 @@ class UpdateChecker(val version: String, val preferences: UpdatePreferences, pri
     private val disabled: Boolean = System.getenv("RINGMASTER_DISABLE_UPDATES") == "1",
     private val attemptTimeout: Long = 90_000,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO) {
+    /** Where the blocking fetches run, apart from [check]'s caller and joined by no one: see [attempt]. */
+    private val workers = CoroutineScope(SupervisorJob() + ioDispatcher)
     private fun resting(): UpdateState = when { disabled -> UpdateState.Disabled; keys.isEmpty() -> UpdateState.NotConfigured; preferences.consent == null -> UpdateState.NeedsConsent; else -> UpdateState.Idle(preferences.lastChecked) }
     private val mutableState = MutableStateFlow(resting())
     val state = mutableState.asStateFlow()
@@ -202,16 +228,20 @@ class UpdateChecker(val version: String, val preferences: UpdatePreferences, pri
     /** Forget the skipped version; the next check offers it again. */
     fun unskip() { preferences.put("skippedVersion",""); mutableState.value = resting() }
     private fun https(value: String): URI = try { updateHttps(value) } catch (_: IllegalArgumentException) { throw UpdateFetchFailure(UPDATE_INSECURE) }
+    /** HTTPS, and one of [UPDATE_HOSTS]: checked before every request, the first and each hop of a redirect. */
+    private fun trusted(value: String): URI = https(value).also { if (!updateHostAllowed(it)) throw UpdateFetchFailure(UPDATE_STRANGE_HOST, RELEASE_PAGE) }
     private fun fetch(url: String, limit: Int): UpdateResponse {
         var current = url
         repeat(6) {
-            https(current)
+            // A check that ran out of time is cancelled (interrupted): it makes no further request.
+            if (Thread.currentThread().isInterrupted) throw InterruptedException()
+            trusted(current)
             val r = transport.get(current,limit,"RingMASTER/$version")
             if (r.bytes.size > limit) throw UpdateFetchFailure(UPDATE_UNVERIFIED)
             if (r.status !in setOf(301,302,303,307,308)) return r
             val location = r.location ?: throw UpdateFetchFailure(UPDATE_UNVERIFIED)
             current = https(current).resolve(location).toString()
-            https(current)
+            trusted(current)
         }
         throw UpdateFetchFailure(UPDATE_UNVERIFIED)
     }
@@ -220,44 +250,51 @@ class UpdateChecker(val version: String, val preferences: UpdatePreferences, pri
         mutableState.value = state
         span.end(error = error)
     }
+    /**
+     * One check, the feed then its signature, as the state it ends in and whether the feed was missing. Blocking: run it on a worker.
+     */
+    private fun evaluate(): Pair<UpdateState, Boolean> {
+        val m = fetch(UPDATE_FEED,MANIFEST_LIMIT)
+        if (m.status == 404) return UpdateState.Failed("The update feed was not found. Its address may have changed.") to true
+        if (m.status != 200) throw UpdateHttpStatus(m.status)
+        val s = fetch("$UPDATE_FEED.sig",SIGNATURE_LIMIT)
+        if (s.status != 200) throw UpdateHttpStatus(s.status)
+        if (!verifyUpdateSignature(m.bytes,s.bytes,keys)) throw UpdateFetchFailure(UPDATE_UNVERIFIED)
+        val manifest = parseUpdateManifest(m.bytes)
+        val savedPublished = preferences.feedPublished
+        if (savedPublished != null && manifest.published < savedPublished) return UpdateState.Failed(UPDATE_UNVERIFIED) to false
+        val clampedPublished = minOf(manifest.published, clock.instant())
+        // A check that ran out of time leaves nothing behind.
+        if (Thread.currentThread().isInterrupted) throw InterruptedException()
+        preferences.put("feedPublished", (if (savedPublished != null) maxOf(savedPublished, clampedPublished) else clampedPublished).toString())
+        return when {
+            compareUpdateVersions(manifest.version,version) < 0 -> UpdateState.Failed("The update feed is older than this version.", RELEASE_PAGE)
+            compareUpdateVersions(manifest.version,version) == 0 -> UpdateState.UpToDate()
+            manifest.minVersion != null && compareUpdateVersions(version,manifest.minVersion) < 0 -> UpdateState.Failed("An in-between update is needed before this version.", RELEASE_PAGE)
+            manifest.version == preferences.skippedVersion -> UpdateState.Skipped(manifest.version)
+            else -> platform()?.let { p -> manifest.assets.find { it.platform == p } }?.let { UpdateState.Available(OfferedUpdate(manifest,it)) }
+                ?: UpdateState.Failed("No build for this system.",RELEASE_PAGE)
+        } to false
+    }
+    /**
+     * Runs [evaluate] on a worker and waits for it at most [attemptTimeout]. The wait ends at the deadline whether or not the work
+     * can be stopped: a read blocked in a socket is not freed by an interrupt, so at the deadline the worker is cancelled (no further
+     * request starts) and the transport is told to close the connection it is blocked in ([UpdateTransport.abort]). The deadline runs
+     * on [ioDispatcher]; a virtual clock around it would cancel the fetch before a real request returns. Nobody joins the worker, so a
+     * connection still being made (10 s at most) cannot hold the check, or its lock, past the deadline.
+     */
+    private suspend fun attempt(): Pair<UpdateState, Boolean> = withContext(ioDispatcher) {
+        val done = CompletableDeferred<Pair<UpdateState, Boolean>>()
+        val worker = workers.launch { done.completeWith(runCatching { runInterruptible { evaluate() } }) }
+        try { withTimeout(attemptTimeout) { done.await() } }
+        catch (e: Throwable) { worker.cancel(); transport.abort(); throw e }
+    }
     suspend fun check() = mutex.withLock {
         if (disabled || keys.isEmpty() || preferences.consent != "yes") { mutableState.value = resting(); return@withLock }
         mutableState.value = UpdateState.Checking
         val span = Trace.begin(TraceSource.App,"Update check",mapOf("url" to UPDATE_FEED))
         try {
-            var missingFeed = false
-            // The deadline runs on ioDispatcher. A virtual clock around it would cancel the fetch before a real request returns.
-            // withTimeout ignores that deadline when the body never suspends, and the feed read blocks, so check the job afterwards.
-            val result = withContext(ioDispatcher) { withTimeout(attemptTimeout) {
-                try {
-                val m = fetch(UPDATE_FEED,MANIFEST_LIMIT)
-                if (m.status == 404) {
-                    missingFeed = true
-                    return@withTimeout UpdateState.Failed(
-                        "The update feed was not found. Its address may have changed."
-                    )
-                }
-                if (m.status != 200) throw UpdateHttpStatus(m.status)
-                val s = fetch("$UPDATE_FEED.sig",SIGNATURE_LIMIT)
-                if (s.status != 200) throw UpdateHttpStatus(s.status)
-                if (!verifyUpdateSignature(m.bytes,s.bytes,keys)) throw UpdateFetchFailure(UPDATE_UNVERIFIED)
-                val manifest = parseUpdateManifest(m.bytes)
-                val savedPublished = preferences.feedPublished
-                if (savedPublished != null && manifest.published < savedPublished) {
-                    return@withTimeout UpdateState.Failed(UPDATE_UNVERIFIED)
-                }
-                val clampedPublished = minOf(manifest.published, clock.instant())
-                preferences.put("feedPublished", (if (savedPublished != null) maxOf(savedPublished, clampedPublished) else clampedPublished).toString())
-                when {
-                    compareUpdateVersions(manifest.version,version) < 0 -> UpdateState.Failed("The update feed is older than this version.", RELEASE_PAGE)
-                    compareUpdateVersions(manifest.version,version) == 0 -> UpdateState.UpToDate()
-                    manifest.minVersion != null && compareUpdateVersions(version,manifest.minVersion) < 0 -> UpdateState.Failed("An in-between update is needed before this version.", RELEASE_PAGE)
-                    manifest.version == preferences.skippedVersion -> UpdateState.Skipped(manifest.version)
-                    else -> platform()?.let { p -> manifest.assets.find { it.platform == p } }?.let { UpdateState.Available(OfferedUpdate(manifest,it)) }
-                        ?: UpdateState.Failed("No build for this system.",RELEASE_PAGE)
-                }
-                } finally { ensureActive() }
-            } }
+            val (result, missingFeed) = attempt()
             preferences.put("lastChecked",clock.instant().toString()); mutableState.value = result
             // A missing feed is not a successful read. A feed that answered, then had no suitable build, still read successfully.
             if (missingFeed) span.end(error=IllegalStateException("The update feed was not found.")) else span.end(status=200)
@@ -267,7 +304,7 @@ class UpdateChecker(val version: String, val preferences: UpdatePreferences, pri
         // A network failure is not a trust failure: say which one it was, and do not retry every minute.
         catch (e: java.io.IOException) { recordFailure(UpdateState.Failed(UPDATE_UNREACHABLE), span, e) }
         catch (e: UpdateHttpStatus) { recordFailure(UpdateState.Failed("The update feed answered with HTTP ${e.status}."), span, e) }
-        catch (e: UpdateFetchFailure) { recordFailure(UpdateState.Failed(e.message ?: UPDATE_UNVERIFIED), span, e) }
+        catch (e: UpdateFetchFailure) { recordFailure(UpdateState.Failed(e.message ?: UPDATE_UNVERIFIED, e.releasePage), span, e) }
         catch (e: Exception) { recordFailure(UpdateState.Failed(UPDATE_UNVERIFIED), span, e) }
     }
     /** Clock and coroutine delay are independently injectable through Clock and the caller's scope. */

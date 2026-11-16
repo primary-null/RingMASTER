@@ -6,13 +6,38 @@ import java.time.Instant
 internal fun JsonObject.vs(k: String) = (get(k) as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotEmpty() }
 internal fun JsonObject.va(k: String): List<JsonElement> = when(val v = get(k)) { is JsonArray -> v.toList(); is JsonObject -> listOf(v); else -> emptyList() }
 private fun JsonObject.strings(k: String) = va(k).mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
+private fun JsonObject.flag(k: String) = (get(k) as? JsonPrimitive)?.contentOrNull?.toBooleanStrictOrNull()
+/** SSH key types are short tokens ("ssh-ed25519", "ecdsa-sha2-nistp256"); anything else is not shown. */
+private val SSH_KEY_TYPE = Regex("[a-z0-9][a-z0-9@.-]{0,63}")
+
+/**
+ * `tailscale status --json`. Every field is optional and tolerant of odd shapes; a peer entry that is not an object is
+ * skipped (and counted) instead of losing the whole status. SSH host keys are reduced to a count and key types here: the
+ * keys themselves never enter the model.
+ */
 fun parseTailscaleStatus(json: String): TailscaleStatus {
     val r = Json.parseToJsonElement(json).jsonObject
     fun instant(value: String?) = value?.takeUnless { it.startsWith("0001-") }?.let { runCatching { Instant.parse(it) }.getOrNull() }
-    fun peer(p: JsonObject) = TailscalePeer(p.vs("ID").orEmpty(), p.vs("HostName").orEmpty(), p.vs("DNSName")?.trimEnd('.'), p.vs("OS"), p.vs("Online") == "true", p.strings("TailscaleIPs").sortedBy { ':' in it }, p.vs("ExitNodeOption") == "true", p.vs("ExitNode") == "true", p.vs("Relay"), p.vs("CurAddr"), instant(p.vs("LastSeen")), p.vs("RxBytes")?.toLongOrNull(), p.vs("TxBytes")?.toLongOrNull(), p.strings("Tags"), instant(p.vs("LastHandshake")), p.vs("Active")?.toBooleanStrictOrNull(), p.strings("AllowedIPs"))
+    fun location(p: JsonObject) = (p["Location"] as? JsonObject)?.let { TailscaleLocation(it.vs("Country"), it.vs("CountryCode"), it.vs("City")) }
+    fun peer(p: JsonObject): TailscalePeer {
+        val ssh = p.va("sshHostKeys").mapNotNull { (it as? JsonPrimitive)?.takeIf { v -> v.isString }?.contentOrNull?.trim()?.takeIf { v -> v.isNotEmpty() } }
+        return TailscalePeer(p.vs("ID").orEmpty(), p.vs("HostName").orEmpty(), p.vs("DNSName")?.trimEnd('.'), p.vs("OS"), p.vs("Online") == "true",
+            p.strings("TailscaleIPs").sortedBy { ':' in it }, p.vs("ExitNodeOption") == "true", p.vs("ExitNode") == "true", p.vs("Relay"), p.vs("CurAddr"),
+            instant(p.vs("LastSeen")), p.vs("RxBytes")?.toLongOrNull(), p.vs("TxBytes")?.toLongOrNull(), p.strings("Tags"), instant(p.vs("LastHandshake")),
+            p.flag("Active"), p.strings("AllowedIPs"),
+            peerRelay = p.vs("PeerRelay"), expired = p.flag("Expired") == true, keyExpiry = instant(p.vs("KeyExpiry")),
+            primaryRoutes = p.strings("PrimaryRoutes"), sharee = p.flag("ShareeNode") == true,
+            userId = p.vs("UserID")?.toLongOrNull()?.takeIf { it != 0L }, location = location(p),
+            sshHostKeyCount = ssh.size, sshHostKeyTypes = ssh.map { it.substringBefore(' ') }.filter { SSH_KEY_TYPE.matches(it) }.distinct())
+    }
     val tail = r["CurrentTailnet"] as? JsonObject
-    val self = (r["Self"] as? JsonObject)?.let(::peer)?.let { if(it.addresses.isEmpty()) it.copy(addresses = r.strings("TailscaleIPs")) else it }
-    return TailscaleStatus(r.vs("BackendState").orEmpty(), r.vs("Version"), tail?.vs("Name"), tail?.vs("MagicDNSSuffix") ?: r.vs("MagicDNSSuffix"), self, (r["Peer"] as? JsonObject)?.values.orEmpty().map { peer(it.jsonObject) }.sortedWith(compareBy({ !it.online }, { it.hostName.lowercase() })), r.vs("AuthURL"), r.strings("Health"))
+    val self = (r["Self"] as? JsonObject)?.let { runCatching { peer(it) }.getOrNull() }?.let { if(it.addresses.isEmpty()) it.copy(addresses = r.strings("TailscaleIPs")) else it }
+    val entries = (r["Peer"] as? JsonObject)?.values.orEmpty()
+    val peers = entries.mapNotNull { e -> (e as? JsonObject)?.let { runCatching { peer(it) }.getOrNull() } }
+    val exit = (r["ExitNodeStatus"] as? JsonObject)?.let { e -> e.vs("ID")?.let { TailscaleExitNodeStatus(it, e.flag("Online") == true, e.strings("TailscaleIPs").map { a -> a.substringBefore('/') }) } }
+    return TailscaleStatus(r.vs("BackendState").orEmpty(), r.vs("Version"), tail?.vs("Name"), tail?.vs("MagicDNSSuffix") ?: r.vs("MagicDNSSuffix"), self,
+        peers.sortedWith(compareBy({ !it.online }, { it.hostName.lowercase() })), r.vs("AuthURL"), r.strings("Health"),
+        tun = r.flag("TUN"), exitNodeStatus = exit, unreadablePeers = entries.size - peers.size)
 }
 fun parseWgDump(text: String): List<WireGuardInterface> {
     val interfaces = linkedMapOf<String, WireGuardInterface>()

@@ -1,5 +1,9 @@
 package local.ringleader.core.tools
 
+import local.ringleader.core.IpLiteral
+import local.ringleader.core.NameLookup
+import local.ringleader.core.NameLookupTimedOutException
+import local.ringleader.core.connectAny
 import local.ringleader.core.Trace
 import local.ringleader.core.TraceSource
 
@@ -7,9 +11,7 @@ import java.net.ConnectException
 import java.net.Inet4Address
 import java.net.Inet6Address
 import java.net.InetAddress
-import java.net.InetSocketAddress
 import java.net.NoRouteToHostException
-import java.net.Socket
 import java.net.SocketTimeoutException
 import java.net.URI
 import java.net.UnknownHostException
@@ -62,6 +64,12 @@ class PortCheckPlugin : ToolPlugin {
                     is PortOutcome.Open -> "$port open ${formatNumber(outcome.millis)} ms"
                     PortOutcome.Closed -> "$port closed"
                     PortOutcome.Filtered -> "$port filtered"
+                    // The name does not exist (or its lookup ran out of time): no port can be reached, so say that once and stop.
+                    is PortOutcome.NameNotFound -> {
+                        val message = if (outcome.timedOut) "Looking up $host took longer than ${formatNumber(timeout / 1000.0)} s." else "No address for $host."
+                        emit(ToolEvent.Line(message))
+                        return ToolResult(false, message)
+                    }
                 }
                 results += line
                 emit(ToolEvent.Line(line))
@@ -79,16 +87,18 @@ internal sealed class PortOutcome {
     data class Open(val millis: Double) : PortOutcome()
     data object Closed : PortOutcome()
     data object Filtered : PortOutcome()
+    /** The name has no address ([timedOut] false), or looking it up took longer than the caller allowed ([timedOut] true). Nothing was sent to anyone. */
+    data class NameNotFound(val timedOut: Boolean = false) : PortOutcome()
 }
 
 internal fun connectPort(host: String, port: Int, timeoutMs: Int): PortOutcome {
     val trace = Trace.begin(TraceSource.Tools, "Socket connect", mapOf("host" to host, "port" to port.toString()))
     val started = System.nanoTime()
     return try {
-        Socket().use { socket ->
-            socket.connect(InetSocketAddress(host, port), timeoutMs)
-            PortOutcome.Open((System.nanoTime() - started) / 1_000_000.0)
-        }
+        // Every address of the name is tried (IPv6 and IPv4 interleaved) and the lookup counts against the same timeout.
+        connectAny(host, port, timeoutMs).use { PortOutcome.Open((System.nanoTime() - started) / 1_000_000.0) }
+    } catch (e: UnknownHostException) {
+        PortOutcome.NameNotFound(NameLookup.isLookupTimeout(e, host))
     } catch (_: SocketTimeoutException) {
         PortOutcome.Filtered
     } catch (_: ConnectException) {
@@ -124,8 +134,11 @@ class DnsPlugin(
         emit(ToolEvent.Status("Looking up $name"))
         val started = System.nanoTime()
         val addresses = try {
-            Trace.call(TraceSource.Tools, "DNS lookup", mapOf("host" to name)) { withDeadline(seconds * 1000) { resolve(name) } }
+            // The name-lookup hook gives up after 5 s unless told otherwise; this tool lets the user wait as long as they chose.
+            Trace.call(TraceSource.Tools, "DNS lookup", mapOf("host" to name)) { withDeadline(seconds * 1000) { NameLookup.within(seconds * 1000) { resolve(name) } } }
                 ?: return@withContext ToolResult(false, "No answer for $name within $seconds s.")
+        } catch (_: NameLookupTimedOutException) {
+            return@withContext ToolResult(false, "No answer for $name within $seconds s.")
         } catch (_: UnknownHostException) {
             return@withContext ToolResult(false, "No address for $name.")
         } catch (e: CancellationException) { throw e } catch (e: Exception) {
@@ -200,8 +213,13 @@ internal fun validateHttpUrl(raw: String): URI {
     if (raw.any { it.isISOControl() || it.isWhitespace() }) throw ToolInputException("Enter an http or https URL.")
     val uri = try { URI(raw) } catch (_: Exception) { throw ToolInputException("Enter an http or https URL.") }
     if (uri.scheme != "http" && uri.scheme != "https") throw ToolInputException("Enter an http or https URL.")
-    val host = uri.host ?: throw ToolInputException("Enter an http or https URL.")
-    if (!isHostToken(host)) throw ToolInputException("URL host must be a hostname or an IP address.")
+    val rawHost = uri.host ?: throw ToolInputException("Enter an http or https URL.")
+    // An IPv6 address sits in the URL between square brackets; the brackets belong to the URL, not to the host.
+    val host = IpLiteral.unbracket(rawHost)
+    if (host.length != rawHost.length && '%' in host) {
+        throw ToolInputException("A zone (%...) cannot be part of a URL here. Use Ping, Traceroute or the port check for a link-local address, or its global address in the URL.")
+    }
+    hostRefusal(host, "URL host")?.let { throw ToolInputException(it) }
     if (uri.userInfo != null) throw ToolInputException("Enter an http or https URL without a username.")
     return uri
 }

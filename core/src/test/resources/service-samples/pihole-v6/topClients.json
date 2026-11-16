@@ -1,0 +1,1 @@
+{"clients":[{"name":"","ip":"192.0.2.10","count":184},{"name":"client-b.example.invalid","ip":"192.0.2.11","count":36}],"total_queries":220,"blocked_queries":30,"took":6.866455078125e-05}

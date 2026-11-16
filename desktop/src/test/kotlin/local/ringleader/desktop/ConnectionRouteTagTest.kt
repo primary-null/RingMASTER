@@ -62,9 +62,9 @@ class ConnectionRouteTagTest {
         assertEquals("10:00:00 · 12 s ago", direct.row("Observed"))
         assertTrue(ROUTE_DIRECT_NOTE in direct.notes && ROUTE_ESTIMATE_NOTE in direct.notes)
         val ts = view(s.tailscale)
-        assertTrue(ts.row("Peer link")!!.startsWith("Direct UDP to the peer"), "a direct Tailscale peer link is still Tailscale")
+        assertTrue(ts.row("Peer link")!!.startsWith("direct · UDP straight to the peer"), "a direct Tailscale peer link is still Tailscale")
         assertTrue(ts.row("Peer link")!!.endsWith("still inside Tailscale"))
-        assertEquals("Relayed through Tailscale DERP fra", view(s.tailscaleRelayed).row("Peer link"))
+        assertEquals("DERP fra · relayed through Tailscale's DERP server in region fra", view(s.tailscaleRelayed).row("Peer link"))
         assertEquals("Tailscale", ts.row("Tunnel"), "the kind is not repeated as the name")
         assertEquals("WireGuard · home-office", view(s.wireguard).row("Tunnel"))
         assertEquals("Incomplete · Tailscale is installed but its status could not be read.", view(s.unknown).row("VPN check"))
@@ -77,6 +77,40 @@ class ConnectionRouteTagTest {
             val v = view(state)
             assertFalse(Regex("(?i)token|secret|bearer|ticket|password|authorization").containsMatchIn(v.description), "no auth detail in ${v.label}")
         }
+    }
+
+    @Test fun peerLinkRowsPerPathStartWithTheTablesLabel() {
+        val rows = mapOf(
+            s.tailscale to "direct · UDP straight to the peer (198.51.100.4:41641), still inside Tailscale",
+            s.tailscalePeerRelay to "peer relay · through a peer relay (198.51.100.7:40000:12), still inside Tailscale",
+            s.tailscaleRelayed to "DERP fra · relayed through Tailscale's DERP server in region fra",
+            s.tailscaleIdle to "idle · no recent traffic, so Tailscale reports no current path",
+            s.tailscaleOffline to "offline · Tailscale reports this peer offline",
+        )
+        for ((state, text) in rows) {
+            assertEquals(text, view(state).row("Peer link"))
+            val path = (state as RouteTagState.Observed).observation.peerPath!!
+            assertTrue(view(state).row("Peer link")!!.startsWith(peerPathLabel(path) + " · "), "the tag starts with the peer table's label")
+            assertEquals("VPN · TAILSCALE", view(state).label)
+        }
+        assertEquals("Not a peer's own address and no subnet router covers it (an exit node, or not known); no peer path is shown", peerLinkText(PeerPath.NotPeer, false))
+        assertEquals("no path · no current path reported by Tailscale", peerLinkText(PeerPath.NotReported, false))
+        assertEquals("peer relay · through a peer relay (Hidden), still inside Tailscale", view(s.tailscalePeerRelay, showcase = true).row("Peer link"))
+        // Userspace mode withholds the answer and says why.
+        val userspace = view(s.tailscaleUserspace)
+        assertEquals("ROUTE UNKNOWN", userspace.label); assertEquals(TAILSCALE_USERSPACE_NOTE, userspace.row("Why"))
+        assertNull(userspace.row("Peer link")); assertFalse(ROUTE_DIRECT_NOTE in userspace.notes)
+    }
+
+    @Test fun aServerBehindASubnetRouterNamesTheRouter() {
+        val v = view(s.tailscaleSubnetRouter)
+        assertEquals("VPN · TAILSCALE", v.label, "the tag itself never carries a name")
+        assertEquals("Tailscale · subnet router subnet-gw (10.20.30.0/24)", v.row("Through"))
+        assertEquals("direct · UDP straight to the peer (198.51.100.4:41641), still inside Tailscale", v.row("Router link"))
+        assertNull(v.row("Peer link"), "the server is not a peer: no peer link of its own")
+        val hidden = view(s.tailscaleSubnetRouter, showcase = true)
+        assertEquals("Tailscale · subnet router Hidden (Hidden)", hidden.row("Through"))
+        assertEquals("subnet router Hidden · Hidden", peerLinkText(PeerPath.SubnetRouter("subnet-gw", "10.20.30.0/24", PeerPath.Idle), true))
     }
 
     @Test fun showcaseHidesEveryIdentityInTheTagTooltipAndDescription() {

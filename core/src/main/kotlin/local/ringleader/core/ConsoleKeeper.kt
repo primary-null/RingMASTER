@@ -48,7 +48,7 @@ internal class ConsoleKeeper(
         publish()
         arm()
         if (!healthy(session)) {
-            session.close()
+            session.closeInBackground()
             return null
         }
         session.onUpdate = null
@@ -107,8 +107,9 @@ internal class ConsoleKeeper(
             if (outstanding[guest].isNullOrEmpty()) outstanding.remove(guest)
             !lease.sameEra(era)
         }
+        // release comes from the page leaving, on the UI thread: closing must not wait on the network there.
         if (sealed || !keep || keepMillis() <= 0L || !healthy(session)) {
-            session.close()
+            session.closeInBackground()
             return
         }
         // Release what the guest sees as held before the session stops asking for frames.
@@ -130,8 +131,8 @@ internal class ConsoleKeeper(
                 true
             }
         }
-        if (!stored) session.close()
-        closing.forEach { runCatching { it.close() } }
+        if (!stored) session.closeInBackground()
+        closing.forEach { runCatching { it.closeInBackground() } }
         publish()
         arm()
     }

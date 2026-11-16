@@ -30,6 +30,11 @@ data class DeskState(
     val manualSecretPresent: Boolean = false,
     val profileSecretPresent: Boolean = false,
     val secretGeneration: Int = 0,
+    /**
+     * Goes up whenever the remembered certificates change (an approval, a forget, a key filled in), so every panel that
+     * shows trust for a server reads it again: the Connect form and a saved profile's panel can show the same server.
+     */
+    val trustGeneration: Int = 0,
     val vaultStatus: VaultStatus? = null,
     val vaultName: String = "",
     val remembered: Set<String> = emptySet(),
@@ -56,6 +61,13 @@ fun authChoiceMismatch(passwordLogin: Boolean, identity: String, kind: String): 
  * does not empty the server address the person just typed.
  */
 data class ManualForm(val address: String = "", val tokenId: String = "", val user: String = "", val kind: String = DIRECT_PVE_KIND)
+
+/** What the Desk says after "Forget remembered certificate" removed an approval (network audit F4). */
+const val FORGOT_CERTIFICATE_NOTICE = "Approval removed. Check the server certificate to connect again. Saved-profile pins and passwords are unchanged."
+
+/** The confirmation before forgetting the approved certificate for [origin]. */
+fun forgetCertificateQuestion(origin: String) =
+    "Forget the approved certificate for $origin? The next connection will ask you to check and approve it again. Saved-profile pins and passwords are not changed."
 
 /** The usual Proxmox VE user when Password is chosen and the field is blank. */
 const val DEFAULT_PASSWORD_USER = "root@pam"
@@ -99,6 +111,8 @@ class ProfileDesk(
     /** How long a just-typed secret may wait for the first inventory before it is dropped unremembered. */
     private val rememberWaitMs: Long = 90_000,
     private val certificateStore: CertificateTrustStore = CertificateTrustStore(store.file.resolveSibling("certificates.json")),
+    /** This computer's clock, for a certificate's validity. */
+    private val clock: () -> java.time.Instant = { java.time.Instant.now() },
 ) : AutoCloseable {
     private var workspace: Workspace = workspace
     private val mutableState = MutableStateFlow(DeskState())
@@ -164,6 +178,7 @@ class ProfileDesk(
     /** Drop a remembered profile id after the workspace itself has disconnected, including session expiry. */
     fun onWorkspace(workspaceState: WorkspaceState = workspace.state.value) {
         val live = workspace.state.value
+        rememberKeyAfterSuccess(live)
         if (workspaceState.connected && live.connected) return
         if (!live.connected && mutableState.value.connectedProfileId != null) {
             mutableState.update { it.copy(connectedProfileId = null) }
@@ -193,13 +208,22 @@ class ProfileDesk(
         mutableState.update {
             it.copy(
                 editing = true, selectedId = id, pendingDeleteId = null, formError = null, rememberChoice = false,
-                draft = ProfileDraft(profile.id, profile.displayName, profile.origin, profile.tokenId, profile.sha256Pin.orEmpty(), profile.kind),
+                draft = ProfileDraft(profile.id, profile.displayName, profile.origin, profile.tokenId, profile.sha256Pin.orEmpty(), profile.kind,
+                    profile.sha256Pin?.let { pin -> profile.sha256Spki?.let { CertificateKey(pin, it) } }),
             )
         }
     }
 
     fun updateDraft(displayName: String, origin: String, tokenId: String, sha256Pin: String, kind: String = mutableState.value.draft.kind) {
         mutableState.update { it.copy(draft = it.draft.copy(displayName = displayName, origin = origin, tokenId = tokenId, sha256Pin = sha256Pin, kind = kind), formError = null) }
+    }
+
+    /**
+     * The editor's "Use this certificate": the draft pin becomes [certificate]'s fingerprint and its key is kept with it.
+     * Nothing is saved; Save profile remains the approval.
+     */
+    fun useCertificateInDraft(certificate: ProbedCertificate) {
+        mutableState.update { it.copy(draft = it.draft.copy(sha256Pin = certificate.fingerprint, key = CertificateKey(certificate.fingerprint, certificate.spki)), formError = null) }
     }
 
     fun cancelEdit() {
@@ -340,8 +364,14 @@ class ProfileDesk(
      * so it never reached a self-signed server.
      */
     private fun profilePin(profile: ConnectionProfile, observed: String?, approval: ManualTrust?): String? {
-        profile.sha256Pin?.let { return it }
-        val trust = manualTrust(profile.origin, observed)
+        profile.sha256Pin?.let { pin ->
+            if (approval == null) return pin
+            // The profile's own panel replaces its pin only through an explicit approval of the certificate just read.
+            val trust = profileTrust(profile, approval.certificate)
+            check(approval == trust && trust.canApprove && trust.changed) { "Certificate approval changed. Check the server certificate again." }
+            return trust.observed!!
+        }
+        val trust = manualTrust(profile.origin, observed, approval?.certificate)
         if (trust.error != null) {
             // Remembered certificates cannot be read: nothing can be approved, and normal TLS still decides.
             check(approval == null && observed == null) { trust.error }
@@ -351,18 +381,84 @@ class ProfileDesk(
             check(approval == trust && trust.canApprove) { "Certificate approval changed. Check the server certificate again." }
             trust.observed!!
         } else {
-            check(!trust.conflict) { "Saved certificate pins conflict. Review the saved connections before connecting." }
-            val known = trust.known.singleOrNull()
+            // The same resolution a background run uses (resolveProfilePin), plus the certificate just observed.
+            val known = when (val resolved = resolveProfilePin(profile, certificateStore.certificates(), mutableState.value.profiles)) {
+                is ProfilePin.Pinned -> resolved.pin
+                ProfilePin.NormalTls -> null
+                ProfilePin.Conflict -> error("Saved certificate pins conflict. Review the saved connections before connecting.")
+            }
             check(trust.observed == null || trust.observed == known) { "Review the server certificate and use Trust and connect explicitly." }
             known
         }
     }
 
-    /** Remember an explicit approval for a profile without its own pin. Approval survives authentication failure. */
-    private fun recordApproval(profile: ConnectionProfile, approval: ManualTrust?, pin: String?) {
-        if (approval == null || pin == null || profile.sha256Pin != null) return
+    /**
+     * Remember an explicit approval. A profile without its own pin records it in certificates.json; a profile with one has
+     * that pin (and its key) replaced in profiles.json. Approval survives authentication failure. Returns the profile as it
+     * now is.
+     */
+    private fun recordApproval(profile: ConnectionProfile, approval: ManualTrust?, pin: String?): ConnectionProfile {
+        if (approval == null || pin == null) return profile
+        if (profile.sha256Pin != null) {
+            val updated = profile.copy(sha256Pin = pin, sha256Spki = approval.observedSpki)
+            val profiles = mutableState.value.profiles.map { if (it.id == profile.id) updated else it }
+            try { store.save(profiles) } catch (e: ProfileStoreException) { throw IllegalStateException(e.message ?: "The profile could not be saved; nothing was opened.") }
+            mutableState.update { it.copy(profiles = profiles) }
+            return updated
+        }
         val origin = certificateOrigin(profile.origin)
-        certificateStore.save(certificateStore.certificates().filterNot { it.origin == origin } + ApprovedCertificate(origin, pin))
+        certificateStore.save(certificateStore.certificates().filterNot { it.origin == origin } + ApprovedCertificate(origin, pin, approval.observedSpki)).also { trustChanged() }
+        return profile
+    }
+
+    /**
+     * The certificate review for a saved profile WITH its own pin, in that profile's own panel: its pin is the one known
+     * certificate (other profiles and approvals do not take part, as they do not for its connection), [certificate] is what
+     * the check just read. A change can be approved here: with the same key in one click, otherwise with the replacement
+     * checkbox. An out-of-date certificate never.
+     */
+    fun profileTrust(profile: ConnectionProfile, certificate: ProbedCertificate?): ManualTrust {
+        val pin = profile.sha256Pin ?: return manualTrust(profile.origin, null, certificate)
+        return ManualTrust(certificateOrigin(profile.origin), listOf(pin), certificate?.fingerprint, savedPin = false,
+            knownKeys = listOfNotNull(profile.sha256Spki?.let { pin to it }).toMap(), certificate = certificate,
+            observedOutOfDate = certificate?.validAt(clock()) == false)
+    }
+
+    /** The key recorded with [pin] for [profile]'s server, so a changed leaf with it reads as a renewal. */
+    private fun knownKey(profile: ConnectionProfile, pin: String?): String? = when {
+        pin == null -> null
+        profile.sha256Pin == pin -> profile.sha256Spki
+        else -> manualTrust(profile.origin).knownKeys[pin]
+    }
+
+    /** Pins whose key was filled in during this run, so each is looked at once. */
+    private val keysRemembered = mutableSetOf<String>()
+
+    /**
+     * After a pinned connection has loaded, record the server's key with an approval or a profile pin that has none yet
+     * (version 1 approvals, scan approvals, profiles saved before keys existed). The key comes from the pinned handshake
+     * that just succeeded ([pinnedKeyFor]), so this records a fact about a leaf that is already trusted; it trusts nothing
+     * new. A store that cannot be read or written is left alone silently: the key only helps a later renewal.
+     */
+    private fun rememberKeyAfterSuccess(state: WorkspaceState) {
+        if (!state.connected || state.overview == null) return
+        val pin = state.watchIdentity?.pin ?: return
+        val origin = runCatching { certificateOrigin(state.address) }.getOrNull() ?: return
+        if (!keysRemembered.add("$origin|$pin")) return
+        val spki = pinnedKeyFor(pin) ?: run { keysRemembered.remove("$origin|$pin"); return }
+        try {
+            val entries = certificateStore.load()
+            if (entries.any { it.origin == origin && it.pin == pin && it.spki == null }) {
+                certificateStore.save(entries.map { if (it.origin == origin && it.pin == pin && it.spki == null) it.copy(spki = spki) else it }).also { trustChanged() }
+            }
+        } catch (_: RuntimeException) {}
+        val profiles = mutableState.value.profiles
+        if (mutableState.value.saveBlocked || profiles.none { it.sha256Pin == pin && it.sha256Spki == null && certificateOrigin(it.origin) == origin }) return
+        val updated = profiles.map { if (it.sha256Pin == pin && it.sha256Spki == null && certificateOrigin(it.origin) == origin) it.copy(sha256Spki = spki) else it }
+        try {
+            store.save(updated)
+            mutableState.update { it.copy(profiles = updated) }
+        } catch (_: ProfileStoreException) {}
     }
 
     /**
@@ -381,10 +477,11 @@ class ProfileDesk(
         var handed = false
         return try {
             val pin = profilePin(profile, observed, approval)
-            val connection = Connection(profile.origin, profile.tokenId, chars.concatToString(), pin.orEmpty(), profile.kind, otp)
-            try { recordApproval(profile, approval, pin) } catch (e: RuntimeException) { connection.close(); throw e }
+            val connection = Connection(profile.origin, profile.tokenId, chars.concatToString(), pin.orEmpty(), profile.kind, otp,
+                knownSpki = if (approval != null) approval.observedSpki else knownKey(profile, pin))
+            val current = try { recordApproval(profile, approval, pin) } catch (e: RuntimeException) { connection.close(); throw e }
             publishSecretClear(connectedProfileId = profile.id, notice = null, connect = connection)
-            rememberCopy?.let { watchForSuccess(PendingRemember(profile, it, workspace, workspace.state.value.connectionEpoch)) }
+            rememberCopy?.let { watchForSuccess(PendingRemember(current, it, workspace, workspace.state.value.connectionEpoch)) }
             handed = true
             true
         } catch (e: IllegalArgumentException) {
@@ -434,7 +531,8 @@ class ProfileDesk(
             val current = after.profiles.find { it.id == profile.id }
             if (after.selectedId != profile.id || current == null || !current.definesSameConnection(profile) || profile.id !in after.remembered) return false
             val pin = profilePin(profile, observed, approval)
-            val connection = Connection(profile.origin, profile.tokenId, secret.concatToString(), pin.orEmpty(), profile.kind, otp)
+            val connection = Connection(profile.origin, profile.tokenId, secret.concatToString(), pin.orEmpty(), profile.kind, otp,
+                knownSpki = if (approval != null) approval.observedSpki else knownKey(profile, pin))
             try { recordApproval(profile, approval, pin) } catch (e: RuntimeException) { connection.close(); throw e }
             publishSecretClear(connectedProfileId = profile.id, notice = null, connect = connection)
             true
@@ -483,21 +581,30 @@ class ProfileDesk(
 
     /** [passwordLogin] is the Password / API token choice; null skips that check. */
     /** Resolves only certificate identity, never usernames or credential memory. */
-    fun manualTrust(address: String, observed: String? = null): ManualTrust = try {
+    fun manualTrust(address: String, observed: String? = null, certificate: ProbedCertificate? = null): ManualTrust = try {
         check(!state.value.saveBlocked && store.trustReadError() == null) { "Saved profiles could not be read. Resolve that error before connecting manually." }
         val origin = certificateOrigin(address)
-        val remembered = certificateStore.load().find { it.origin == origin }?.pin
-        val saved = state.value.profiles.filter { certificateOrigin(it.origin) == origin }.mapNotNull { it.sha256Pin }.toSet()
+        val approved = certificateStore.load().find { it.origin == origin }
+        val remembered = approved?.pin
+        val atOrigin = state.value.profiles.filter { certificateOrigin(it.origin) == origin }
+        val saved = atOrigin.mapNotNull { it.sha256Pin }.toSet()
         val known = (saved + listOfNotNull(remembered)).sorted()
-        ManualTrust(origin, known, observed?.let { canonicalOptionalPin(it) }, saved.isNotEmpty())
+        val keys = atOrigin.mapNotNull { p -> p.sha256Pin?.let { pin -> p.sha256Spki?.let { pin to it } } }.toMap() +
+            listOfNotNull(approved?.spki?.let { approved.pin to it })
+        val seen = observed?.let { canonicalOptionalPin(it) } ?: certificate?.fingerprint
+        val read = certificate?.takeIf { it.fingerprint == seen }
+        val sameAs = if (seen == null) emptyList() else (certificateStore.certificates().filter { it.pin == seen }.map { it.origin } +
+            state.value.profiles.filter { it.sha256Pin == seen }.mapNotNull { runCatching { certificateOrigin(it.origin) }.getOrNull() })
+            .filter { it != origin }.distinct().sorted()
+        ManualTrust(origin, known, seen, saved.isNotEmpty(), knownKeys = keys, certificate = read, observedOutOfDate = read?.validAt(clock()) == false, sameAs = sameAs)
     } catch (e: IllegalStateException) { ManualTrust(error = e.message ?: "Could not read remembered certificates.") }
       catch (e: IllegalArgumentException) { ManualTrust(error = e.message ?: "Invalid server address.") }
 
     fun forgetManualTrust(address: String): Boolean = try {
         val origin = certificateOrigin(address)
         val entries = certificateStore.load()
-        certificateStore.save(entries.filterNot { it.origin == origin })
-        mutableState.update { it.copy(formError = null, notice = "Remembered certificate forgotten. Saved-profile pins are unchanged.") }
+        certificateStore.save(entries.filterNot { it.origin == origin }).also { trustChanged() }
+        mutableState.update { it.copy(formError = null, notice = FORGOT_CERTIFICATE_NOTICE) }
         true
     } catch (e: IllegalStateException) {
         mutableState.update { it.copy(formError = e.message) }; false
@@ -515,7 +622,7 @@ class ProfileDesk(
         val chars = manualSecret?.copyOf() ?: CharArray(0)
         var connection: Connection? = null
         return try {
-            val trust = manualTrust(address, observed)
+            val trust = manualTrust(address, observed, approval?.certificate)
             check(trust.error == null) { trust.error.orEmpty() }
             val pasted = canonicalOptionalPin(pin)
             val selectedPin = if (approval != null) {
@@ -530,10 +637,11 @@ class ProfileDesk(
                 known ?: pasted
             }
             // Validate the entire action before changing disk. Approval survives authentication failure.
-            connection = Connection(address, identity, chars.concatToString(), selectedPin.orEmpty(), kind, otp)
+            connection = Connection(address, identity, chars.concatToString(), selectedPin.orEmpty(), kind, otp,
+                knownSpki = selectedPin?.let { if (approval != null) trust.observedSpki else trust.knownKeys[it] })
             if (approval != null) {
                 val entries = certificateStore.certificates()
-                certificateStore.save(entries.filterNot { it.origin == trust.origin } + ApprovedCertificate(trust.origin!!, selectedPin!!))
+                certificateStore.save(entries.filterNot { it.origin == trust.origin } + ApprovedCertificate(trust.origin!!, selectedPin!!, trust.observedSpki)).also { trustChanged() }
             }
             publishSecretClear(connectedProfileId = null, notice = null, connect = connection)
             connection = null // ownership transferred to the workspace
@@ -561,6 +669,8 @@ class ProfileDesk(
         workspace.disconnect()
         mutableState.update { it.copy(connectedProfileId = null, notice = null) }
     }
+
+    private fun trustChanged() = mutableState.update { it.copy(trustGeneration = it.trustGeneration + 1) }
 
     fun hasProfileSecret() = profileSecret != null
 

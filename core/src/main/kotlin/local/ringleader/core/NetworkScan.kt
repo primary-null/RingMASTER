@@ -6,11 +6,20 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.net.*
 import java.security.MessageDigest
+import java.security.cert.CertificateException
 import java.security.cert.X509Certificate
 import javax.net.ssl.*
 
-data class ScanInterface(val name: String, val ip: String, val prefix: Int, val up: Boolean = true)
-data class ScanNetwork(val source: ScanInterface, val cidr: String?, val reason: String?, val addresses: List<String> = emptyList())
+data class ScanInterface(val name: String, val ip: String, val prefix: Int, val up: Boolean = true,
+    /** The system's interface number and the device name Java reports, to match what the system says about the card ([NetworkFacts]). */
+    val index: Int? = null, val deviceName: String? = null)
+data class ScanNetwork(val source: ScanInterface, val cidr: String?, val reason: String?, val addresses: List<String> = emptyList(),
+    /** The network as it really is, when [cidr] is only a part of it. */
+    val realCidr: String? = null, val origin: PlanSource = PlanSource.Attached,
+    /** True for a network this computer is attached to: its neighbours can be asked, and its addresses are one hop away. */
+    val onLink: Boolean = false,
+    /** The ports to probe on this network's addresses. Null: the scan's own. */
+    val ports: List<Int>? = null)
 data class NetworkPlan(val networks: List<ScanNetwork>) {
     val addresses get() = networks.flatMap { it.addresses }.distinct()
 }
@@ -25,7 +34,13 @@ data class ScanHit(val ip: String, val port: Int, val secure: Boolean, val kind:
 data class ScanPeek(val status: Int, val body: String, val server: String = "", val location: String? = null,
     val fingerprint: String? = null, val subject: String? = null, val issuer: String? = null, val notAfter: Long? = null)
 data class NetworkProgress(val plan: NetworkPlan, val scanned: Int = 0, val current: String = "",
-    val hits: List<ScanHit> = emptyList(), val finished: Boolean = false) { val total get() = plan.addresses.size }
+    val hits: List<ScanHit> = emptyList(), val finished: Boolean = false,
+    /** What the sweep is doing now, how many addresses answered something, and how far each network is. */
+    val phase: ScanPhase = ScanPhase.Sweeping, val alive: Int = 0, val tallies: List<NetworkTally> = emptyList(),
+    /** Things the person should know about how this scan went (the neighbour table could not be read). */
+    val notes: List<String> = emptyList(),
+    /** How far each step is, every host that proved to be there with how and when, and the milliseconds since the scan started. */
+    val steps: ScanSteps = ScanSteps(), val findings: List<HostFinding> = emptyList(), val elapsedMs: Long = 0) { val total get() = plan.addresses.size }
 
 /** Proxmox VE, Backup Server and Datacenter Manager listen here. Product names count as identity only on these ports. */
 val PROXMOX_PORTS = listOf(8006, 8007, 8443)
@@ -38,61 +53,39 @@ const val LAN_CONNECT_TIMEOUT_MS = 400
 /** Tailnet peers can be relayed or far away, and the list is short, so they get longer. */
 const val TAILNET_CONNECT_TIMEOUT_MS = 1500
 
-/** Interface names of virtual switches and container or VM bridges. Their networks are not swept. */
-private val VIRTUAL_ADAPTER = Regex(
-    "vethernet|hyper-v|wsl|virtual|docker|vmware|vbox|virbr\\d*|lxcbr\\d*|lxdbr\\d*|\\bcni\\d+|\\bpodman\\d+|\\bbr-[0-9a-f]{12}\\b",
-    RegexOption.IGNORE_CASE)
-
 object ScanRules {
     fun ipv4(ip: String): Long? {
         val parts = ip.split('.')
         if (parts.size != 4) return null
-        val numbers = parts.map { it.toIntOrNull()?.takeIf { n -> n in 0..255 } ?: return null }
+        // ASCII digits only: toIntOrNull also reads a leading '+' or '-' and digits of other scripts.
+        val numbers = parts.map { part -> part.takeIf { p -> p.isNotEmpty() && p.all { c -> c in '0'..'9' } }?.toIntOrNull()?.takeIf { n -> n in 0..255 } ?: return null }
         return numbers.fold(0L) { a, n -> (a shl 8) or n.toLong() }
     }
     private fun format(n: Long) = (3 downTo 0).joinToString(".") { ((n shr (it * 8)) and 255).toString() }
-    fun plan(interfaces: List<ScanInterface>): NetworkPlan = NetworkPlan(interfaces.map { i ->
-        val n = ipv4(i.ip)
-        val private = n != null && (n ushr 24 == 10L || n ushr 20 == 0xac1L || n ushr 16 == 0xc0a8L)
-        val reason = when {
-            !i.up -> "Interface down"
-            n == null -> "Invalid IPv4"
-            n ushr 22 == 0x191L -> "Mesh / CGNAT space is not swept"
-            n ushr 24 == 127L -> "Loopback"
-            n ushr 16 == 0xa9feL -> "Link-local"
-            VIRTUAL_ADAPTER.containsMatchIn(i.name) -> "Virtual-switch adapter"
-            !private -> "Not RFC1918"
-            i.prefix !in 1..30 -> "Point-to-point or invalid prefix"
-            else -> null
-        }
-        if (reason != null) ScanNetwork(i, null, reason) else {
-            val prefix = maxOf(24, i.prefix)
-            val mask = (0xffffffffL shl (32-prefix)) and 0xffffffffL
-            val network = n!! and mask
-            val end = network or (mask xor 0xffffffffL)
-            ScanNetwork(i, "${format(network)}/$prefix", null, (network+1 until end).map(::format))
-        }
-    })
     /**
-     * A subnet the user typed for the sweep: private IPv4 only, as `a.b.c.d` or `a.b.c.d/prefix`. Anything wider than
-     * a /24 is cut down to the /24 around the typed address, so one field can never start a sweep of thousands of hosts.
-     * Null when the text is not a private IPv4 network.
+     * The plan for this computer's own cards alone, with no routes, no known servers and no remembered choices: what the sweep
+     * has always taken, as one network per card (cut to the /24 around the card's address), and the cards left out with a reason.
+     * [ScanPlanner.plan] is the full plan.
+     */
+    fun plan(interfaces: List<ScanInterface>): NetworkPlan = ScanPlanner.plan(interfaces).toNetworkPlan()
+    /**
+     * A subnet the user typed for the sweep, as `a.b.c.d` or `a.b.c.d/prefix`: the main network [ScanTyped] makes of it. A private
+     * network down to a /22 is swept as typed, a `/32` is that one host, anything wider is cut down to the /24 around the typed
+     * address; a network that is not private is swept on the Proxmox ports only. Null when the text is not such a network
+     * (not IPv4, not a unicast network, or Tailscale/CGNAT space, which is never swept).
      */
     fun planSubnet(cidr: String, label: String = "Additional subnet"): ScanNetwork? {
         val trimmed = cidr.trim()
         if (trimmed.isEmpty()) return null
         val n = ipv4(trimmed.substringBefore('/')) ?: return null
-        val asked = if ('/' in trimmed) trimmed.substringAfter('/').toIntOrNull()?.takeIf { it in 1..32 } ?: return null else 24
+        val asked = if ('/' in trimmed) trimmed.substringAfter('/').takeIf { p -> p.isNotEmpty() && p.all { c -> c in '0'..'9' } }?.toIntOrNull()?.takeIf { it in 1..32 } ?: return null else 24
         val private = (n ushr 24 == 10L || n ushr 20 == 0xac1L || n ushr 16 == 0xc0a8L)
-        if (!private) return null
-        val prefix = asked.coerceIn(24, 30)
-        val mask = (0xffffffffL shl (32 - prefix)) and 0xffffffffL
-        val network = n and mask
-        val end = network or (mask xor 0xffffffffL)
-        return ScanNetwork(ScanInterface(label, format(network), prefix, up = true), "${format(network)}/$prefix", null, (network + 1 until end).map(::format))
+        val main = (ScanTyped.network(n, asked, private) as? TypedNetwork.Rows)?.rows?.firstOrNull() ?: return null
+        val sweep = parseCidr(main.sweep!!) ?: return null
+        return ScanNetwork(ScanInterface(label, format(sweep.first), sweep.second, up = true), main.sweep, null, main.addresses, realCidr = main.real, origin = PlanSource.Typed, ports = main.ports)
     }
-    /** True when [planSubnet] sweeps less than the text asked for (a /16 becomes one /24). */
-    fun subnetNarrowed(cidr: String): Boolean = cidr.trim().substringAfter('/', "").toIntOrNull()?.let { it in 1..23 } == true
+    /** True when [planSubnet] sweeps less than the text asked for (a /16 becomes one /24, a /23 or /22 of public space too). */
+    fun subnetNarrowed(cidr: String): Boolean = (ScanTyped.parse(cidr) as? TypedNetwork.Rows)?.rows?.firstOrNull()?.let { it.realPrefix < (parseCidr(it.sweep!!)?.second ?: 0) } == true
     fun title(body: String): String? = Regex("<title[^>]*>(.*?)</title>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
         .find(body)?.groupValues?.get(1)?.replace(Regex("\\s+"), " ")?.replace("&amp;", "&")?.trim()?.take(60)
     fun classify(ip: String, port: Int, secure: Boolean, p: ScanPeek): ScanHit? {
@@ -121,6 +114,25 @@ object ScanRules {
             .groupBy { it.ip }.values.map { same -> same.firstOrNull { it.secure } ?: same.first() })
             .sortedWith(compareBy({ !it.proxmox }, { it.kind.ordinal }, { ipv4(it.ip) }, { it.port }))
     }
+    /**
+     * [merge] without the sort: [found] added to [current] in the order they arrive, with the same rules. A named hit replaces the
+     * host's plain web page, one host has one web row, the secure copy of the same service wins, and nothing already shown moves.
+     */
+    fun mergeArrival(current: List<ScanHit>, found: List<ScanHit>): List<ScanHit> {
+        val result = current.toMutableList()
+        for (hit in found) {
+            if (hit.kind != ScanKind.WEB) {
+                val same = result.indexOfFirst { it.ip == hit.ip && it.kind == hit.kind }
+                if (same >= 0) { if (!result[same].secure && hit.secure) result[same] = hit }
+                else { result.removeAll { it.ip == hit.ip && it.kind == ScanKind.WEB }; result += hit }
+            } else {
+                val there = result.indexOfFirst { it.ip == hit.ip }
+                if (there < 0) result += hit
+                else if (result[there].kind == ScanKind.WEB && !result[there].secure && hit.secure) result[there] = hit
+            }
+        }
+        return result
+    }
     fun saved(hit: ScanHit, origins: List<String>): Boolean = origins.any { origin -> runCatching {
         val u = URI(origin); u.scheme.equals(if (hit.secure) "https" else "http", true) && u.host.equals(hit.ip, true) &&
             (if (u.port >= 0) u.port else if (u.scheme == "https") 443 else 80) == hit.port
@@ -131,54 +143,46 @@ object ScanRules {
  * Discovery-only sockets. Each [scan] builds one private SSL context that accepts any certificate so the leaf can be shown.
  * It is never installed as a default or shared with API clients, and nothing it sees becomes trust.
  * [probe] replaces the network probe in tests.
+ *
+ * What a scan does and in what order is [ScanEngine]: known hosts first, one cheap pass on the Proxmox ports (at most
+ * [MAX_QUICK_IN_FLIGHT] connects at once), then the other ports of the hosts that answered or that the neighbour table lists.
  */
-class NetworkScanner(internal val connectTimeoutMs: Int = LAN_CONNECT_TIMEOUT_MS, private val probe: (suspend (String, Int) -> List<ScanHit>)? = null) {
-    fun scan(plan: NetworkPlan = interfaces(), origins: List<String> = emptyList(), concurrency: Int = 24, ports: List<Int> = LAN_SCAN_PORTS, extraSubnets: List<String> = emptyList()): Flow<NetworkProgress> = channelFlow {
+class NetworkScanner internal constructor(
+    internal val connectTimeoutMs: Int,
+    private val probe: (suspend (String, Int) -> List<ScanHit>)?,
+    private val injected: ScanProber?,
+    private val neighbours: NeighbourSource?,
+    private val tuning: ScanTuning,
+) {
+    constructor(connectTimeoutMs: Int = LAN_CONNECT_TIMEOUT_MS, probe: (suspend (String, Int) -> List<ScanHit>)? = null) : this(connectTimeoutMs, probe, null, null, ScanTuning())
+
+    /**
+     * Sweeps [plan] (and the networks the typed [extraSubnets] make). [origins] mark what is already saved; [knownHosts] are probed first,
+     * with the hosts of [origins]. [concurrency] is the most full probes (a TLS exchange and a request) at once.
+     */
+    fun scan(plan: NetworkPlan = interfaces(), origins: List<String> = emptyList(), concurrency: Int = 24, ports: List<Int> = LAN_SCAN_PORTS, extraSubnets: List<String> = emptyList(),
+        knownHosts: List<String> = emptyList()): Flow<NetworkProgress> = channelFlow {
         val extraNetworks = extraSubnets.mapNotNull { ScanRules.planSubnet(it) }
         val effectivePlan = if (extraNetworks.isEmpty()) plan else NetworkPlan(plan.networks + extraNetworks)
         val trace = Trace.begin(TraceSource.Scan, "Network discovery", session=true)
         try {
         require(concurrency in 1..64)
         require(ports.isNotEmpty() && ports.all { it in 1..65535 })
-        val probeOne: suspend (String, Int) -> List<ScanHit> = probe ?: run {
-            val tls = scanTlsContext()
-            val timeout = connectTimeoutMs
-            ({ ip: String, port: Int -> probeScanPort(ip, port, timeout, tls) })
-        }
-        val addresses = effectivePlan.addresses
-        val lock = Mutex()
-        var next = 0
-        var count = 0
-        var hits = emptyList<ScanHit>()
-        send(NetworkProgress(effectivePlan))
-        coroutineScope {
-            repeat(concurrency) { launch {
-                while (true) {
-                    ensureActive()
-                    val ip = lock.withLock { addresses.getOrNull(next++) } ?: break
-                    val found = mutableListOf<ScanHit>()
-                    for (port in ports) {
-                        ensureActive(); found += probeOne(ip, port)
-                    }
-                    lock.withLock {
-                        val previous = hits.map { it.ip to it.port }.toSet()
-                        hits = ScanRules.merge(hits + found.map { it.copy(saved = ScanRules.saved(it, origins)) })
-                        hits.filter { (it.ip to it.port) !in previous }.forEach { Trace.emit(TraceSource.Scan, "service", "Discovered ${it.kind}", mapOf("url" to it.origin)) }
-                        count++
-                        send(NetworkProgress(effectivePlan, count, ip, hits))
-                    }
-                }
-            } }
-        }
-        send(NetworkProgress(effectivePlan, count, hits = hits, finished = true))
+        require(effectivePlan.addresses.size <= MAX_SCAN_ADDRESSES) { "A scan sweeps at most $MAX_SCAN_ADDRESSES addresses." }
+        val prober = injected ?: probe?.let { LambdaProber(it) } ?: SocketProber(connectTimeoutMs, scanTlsContext(), Dispatchers.IO.limitedParallelism(tuning.quickInFlight))
+        val table = neighbours ?: if (injected == null && probe == null) LocalNeighbours() else NeighbourSource.NONE
+        ScanEngine(prober, table, tuning, connectTimeoutMs).run(effectivePlan, origins, knownHosts, concurrency, ports).collect { send(it) }
         } catch (t: Throwable) { trace.end(error=t); throw t } finally { trace.end() }
     }.flowOn(Dispatchers.IO)
     companion object {
-        fun interfaces(): NetworkPlan = ScanRules.plan(NetworkInterface.getNetworkInterfaces().toList().flatMap { nic ->
+        fun interfaces(): NetworkPlan = ScanRules.plan(attachedInterfaces())
+        /** Every IPv4 address of every network card of this computer, with the system's interface number to match its facts. Up or down. */
+        fun attachedInterfaces(): List<ScanInterface> = (NetworkInterface.getNetworkInterfaces()?.toList() ?: emptyList()).flatMap { nic ->
+            val index = runCatching { nic.index }.getOrNull()?.takeIf { it > 0 }
             nic.interfaceAddresses.filter { it.address is Inet4Address }.map {
-                ScanInterface("${nic.name} ${nic.displayName}", it.address.hostAddress, it.networkPrefixLength.toInt(), nic.isUp)
+                ScanInterface("${nic.name} ${nic.displayName}", it.address.hostAddress, it.networkPrefixLength.toInt(), runCatching { nic.isUp }.getOrDefault(false), index, nic.name)
             }
-        })
+        }
     }
 }
 
@@ -207,11 +211,19 @@ fun completeServerAddress(text: String, kind: String = DIRECT_PVE_KIND): String 
 }
 
 /**
- * Read the leaf certificate's SHA-256 from the HTTPS origin [address], on the same host and port the connection would
- * use ([routeTarget]: no port means 443). The socket accepts any certificate only to read it; nothing seen here is
- * trust until the user approves it. Null when [address] is not an HTTPS origin or no certificate could be read.
+ * Read the leaf certificate's SHA-256 from the HTTPS origin [address] (upper-case, colon separated). A thin wrapper of
+ * [probeTlsCertificate] for callers that need only the fingerprint.
  */
-suspend fun probeTlsFingerprint(address: String, timeoutMs: Int = 5000): String? = withContext(Dispatchers.IO) {
+suspend fun probeTlsFingerprint(address: String, timeoutMs: Int = 5000): String? =
+    probeTlsCertificate(address, timeoutMs)?.fingerprint?.chunked(2)?.joinToString(":") { it.uppercase() }
+
+/**
+ * Read the leaf certificate from the HTTPS origin [address], on the same host and port the connection would use
+ * ([routeTarget]: no port means 443): its fingerprint, the SHA-256 of its public key, subject, issuer and validity. The
+ * socket accepts any certificate only to read it; nothing seen here is trust until the user approves it. Null when
+ * [address] is not an HTTPS origin or no certificate could be read.
+ */
+suspend fun probeTlsCertificate(address: String, timeoutMs: Int = 5000): ProbedCertificate? = withContext(Dispatchers.IO) {
     val target = routeTarget(address) ?: return@withContext null
     val raw = Socket()
     var socket: Socket = raw
@@ -224,7 +236,7 @@ suspend fun probeTlsFingerprint(address: String, timeoutMs: Int = 5000): String?
         socket = scanTlsContext().socketFactory.createSocket(raw, target.host, target.port, true)
         (socket as SSLSocket).startHandshake()
         val cert = socket.session.peerCertificates.firstOrNull() as? X509Certificate
-        cert?.let { MessageDigest.getInstance("SHA-256").digest(it.encoded).joinToString(":") { b -> "%02X".format(b) } }
+        cert?.let { ProbedCertificate.of(it) }
     } catch (e: CancellationException) { throw e }
     catch (_: Exception) { ensureActive(); null }
     finally {
@@ -234,7 +246,66 @@ suspend fun probeTlsFingerprint(address: String, timeoutMs: Int = 5000): String?
     }
 }
 
-private suspend fun probeScanPort(ip: String, port: Int, connectTimeoutMs: Int, tls: SSLContext): List<ScanHit> {
+/** What the platform's own TLS validation says about a server, before anything is trusted by hand. */
+enum class NormalTls { Accepted, Refused, Unknown }
+
+/**
+ * Ask whether the HTTPS origin [address] passes the platform's own TLS validation: [PlatformTrust] (the bundled Java roots
+ * and this computer's store) and the HTTPS host name check, which is what a connection without a certificate pin applies
+ * (`PveClient.open`, `PveTicket.request`, the storage wire and the consoles).
+ * One socket and one handshake on the host and port the connection would use ([routeTarget]); no request is sent, nothing
+ * is trusted and nothing is stored.
+ *
+ * [NormalTls.Accepted]: the handshake completed. [NormalTls.Refused]: it failed because of the server's certificate, see
+ * [refusedOnCertificate]. [NormalTls.Unknown]: anything else, including an address that is not an HTTPS origin, an
+ * unreachable server, a timeout, a reset connection and a TLS failure that is not about the certificate.
+ */
+suspend fun probeNormalTls(address: String, timeoutMs: Int = 4000): NormalTls = probeTlsValidation(address, timeoutMs, null)
+
+/**
+ * [probeNormalTls] with the trust to validate against. Null is [platformSslContext], looked up inside the guarded block: it
+ * can fail on a broken trust store, and a probe must end as [NormalTls.Unknown] then. Tests pass a context of their own so
+ * that no global JVM setting changes.
+ */
+internal suspend fun probeTlsValidation(address: String, timeoutMs: Int, context: SSLContext?): NormalTls = withContext(Dispatchers.IO) {
+    val target = routeTarget(address) ?: return@withContext NormalTls.Unknown
+    val raw = Socket()
+    var socket: Socket = raw
+    val closer = launch(start = CoroutineStart.UNDISPATCHED) {
+        try { awaitCancellation() } finally { runCatching { socket.close() }; runCatching { raw.close() } }
+    }
+    try {
+        raw.connect(InetSocketAddress(target.host, target.port), timeoutMs)
+        raw.soTimeout = timeoutMs
+        val secure = (context ?: platformSslContext()).socketFactory.createSocket(raw, target.host, target.port, true) as SSLSocket
+        socket = secure
+        // The same check HttpsURLConnection asks of the socket when it has the default host name verifier.
+        secure.sslParameters = secure.sslParameters.apply { endpointIdentificationAlgorithm = "HTTPS" }
+        secure.startHandshake()
+        NormalTls.Accepted
+    } catch (e: CancellationException) { throw e }
+    catch (e: Exception) { ensureActive(); if (refusedOnCertificate(e)) NormalTls.Refused else NormalTls.Unknown }
+    finally {
+        closer.cancel()
+        runCatching { socket.close() }
+        runCatching { raw.close() }
+    }
+}
+
+/**
+ * True when [error] is the platform refusing the server's certificate: an [SSLPeerUnverifiedException], or an
+ * [SSLException] with a [CertificateException] among its causes. That is how the JDK reports a chain that is not trusted,
+ * an expired or not yet valid certificate and a host name the certificate does not name. A TLS failure without such a cause
+ * (no common protocol, a handshake the server ended, plain HTTP on the port) says nothing about the certificate.
+ */
+internal fun refusedOnCertificate(error: Throwable): Boolean {
+    if (error is SSLPeerUnverifiedException) return true
+    if (error !is SSLException) return false
+    // The bound stops a chain of causes that loops back on itself.
+    return generateSequence<Throwable>(error) { it.cause?.takeIf { cause -> cause !== it } }.take(16).any { it is CertificateException }
+}
+
+internal suspend fun probeScanPort(ip: String, port: Int, connectTimeoutMs: Int, tls: SSLContext): List<ScanHit> {
     var connected = false
     suspend fun peek(path: String, secure: Boolean): ScanPeek? = withContext(Dispatchers.IO) {
         val raw = java.net.Socket()
@@ -260,7 +331,8 @@ private suspend fun probeScanPort(ip: String, port: Int, connectTimeoutMs: Int, 
             val buffer = ByteArray(2048)
             while (data.size() < 16384 && System.nanoTime() - start < 3_000_000_000L) {
                 ensureActive()
-                val n = input.read(buffer, 0, minOf(buffer.size, 16384-data.size()))
+                // A server that sent its answer and keeps the connection open times out here: what arrived is the answer.
+                val n = try { input.read(buffer, 0, minOf(buffer.size, 16384-data.size())) } catch (_: java.net.SocketTimeoutException) { break }
                 if (n < 0) break
                 data.write(buffer, 0, n)
             }

@@ -21,6 +21,14 @@ internal object RouteTagSamples {
     val tailscale = RouteTagState.Observed(key, base().copy(kind = RouteKind.Vpn, vpnKind = VpnKind.Tailscale, tunnelName = "Tailscale", interfaceName = "tailscale0",
         medium = RouteMedium.Tunnel, address = "100.70.1.5", source = "100.101.1.2", evidence = RouteEvidence.SourceAddress, peerPath = PeerPath.Direct("198.51.100.4:41641")))
     val tailscaleRelayed = RouteTagState.Observed(key, tailscale.observation.copy(peerPath = PeerPath.Relayed("fra")))
+    val tailscalePeerRelay = RouteTagState.Observed(key, tailscale.observation.copy(peerPath = PeerPath.PeerRelayed("198.51.100.7:40000:12")))
+    val tailscaleIdle = RouteTagState.Observed(key, tailscale.observation.copy(peerPath = PeerPath.Idle))
+    /** A server behind a subnet router: the OS route goes through Tailscale and the status names the router. */
+    val tailscaleSubnetRouter = RouteTagState.Observed(key, tailscale.observation.copy(address = "10.20.30.15",
+        peerPath = PeerPath.SubnetRouter("subnet-gw", "10.20.30.0/24", PeerPath.Direct("198.51.100.4:41641"))))
+    val tailscaleOffline = RouteTagState.Observed(key, tailscale.observation.copy(peerPath = PeerPath.Offline))
+    val tailscaleUserspace = RouteTagState.Observed(key, base().copy(address = "100.70.1.5", interfaceName = "Ethernet 2", medium = RouteMedium.Ethernet,
+        source = "192.168.1.20", gateway = "192.168.1.1", reason = TAILSCALE_USERSPACE_NOTE))
     val unknown = RouteTagState.Observed(key, base().copy(interfaceName = "eth9", source = "192.168.1.20", vpnComplete = false,
         vpnGaps = listOf("Tailscale is installed but its status could not be read."),
         reason = "The interface type was not reported and the VPN check was incomplete, so a VPN cannot be ruled out."))
@@ -36,9 +44,10 @@ internal object RouteTagSamples {
 
     /** Every identifying string the samples carry; none may appear in Showcase. */
     val identities = listOf("pve-west-cluster", "example.test", "192.0.2.15", "192.168.1.20", "192.168.1.1", "Ethernet 2", "wg-home", "home-office",
-        "10.8.0.2", "100.70.1.5", "100.101.1.2", "198.51.100.4", "proxy.example", "tailscale0", "eth9", "corporate-datacenter", "storage-node")
+        "10.8.0.2", "100.70.1.5", "100.101.1.2", "198.51.100.4", "198.51.100.7", "proxy.example", "tailscale0", "eth9", "corporate-datacenter", "storage-node", "subnet-gw", "10.20.30.")
 
     val all = listOf("direct" to direct, "wifi" to wifi, "wireguard" to wireguard, "tailscale" to tailscale, "tailscale-relayed" to tailscaleRelayed,
+        "tailscale-peer-relay" to tailscalePeerRelay, "tailscale-idle" to tailscaleIdle, "tailscale-subnet-router" to tailscaleSubnetRouter, "tailscale-offline" to tailscaleOffline, "tailscale-userspace" to tailscaleUserspace,
         "unknown" to unknown, "failed" to failed, "proxy" to proxy, "checking" to checking, "refreshing" to refreshing, "long-names" to longNames,
         "demo" to RouteTagState.Demo, "browser" to RouteTagState.Browser)
 }

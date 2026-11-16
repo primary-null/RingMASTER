@@ -53,7 +53,7 @@ class UiScreenshotsTest {
         val plan = NetworkPlan(listOf(ScanNetwork(ScanInterface("Ethernet","192.168.50.2",24),"192.168.50.0/24",null,(1..254).map { "192.168.50.$it" })))
         val screens = linkedMapOf<String,@Composable () -> Unit>()
         listOf("idle","mid","complete").forEach { phase ->
-            val session = ScanSession(scope)
+            val session = quietSession(scope)
             if(phase!="idle") {
                 if(phase=="mid") session.javaClass.getDeclaredField("running\$delegate").apply { isAccessible=true }.get(session).let { (it as MutableState<Boolean>).value=true }
                 val progress = NetworkProgress(plan,if(phase=="mid") 100 else 254,hits=if(phase=="mid") hits.take(3) else hits,finished=phase=="complete")

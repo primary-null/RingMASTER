@@ -343,7 +343,8 @@ private fun lerpRect(a: Rect, b: Rect, t: Float) = Rect(
             error != null && points.isEmpty() -> error
             else -> "No samples in this window"
         }
-        HistoryChartPanel(chart.title, points, chart.keys, empty, plot, interaction)
+        // The wheel zooms about the pointer here (the lens does not scroll); zooming out to the whole window resets.
+        HistoryChartPanel(chart.title, points, chart.keys, empty, plot, interaction, extent = if (source.size > 1) source.first().time..source.last().time else null, wheelZoom = true)
         if (loading && points.isNotEmpty()) Text("Loading history…", Modifier.align(Alignment.TopStart).padding(top = 28.dp), color = Tech.Muted, fontFamily = Tech.Mono, fontSize = 11.sp)
         if (error != null && points.isNotEmpty()) Text(error, Modifier.align(Alignment.BottomStart), color = Tech.Muted, fontFamily = Tech.Mono, fontSize = 11.sp, maxLines = 2)
     }

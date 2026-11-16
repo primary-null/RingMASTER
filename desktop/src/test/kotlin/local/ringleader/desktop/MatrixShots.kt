@@ -191,11 +191,11 @@ internal fun matrixShots(scope: CoroutineScope, lab: MatrixLab, env: MatrixEnv):
             ScanHit("192.0.2.$octet", if (n % 2 == 0) 80 else 443, n % 2 == 1, kind, name)
         }
     val plan = NetworkPlan(listOf(ScanNetwork(ScanInterface("Ethernet", "192.0.2.2", 24), "192.0.2.0/24", null, (1..254).map { "192.0.2.$it" })))
-    val scanDone = ScanSession(scope).also {
+    val scanDone = quietSession(scope).also {
         stateOf<NetworkProgress?>(it, "progress").value = NetworkProgress(plan, 254, hits = hits, finished = true)
         stateOf<Long>(it, "durationSeconds").value = 6
     }
-    val scanIdle = ScanSession(scope)
+    val scanIdle = quietSession(scope)
     shots += MatrixShot("scan-results", "Scan") { e -> MatrixWindow("Scan", e.state(), e.idle, e, false) { ScanScreen(scanDone, emptyList()) {} } }
     shots += MatrixShot("scan-idle", "Scan") { e -> MatrixWindow("Scan", e.state(), e.idle, e, false) { ScanScreen(scanIdle, emptyList()) {} } }
 

@@ -24,15 +24,26 @@ import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 
-private const val TRUST_VERSION = 1
+/**
+ * Version 2 (2026-11-16) adds an optional `spki` per entry: the SHA-256 of the approved leaf's public key. Version 1 files
+ * are read and become version 2 on the next save, with every entry kept. Builds that know only version 1 refuse a version 2
+ * file as "written by a newer RingMASTER" and leave it untouched.
+ */
+private const val TRUST_VERSION = 2
+private const val TRUST_VERSION_1 = 1
 private const val MAX_TRUST_BYTES = 64 * 1024
 class CertificateTrustStoreException(message: String, val blocksSave: Boolean = false) : IllegalStateException(message)
 
-/** No identities or secrets. An approval is scoped to a canonical HTTPS origin. */
-data class ApprovedCertificate(val origin: String, val pin: String) {
+/**
+ * No identities or secrets. An approval is scoped to a canonical HTTPS origin. [pin] is the exact leaf that is trusted;
+ * [spki] is the SHA-256 of that leaf's public key when it is known. The key never widens trust: TLS still requires the
+ * exact leaf. It only lets the desk say that a changed certificate kept the same key.
+ */
+data class ApprovedCertificate(val origin: String, val pin: String, val spki: String? = null) {
     init {
         require(origin == certificateOrigin(origin)) { "Invalid trust origin." }
         require(canonicalOptionalPin(pin) == pin && pin.isNotEmpty()) { "Invalid certificate fingerprint." }
+        require(spki == null || spki.matches(sha256PinPattern)) { "Invalid certificate key." }
     }
 }
 
@@ -43,7 +54,7 @@ fun certificateOrigin(address: String): String {
 
 private fun encodeTrust(entries: List<ApprovedCertificate>): String = buildJsonObject {
     put("version", TRUST_VERSION)
-    put("certificates", buildJsonArray { entries.forEach { e -> add(buildJsonObject { put("origin", e.origin); put("pin", e.pin) }) } })
+    put("certificates", buildJsonArray { entries.forEach { e -> add(buildJsonObject { put("origin", e.origin); put("pin", e.pin); e.spki?.let { put("spki", it) } }) } })
 }.toString() + "\n"
 
 private fun decodeTrust(text: String): List<ApprovedCertificate> {
@@ -52,18 +63,20 @@ private fun decodeTrust(text: String): List<ApprovedCertificate> {
         val root = Json.parseToJsonElement(text) as? JsonObject ?: error("Invalid document")
         require(root.keys == setOf("version", "certificates"))
         val version = root["version"] as? JsonPrimitive ?: error("Missing version")
-        require(!version.isString && version.intOrNull == TRUST_VERSION)
+        val schema = version.intOrNull
+        require(!version.isString && (schema == TRUST_VERSION || schema == TRUST_VERSION_1))
         val entries = root["certificates"] as? JsonArray ?: error("Missing certificates")
         require(entries.size <= 256)
         val result = entries.map {
             val entry = it as? JsonObject ?: error("Invalid certificate")
-            require(entry.keys == setOf("origin", "pin"))
+            if (schema == TRUST_VERSION_1) require(entry.keys == setOf("origin", "pin"))
+            else require(entry.keys.containsAll(setOf("origin", "pin")) && (entry.keys - setOf("origin", "pin", "spki")).isEmpty())
             fun field(key: String): String {
                 val value = entry[key] as? JsonPrimitive ?: error("Invalid field")
                 require(value.isString)
                 return value.content
             }
-            ApprovedCertificate(field("origin"), field("pin"))
+            ApprovedCertificate(field("origin"), field("pin"), if ("spki" in entry) field("spki") else null)
         }
         require(result.map { it.origin }.distinct().size == result.size)
         return result

@@ -338,6 +338,7 @@ internal class ResidentRuntime(
                         leases = MutationLeases.shared,
                         clock = Clock.systemUTC(),
                         scope = scope,
+                        approvedCertificates = { CertificateTrustStore(dir.resolve("certificates.json")).load() },
                     )
                     engine.start()
                     ResidentRuntime(engine, null, outcome.lock, scope, alerts = DesktopAlerts(dir, engine.state)).also { runtime ->

@@ -53,14 +53,20 @@ class TraceroutePlugin(
     }
 }
 
-/** Windows `tracert`, otherwise `traceroute -n`, otherwise `tracepath -n`. Null when none of them exist. */
+/**
+ * Windows `tracert`, otherwise `traceroute -n`, otherwise `tracepath -n`. Null when none of them exist. An IPv6 address gets `-6`.
+ * `tracepath` (iputils, getopt) takes `--` before the host; `traceroute` and `tracert` are given the validated host as it is, which can
+ * never start with a hyphen (this refuses one that does).
+ */
 internal fun traceCommand(os: String, which: (String) -> String?, host: String, timeoutMs: Int, maxHops: Int): List<String>? {
+    require(!host.startsWith("-")) { "A host that starts with a hyphen would be read as an option." }
+    val family = if (isIpv6Host(host)) listOf("-6") else emptyList()
     if (windowsOs(os)) {
         val exe = which("tracert") ?: return null
-        return listOf(exe, "-d", "-w", timeoutMs.toString(), "-h", maxHops.toString(), host)
+        return listOf(exe, "-d", "-w", timeoutMs.toString(), "-h", maxHops.toString()) + family + host
     }
-    which("traceroute")?.let { return listOf(it, "-n", "-w", ((timeoutMs + 999) / 1000).coerceAtLeast(1).toString(), "-m", maxHops.toString(), host) }
-    which("tracepath")?.let { return listOf(it, "-n", "-m", maxHops.toString(), host) }
+    which("traceroute")?.let { return listOf(it, "-n", "-w", ((timeoutMs + 999) / 1000).coerceAtLeast(1).toString(), "-m", maxHops.toString()) + family + host }
+    which("tracepath")?.let { return listOf(it, "-n", "-m", maxHops.toString()) + family + listOf("--", host) }
     return null
 }
 

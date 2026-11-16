@@ -26,6 +26,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.PointerIcon
@@ -47,6 +48,7 @@ import local.ringleader.core.PDM_KIND
 import local.ringleader.core.PowerPhase
 import local.ringleader.core.PowerSubmission
 import local.ringleader.core.TaskOutcome
+import local.ringleader.core.TickerTarget
 import local.ringleader.core.Workspace
 import local.ringleader.core.WorkspaceState
 import local.ringleader.core.powerPhaseLabel
@@ -74,6 +76,26 @@ private fun statusColor(outcome: TaskOutcome) = when (outcome) {
     // The shell owns setLiveTasks for the visible page, including minimize. This screen only reads.
     // Fetch when Activity opens or the connection changes. Later recomposition does not fetch again.
     LaunchedEffect(state.connectionEpoch) { workspace.refreshTasks() }
+    // A click on the live ticker can ask for one task: the list scrolls to its row and the row is lit for a moment.
+    val pageFocus = LocalPageFocus.current
+    val asked = pageFocus?.take { it is TickerTarget.Activity }
+    val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+    var lit by remember { androidx.compose.runtime.mutableStateOf<Pair<String, Long>?>(null) }
+    val ordered = state.tasks?.sortedBy { if (it.outcome == TaskOutcome.Running) 0 else 1 }
+    LaunchedEffect(asked?.token, ordered?.size) {
+        val request = asked ?: return@LaunchedEffect
+        val upid = (request.target as TickerTarget.Activity).upid
+        if (upid == null) { pageFocus.consume(request); return@LaunchedEffect }
+        // The tasks may not be read yet (the page was only just opened): wait for them until the request goes stale.
+        val position = ordered?.indexOfFirst { it.upid == upid } ?: return@LaunchedEffect
+        if (position < 0) { pageFocus.consume(request); return@LaunchedEffect }
+        // The row is marked first and lights when it is on screen; the request is handed back last, because handing it back changes
+        // this effect's key and would cancel it half way.
+        lit = upid to request.token
+        androidx.compose.runtime.withFrameNanos { }
+        listState.animateScrollToItem((listState.layoutInfo.totalItemsCount - ordered.size + position).coerceAtLeast(0))
+        pageFocus.consume(request)
+    }
     ProvideMotionBook(state) {
     // The one task whose log is open can report a percentage; its row traces it along the outline.
     val openLog = state.taskLog
@@ -86,7 +108,7 @@ private fun statusColor(outcome: TaskOutcome) = when (outcome) {
         Row(Modifier.fillMaxSize()) {
         androidx.compose.runtime.CompositionLocalProvider(LocalActivitySplit provides split) {
         Box(Modifier.weight(1f).fillMaxHeight()) {
-        LazyColumn(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(0.dp)) {
+        LazyColumn(Modifier.fillMaxSize(), state = listState, verticalArrangement = Arrangement.spacedBy(0.dp)) {
             item { StorageActionStrip(state,workspace) }
             item {
             Column(verticalArrangement = Arrangement.spacedBy(Tech.Space8)) {
@@ -176,7 +198,7 @@ private fun statusColor(outcome: TaskOutcome) = when (outcome) {
                     } }
                     items(tasks, key = { it.identity }) { task ->
                         val opened = state.taskLog?.task?.identity == task.identity
-                        TaskRow(task, compact, workspace, opened, if (opened && openLog?.status?.running != false) tracedProgress else null)
+                        TaskRow(task, compact, workspace, opened, if (opened && openLog?.status?.running != false) tracedProgress else null, lit?.takeIf { it.first == task.upid }?.second ?: 0L)
                     }
                 }
             }
@@ -237,7 +259,7 @@ private val taskTypeNames = mapOf(
     "hamigrate" to "HA migrate", "harelocate" to "HA relocate", "hastart" to "HA start", "hastop" to "HA stop",
 )
 internal fun taskTypeName(type: String): String = taskTypeNames[type] ?: type
-@Composable private fun TaskRow(task: ClusterTask, compact: Boolean, workspace: Workspace, opened: Boolean, progress: Float? = null) {
+@Composable private fun TaskRow(task: ClusterTask, compact: Boolean, workspace: Workspace, opened: Boolean, progress: Float? = null, litToken: Long = 0L) {
     val (_, node, subject, user, status) = taskListFields(task)
     val color = if (taskHasWarnings(task)) Tech.Amber else statusColor(task.outcome)
     val interaction = remember(task.identity) { MutableInteractionSource() }
@@ -247,7 +269,7 @@ internal fun taskTypeName(type: String): String = taskTypeNames[type] ?: type
         LocalMotion.current.fade(MotionDur.Quick),
     )
     val source = "task:${task.upid}"
-    Column {
+    Column(Modifier.focusGlow(litToken, litToken != 0L, bringIntoView = false)) {
         // Success blooms once; a failed task keeps a red edge; a task whose log reports a percentage traces it along the outline.
         Row(Modifier.phosphorRow(null, source, failedEdge = task.outcome == TaskOutcome.Unsuccessful).progressTrace(progress, 8f)
             .fillMaxWidth().heightIn(min = 36.dp).background(background).hoverable(interaction)

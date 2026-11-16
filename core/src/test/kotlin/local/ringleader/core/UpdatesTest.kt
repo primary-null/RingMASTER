@@ -158,7 +158,7 @@ class UpdatesTest {
         assertIs<UpdateState.Failed>(run(UpdateTransport { _,limit,_ -> UpdateResponse(200,ByteArray(limit+1)) }))
         assertIs<UpdateState.Failed>(run(UpdateTransport { u,limit,_ -> UpdateResponse(200, if(u.endsWith(".sig")) ByteArray(limit+1) else json.toByteArray()) }))
         var redirects=0
-        val movedAway=assertIs<UpdateState.Failed>(run(UpdateTransport { u,_,_ -> redirects++; if (u == UPDATE_FEED) UpdateResponse(302,location="https://example.com/feed") else UpdateResponse(404) }))
+        val movedAway=assertIs<UpdateState.Failed>(run(UpdateTransport { u,_,_ -> redirects++; if (u == UPDATE_FEED) UpdateResponse(302,location="https://github.com/primary-null/RingMASTER/releases/download/v0.22.0/ringmaster-update.json") else UpdateResponse(404) }))
         assertEquals("The update feed was not found. Its address may have changed.",movedAway.reason); assertNull(movedAway.releasePage)
         assertEquals(2,redirects)
         var count=0
@@ -284,7 +284,7 @@ class UpdatesTest {
 
     @Test fun profileNewerVersionLoadsDefaultsAndBlocksSave() {
         val file=Files.createTempDirectory("profile-new").resolve("profiles.json")
-        val text="""{"version":2,"profiles":[],"future":true}"""; Files.writeString(file,text)
+        val text="""{"version":3,"profiles":[],"future":true}"""; Files.writeString(file,text)
         var count=0; val store=ProfileStore(file).apply { onNewerSchema={ count++ } }
         assertTrue(store.load().isEmpty()); assertTrue(store.load().isEmpty()); assertEquals(1,count)
         assertFailsWith<ProfileStoreException> { store.save(emptyList()) }; assertEquals(text,Files.readString(file))

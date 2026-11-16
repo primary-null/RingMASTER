@@ -93,7 +93,7 @@ fun boundGuestPath(connection: Connection, guest: Guest): String {
 }
 
 fun parseDetails(guest: Guest, body: String): GuestDetails {
-    val row = Json.parseToJsonElement(body).jsonObject["data"]?.jsonObject ?: error("The server returned no guest details.")
+    val row = serverJson(body).jsonObject["data"]?.jsonObject ?: error("The server returned no guest details.")
     fun number(key: String) = row[key]?.jsonPrimitive?.longOrNull?.takeIf { it >= 0 }
     val status = row["status"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() } ?: error("The server returned no guest state.")
     val cpu = row["cpu"]?.jsonPrimitive?.doubleOrNull?.takeIf { it.isFinite() && it >= 0 }
@@ -145,7 +145,7 @@ fun serverOrigin(value: String): URI {
 
 fun parseOverview(body: String, remote: String): Overview {
     require(serverOrigin(remote).toString() == remote) { "The guest is missing its connection identity." }
-    val rows = Json.parseToJsonElement(body).jsonObject["data"]?.jsonArray ?: error("Server returned no resource list.")
+    val rows = serverJson(body).jsonObject["data"]?.jsonArray ?: error("Server returned no resource list.")
     fun JsonObject.field(key: String) = this[key]?.jsonPrimitive?.contentOrNull.orEmpty()
     val guests = rows.mapNotNull {
         val row = it.jsonObject
@@ -573,8 +573,8 @@ internal class ProxmoxTransport(
             try {
                 val headers = mutableMapOf<String,String>()
                 if(header != null) headers["Authorization"] = header
-                if (auth.passwordLogin) {
-                    val ticket = auth.tickets.get(auth)
+                val ticket = if (auth.passwordLogin) auth.tickets.get(auth) else null
+                if (ticket != null) {
                     headers["Cookie"] = ticket.cookie
                     if (method != "GET") headers["CSRFPreventionToken"] = ticket.csrf
                 }
@@ -601,12 +601,8 @@ internal class ProxmoxTransport(
                     }, afterHeaders = storageAfterHeaders) { code, response ->
                 status = code
                 when(code) {
-                    200 -> {
-                        val bytes = response.readNBytes(1024 * 1024 + 1)
-                        try { if (bytes.size > 1024 * 1024) { if (sent) throw StorageUnclear() else error("Storage response is too large.") }; String(bytes, Charsets.UTF_8) }
-                        finally { bytes.fill(0) }
-                    }
-                    401 -> { if (auth.passwordLogin) auth.tickets.clear(); throw SessionExpiredException() }
+                    200 -> try { readAnswer(response, answerLimit(path)) } catch (e: AnswerRefusedException) { if (sent) throw StorageUnclear() else throw e }
+                    401 -> { ticket?.let { auth.tickets.clear(it) }; throw SessionExpiredException() }
                     400, 403 -> {
                         val raw = response.readNBytes(65536)
                         val fields = try { raw?.let { createErrorKeys(it) }.orEmpty().intersect(setOf("url", "filename", "content", "checksum", "checksum-algorithm", "notes", "protected", "storage", "template")) } catch (_: Exception) { emptySet() } finally { raw?.fill(0) }
@@ -617,14 +613,21 @@ internal class ProxmoxTransport(
                 }
                 }
             } catch (e: SessionExpiredException) { throw e }
+            catch (e: AnswerRefusedException) { throw e }
             catch (e: StorageRejected) { throw e }
             catch (e: StorageUnclear) { throw e }
             catch (_: java.util.concurrent.CancellationException) { if (sent) throw StorageUnclear() else throw StorageCancelledBeforeSend() }
-            catch (_: Exception) { if (sent) throw StorageUnclear() else throw java.io.IOException("Storage request stopped before its body was sent.") }
+            catch (e: Exception) { if (sent) throw StorageUnclear() else throw java.io.IOException("Storage request stopped before its body was sent.", e) }
             finally { cancel.detach(); trace.end(status = status) }
         }
     }
 
+    /**
+     * One API call. A GET goes through [HttpsURLConnection]: the JDK may re-send a GET once when the connection drops before
+     * the status line, which is harmless for a read. A request with a body (every POST and PUT, and every DELETE, whose
+     * empty body only marks it as a mutation) goes through [storageWire] instead: one TLS socket, `Connection: close`, no
+     * retry, reconnect or redirect layer, so it reaches the server at most once. Both answer through [mapReply].
+     */
     private fun exchange(
         address: String, tokenId: String, secret: String, fingerprint: String, path: String, body: ByteArray?, kind: String,
         missing: String = GUEST_NOT_FOUND, badRequest: String? = null, method: String = "POST", auth: Connection? = null, retry: Boolean = true, contentType: String = POWER_CONTENT_TYPE, readCreateErrors: Boolean = false,
@@ -632,6 +635,7 @@ internal class ProxmoxTransport(
         if (auth == null && '!' !in tokenId) return Connection(address, tokenId, secret, fingerprint, kind).use {
             exchange(address, tokenId, secret, fingerprint, path, body, kind, missing, badRequest, method, it, contentType = contentType, readCreateErrors = readCreateErrors)
         }
+        val mutation = body != null
         // Under the Hood: one span per direct PVE call (PdmClient traces its own). Path only, never headers or bodies.
         val trace = if (kind == PDM_KIND) null else Trace.begin(TraceSource.PveApi, "${if (body == null) "GET" else method} ${Redact.url(path)}",
             mapOf("url" to Redact.url(address.trimEnd('/') + path)))
@@ -639,72 +643,27 @@ internal class ProxmoxTransport(
         var traceBytesIn: Long? = null
         var traceFailure: Throwable? = null
         try {
-        val header = if (auth?.passwordLogin == true) null else authorizationHeader(kind, tokenId, secret)
-        val connection = open(address, tokenId, secret, fingerprint, path, header)
-        if (auth?.passwordLogin == true) {
-            val ticket = auth.tickets.get(auth)
-            connection.setRequestProperty("Cookie", ticket.cookie)
-            if (body != null) connection.setRequestProperty("CSRFPreventionToken", ticket.csrf)
-        }
-        var sent = false
-        try {
-            if (body != null && method == "DELETE") {
-                // Proxmox rejects any DELETE request body with HTTP 501; parameters belong in the path.
-                // The empty body still marks this as a mutation, so a lost reply stays ambiguous.
-                connection.requestMethod = method
-                if (header != null) connection.setRequestProperty("Authorization", header)
-                connection.connect()
-                sent = true
-            } else if (body != null) {
-                connection.requestMethod = method
-                connection.doOutput = true
-                connection.setFixedLengthStreamingMode(body.size)
-                connection.setRequestProperty("Content-Type", contentType)
-                if (header != null) connection.setRequestProperty("Authorization", header)
-                val output = connection.outputStream
-                sent = true
-                try { output.use { it.write(body); it.flush() } } finally { if (readCreateErrors) body.fill(0) }
+            val header = if (auth?.passwordLogin == true) null else authorizationHeader(kind, tokenId, secret)
+            val origin = serverOrigin(address)
+            validateIdentity(tokenId, DIRECT_PVE_KIND)
+            require(secret.isNotBlank() && secret.none { it == '\r' || it == '\n' }) { if ('!' !in tokenId) "Enter the password." else "Enter the API token secret." }
+            pinnedSslContext(fingerprint) // A malformed pin is refused before any login or connection.
+            val headers = linkedMapOf<String, String>()
+            if (header != null) headers["Authorization"] = header
+            val ticket = if (auth?.passwordLogin == true) auth.tickets.get(auth) else null
+            if (ticket != null) {
+                headers["Cookie"] = ticket.cookie
+                if (mutation) headers["CSRFPreventionToken"] = ticket.csrf
             }
-            return when (val code = connection.responseCode.also { traceStatus = it }) {
-                200 -> connection.inputStream.bufferedReader().use { it.readText() }.also { traceBytesIn = it.length.toLong() }
-                401 -> {
-                    if (auth?.passwordLogin == true && retry) {
-                        auth.tickets.clear()
-                        // A sent mutation may have run before the 401; never replay it under a fresh ticket.
-                        if (body != null && sent) throw SessionExpiredException()
-                        try { auth.tickets.get(auth) } catch (e: LoginRefusedException) { throw SessionExpiredException() }
-                        return exchange(address, tokenId, secret, fingerprint, path, body, kind, missing, badRequest, method, auth, false, contentType, readCreateErrors)
-                    }
-                    throw SessionExpiredException()
-                }
-                403 -> { if (readCreateErrors) throw CreateServerRefusal(403, emptySet()); throw GuestPermissionException() }
-                400 -> {
-                    if (readCreateErrors) {
-                        val raw = connection.errorStream?.use { it.readNBytes(65536) }
-                        val fields = try { raw?.let { createErrorKeys(it) }.orEmpty() } catch (_: Exception) { emptySet() } finally { raw?.fill(0) }
-                        throw CreateServerRefusal(400, fields)
-                    }
-                    error(badRequest ?: "The server returned HTTP 400.")
-                }
-                404 -> { if (readCreateErrors && sent) throw AmbiguousPowerResultException(); error(if (kind == PDM_KIND) "The PDM read returned HTTP 404." else missing) }
-                in 300..399 -> {
-                    if (body != null && sent) throw AmbiguousPowerResultException()
-                    error("The server redirected the request. Enter the server's direct HTTPS address.")
-                }
-                in 500..599 -> {
-                    if (body == null && path.endsWith("/agent/network-get-interfaces")) error("Guest agent not running")
-                    if (body != null && sent) throw AmbiguousPowerResultException()
-                    error("The server returned HTTP $code.")
-                }
-                else -> { if (readCreateErrors && sent) throw AmbiguousPowerResultException(); error("The server returned HTTP ${connection.responseCode}.") }
+            val reply = if (body != null) sendOnce(origin, fingerprint, path, method, headers, body, contentType, readCreateErrors)
+                else readOnce(origin, fingerprint, path, headers, readCreateErrors)
+            traceStatus = reply.code
+            reply.text?.let { traceBytesIn = it.length.toLong() }
+            return mapReply(reply, mutation, kind, path, missing, badRequest, readCreateErrors, auth, ticket, retry) ?: run {
+                // A refused ticket on a read: log in once more and read once more. A mutation never gets here.
+                try { auth!!.tickets.get(auth) } catch (e: LoginRefusedException) { throw SessionExpiredException() }
+                exchange(address, tokenId, secret, fingerprint, path, null, kind, missing, badRequest, method, auth, false, contentType, readCreateErrors)
             }
-        } catch (e: AmbiguousPowerResultException) {
-            throw e
-        } catch (e: SessionExpiredException) {
-            throw e
-        } catch (e: java.io.IOException) {
-            if (body != null && sent) throw AmbiguousPowerResultException() else throw e
-        } finally { connection.disconnect() }
         } catch (t: Throwable) {
             traceFailure = t
             throw t
@@ -713,22 +672,119 @@ internal class ProxmoxTransport(
         }
     }
 
-    private fun open(address: String, tokenId: String, secret: String, fingerprint: String, path: String, header: String?): HttpsURLConnection {
-        val origin = serverOrigin(address)
-        validateIdentity(tokenId, DIRECT_PVE_KIND)
-        require(secret.isNotBlank() && secret.none { it == '\r' || it == '\n' }) { if ('!' !in tokenId) "Enter the password." else "Enter the API token secret." }
-        val context = pinnedSslContext(fingerprint)
-        val connection = origin.resolve(path).toURL().openConnection() as HttpsURLConnection
-        connection.connectTimeout = connectTimeoutMs
-        connection.readTimeout = readTimeoutMs
-        connection.instanceFollowRedirects = false
-        if (context != null) {
-            connection.sslSocketFactory = context.socketFactory
-            connection.setHostnameVerifier { _, session -> certificateMatches(session.peerCertificates[0] as X509Certificate, fingerprint) }
-        }
-        if (header != null) connection.setRequestProperty("Authorization", header)
-        return connection
+    /** What one exchange brought back: the status, the 200 body, and the field names of a create refusal (never their values). */
+    private class Reply(val code: Int, val text: String? = null, val fields: Set<String> = emptySet())
+
+    /** A read. An I/O failure is thrown as it is: nothing changed on the server. */
+    private fun readOnce(origin: URI, fingerprint: String, path: String, headers: Map<String, String>, readCreateErrors: Boolean): Reply {
+        val connection = openPinnedHttps(origin.resolve(path), fingerprint, connectTimeoutMs, readTimeoutMs)
+        headers.forEach { (name, value) -> connection.setRequestProperty(name, value) }
+        try {
+            connectAboveTlsFloor(connection)
+            return when (val code = connection.responseCode) {
+                200 -> Reply(200, text = connection.inputStream.use { readAnswer(it, answerLimit(path)) })
+                400 -> Reply(400, fields = if (readCreateErrors) connection.errorStream?.use { createErrorFields(it) }.orEmpty() else emptySet())
+                else -> Reply(code)
+            }
+        } finally { connection.disconnect() }
     }
+
+    /**
+     * A mutation, written exactly once on its own TLS socket. The pin (or platform TLS with host name checks) is verified in
+     * the handshake, before any byte of the request is written. Once the request head starts out, any failure to read a
+     * complete answer is [AmbiguousPowerResultException]. Proxmox answers HTTP 501 to a DELETE that declares a body, so a
+     * DELETE carries no body and no body headers at all, as it did through [HttpsURLConnection].
+     */
+    private fun sendOnce(origin: URI, fingerprint: String, path: String, method: String, headers: Map<String, String>,
+        body: ByteArray, contentType: String, readCreateErrors: Boolean): Reply {
+        require(method in setOf("POST", "PUT", "DELETE")) { "Unsupported request method." }
+        val bodyless = method == "DELETE"
+        var sent = false
+        try {
+            return storageWire(origin, fingerprint, path, method, headers,
+                if (bodyless) null else contentType, if (bodyless) null else body.size.toLong(),
+                if (bodyless) null else { out -> try { out.write(body); out.flush() } finally { if (readCreateErrors) body.fill(0) } },
+                connectTimeoutMs, readTimeoutMs, UploadCancel(),
+                beforeHeaders = { sent = true }) { code, response ->
+                when (code) {
+                    200 -> Reply(200, text = readAnswer(response, answerLimit(path))) // Too large or too deep after the send: ambiguous.
+                    400 -> Reply(400, fields = if (readCreateErrors) createErrorFields(response) else emptySet())
+                    else -> Reply(code)
+                }
+            }
+        } catch (e: Exception) {
+            // Before the head went out nothing reached the server (connect, TLS or pin refusal): report it as it is.
+            if (sent) throw AmbiguousPowerResultException() else throw e
+        } finally { if (readCreateErrors) body.fill(0) }
+    }
+
+    /**
+     * The status rules for both paths. Returns the 200 body, or null when a read that met a refused ticket should be read once
+     * more under a fresh one. A sent mutation is never replayed: a redirect, a 5xx, or (for a create) a 404 or an unexpected
+     * status after the send is [AmbiguousPowerResultException].
+     */
+    private fun mapReply(reply: Reply, mutation: Boolean, kind: String, path: String, missing: String, badRequest: String?,
+        readCreateErrors: Boolean, auth: Connection?, ticket: PveTicket?, retry: Boolean): String? = when (val code = reply.code) {
+        200 -> reply.text!!
+        401 -> {
+            if (auth?.passwordLogin == true && retry) {
+                ticket?.let { auth.tickets.clear(it) }
+                // A sent mutation may have run before the 401; never replay it under a fresh ticket.
+                if (mutation) throw SessionExpiredException()
+                null
+            } else throw SessionExpiredException()
+        }
+        403 -> { if (readCreateErrors) throw CreateServerRefusal(403, emptySet()); throw GuestPermissionException() }
+        400 -> {
+            if (readCreateErrors) throw CreateServerRefusal(400, reply.fields)
+            error(badRequest ?: "The server returned HTTP 400.")
+        }
+        404 -> { if (readCreateErrors && mutation) throw AmbiguousPowerResultException(); error(if (kind == PDM_KIND) "The PDM read returned HTTP 404." else missing) }
+        in 300..399 -> {
+            if (mutation) throw AmbiguousPowerResultException()
+            error("The server redirected the request. Enter the server's direct HTTPS address.")
+        }
+        in 500..599 -> {
+            if (!mutation && path.endsWith("/agent/network-get-interfaces")) error("Guest agent not running")
+            if (mutation) throw AmbiguousPowerResultException()
+            error("The server returned HTTP $code.")
+        }
+        else -> { if (readCreateErrors && mutation) throw AmbiguousPowerResultException(); error("The server returned HTTP $code.") }
+    }
+}
+
+/**
+ * An HTTPS connection for one read or one login: no redirects, the given timeouts, and either the pinned context (whose trust
+ * manager compares the exact leaf; the host name check then accepts only that leaf) or platform TLS with its host name check.
+ */
+internal fun openPinnedHttps(target: URI, fingerprint: String, connectTimeoutMs: Int, readTimeoutMs: Int): HttpsURLConnection {
+    val context = pinnedSslContext(fingerprint)
+    val connection = target.toURL().openConnection() as HttpsURLConnection
+    connection.connectTimeout = connectTimeoutMs
+    connection.readTimeout = readTimeoutMs
+    connection.instanceFollowRedirects = false
+    // A new wrapper per call: HttpsURLConnection keys kept-alive sockets by factory identity, so none is ever shared.
+    connection.sslSocketFactory = TlsFloorSocketFactory(context?.socketFactory ?: platformSslContext().socketFactory)
+    if (context != null) {
+        connection.setHostnameVerifier { _, session -> certificateMatches(session.peerCertificates[0] as X509Certificate, fingerprint) }
+    }
+    return connection
+}
+
+/**
+ * Connects (TCP and the TLS handshake; HttpsURLConnection writes no request byte here) and refuses a protocol below the floor.
+ * The factory already enables only the floor; this also holds if `https.protocols` overrode it.
+ */
+internal fun connectAboveTlsFloor(connection: HttpsURLConnection) {
+    connection.connect()
+    try { requireTlsFloor(connection.sslSession.map { it.protocol }.orElse(null)) }
+    catch (e: Exception) { connection.disconnect(); throw e }
+}
+
+/** Field names of a create refusal from at most 64 KiB of the error answer. The buffer is wiped; values are never decoded. */
+private fun createErrorFields(input: java.io.InputStream): Set<String> {
+    val raw = input.readNBytes(65536)
+    return try { createErrorKeys(raw) } catch (_: Exception) { emptySet() } finally { raw.fill(0) }
 }
 
 /** The live node list, the storage index and a storage's status read are refused before HTTP ([isForbiddenNodeRead]). */
@@ -809,12 +865,23 @@ private fun newPinnedSslContext(pin: String): SSLContext {
         override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
         override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?): Unit = throw CertificateException("Client trust is not supported")
         override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {
-            val leaf = chain?.firstOrNull() ?: throw CertificateException("No server certificate")
-            if (!certificateMatches(leaf, pin)) throw CertificateException("Certificate fingerprint changed")
-            leaf.checkValidity()
+            val leaf = chain?.firstOrNull() ?: throw PinMismatchException(null, null)
+            // Typed refusals (NetworkFailure.kt): the user sees "certificate changed" or the dates, never a generic sentence.
+            if (!certificateMatches(leaf, pin)) throw PinMismatchException(ProbedCertificate.of(leaf).fingerprint, spkiSha256(leaf))
+            try { leaf.checkValidity() } catch (e: CertificateException) { throw CertificateDateException.of(leaf, e) }
+            recordPinnedKey(pin, leaf)
         }
-        override fun checkServerTrusted(c: Array<out X509Certificate>?, a: String?, s: java.net.Socket?) = checkServerTrusted(c, a)
-        override fun checkServerTrusted(c: Array<out X509Certificate>?, a: String?, e: javax.net.ssl.SSLEngine?) = checkServerTrusted(c, a)
+        // The JDK calls these two for an extended manager. After the unchanged certificate check, the negotiated protocol must
+        // meet the floor, so every user of a pinned context (the consoles' java.net.http clients too) has it.
+        override fun checkServerTrusted(c: Array<out X509Certificate>?, a: String?, s: java.net.Socket?) {
+            checkServerTrusted(c, a); floorOf((s as? javax.net.ssl.SSLSocket)?.handshakeSession?.protocol)
+        }
+        override fun checkServerTrusted(c: Array<out X509Certificate>?, a: String?, e: javax.net.ssl.SSLEngine?) {
+            checkServerTrusted(c, a); floorOf(e?.handshakeSession?.protocol)
+        }
+        private fun floorOf(protocol: String?) {
+            if (protocol != null && protocol !in TLS_FLOOR) throw CertificateException("The server negotiated $protocol. TLS 1.2 or newer is required.")
+        }
         override fun checkClientTrusted(c: Array<out X509Certificate>?, a: String?, s: java.net.Socket?) = checkClientTrusted(c, a)
         override fun checkClientTrusted(c: Array<out X509Certificate>?, a: String?, e: javax.net.ssl.SSLEngine?) = checkClientTrusted(c, a)
     }

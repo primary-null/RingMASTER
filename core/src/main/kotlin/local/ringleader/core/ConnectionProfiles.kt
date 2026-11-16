@@ -32,10 +32,17 @@ const val PDM_KIND = "pdm"
 
 private val profileKinds = setOf(DIRECT_PVE_KIND, PDM_KIND)
 
-private const val PROFILE_VERSION = 1
+/**
+ * Version 2 (2026-11-16) adds an optional `sha256Spki` to a profile with a pin: the SHA-256 of the pinned leaf's public key.
+ * A document is written as version 2 only while some profile carries a key, so a profile set without keys stays readable
+ * by builds that know only version 1. Those builds refuse a version 2 file as "written by a newer RingMASTER".
+ */
+private const val PROFILE_VERSION = 2
+private const val PROFILE_VERSION_1 = 1
 private const val MAX_PROFILE_BYTES = 256 * 1024
 private val documentKeys = setOf("version", "profiles")
-private val profileKeys = setOf("id", "displayName", "kind", "origin", "tokenId", "sha256Pin")
+private val profileKeysV1 = setOf("id", "displayName", "kind", "origin", "tokenId", "sha256Pin")
+private val profileKeys = profileKeysV1 + "sha256Spki"
 private val requiredProfileKeys = setOf("id", "displayName", "kind", "origin", "tokenId")
 
 /**
@@ -50,6 +57,8 @@ data class ConnectionProfile(
     val origin: String,
     val tokenId: String,
     val sha256Pin: String?,
+    /** The SHA-256 of the pinned leaf's public key, when known. Only with a pin; never widens trust. */
+    val sha256Spki: String? = null,
 ) {
     val passwordLogin: Boolean get() = '!' !in tokenId
     init {
@@ -61,8 +70,10 @@ data class ConnectionProfile(
         require(origin == serverOrigin(origin).toString()) { "Use an HTTPS server address, including its port." }
         validateIdentity(tokenId, kind)
         require(sha256Pin == null || sha256Pin.matches(sha256PinPattern)) { "Use a 64-digit SHA-256 certificate fingerprint." }
+        require(sha256Spki == null || (sha256Pin != null && sha256Spki.matches(sha256PinPattern))) { "The saved certificate key is invalid." }
     }
 
+    /** The key (not part of [definesSameConnection]: learning it changes nothing about where the profile connects). */
     fun definesSameConnection(other: ConnectionProfile) =
         kind == other.kind && origin == other.origin && tokenId == other.tokenId && sha256Pin == other.sha256Pin
 }
@@ -74,7 +85,12 @@ data class ProfileDraft(
     val tokenId: String,
     val sha256Pin: String,
     val kind: String = DIRECT_PVE_KIND,
+    /** The key that belongs to a pin: kept only while [sha256Pin] still spells that pin. */
+    val key: CertificateKey? = null,
 )
+
+/** A pin and the SHA-256 of its leaf's public key. */
+data class CertificateKey(val pin: String, val spki: String)
 
 class ProfileStoreException(message: String, val blocksSave: Boolean = false) : IllegalStateException(message)
 
@@ -95,7 +111,8 @@ fun profileFromDraft(draft: ProfileDraft, id: String = draft.id ?: UUID.randomUU
     val origin = serverOrigin(draft.origin).toString()
     val token = draft.tokenId.trim()
     validateIdentity(token, draft.kind)
-    return ConnectionProfile(canonicalProfileId(id), name, draft.kind, origin, token, canonicalOptionalPin(draft.sha256Pin))
+    val pin = canonicalOptionalPin(draft.sha256Pin)
+    return ConnectionProfile(canonicalProfileId(id), name, draft.kind, origin, token, pin, draft.key?.takeIf { it.pin == pin }?.spki)
 }
 
 fun connectionKindLabel(kind: String): String = when (kind) {
@@ -104,8 +121,19 @@ fun connectionKindLabel(kind: String): String = when (kind) {
     else -> "Connection"
 }
 
+/** The label tools print before a fingerprint: openssl's `sha256 Fingerprint=` (any case) or a `SHA256:` prefix. */
+private val pinPastePrefix = Regex("^(sha-?256\\s*fingerprint\\s*=|sha-?256\\s*:)", RegexOption.IGNORE_CASE)
+
+/**
+ * A pin as typed or pasted, in its one canonical spelling (64 lower-case hex digits), or null when blank. Accepts the
+ * common pastes (network audit F8): openssl's whole `sha256 Fingerprint=AB:CD:…` line, a `SHA256:` prefix, colons, and
+ * spaces or line breaks anywhere. Everything that builds a connection uses this one spelling.
+ */
 fun canonicalOptionalPin(value: String): String? {
-    val pin = value.replace(":", "").trim().lowercase()
+    val typed = value.trim()
+    val pin = typed.replace(pinPastePrefix, "").filterNot { it == ':' || it.isWhitespace() }.lowercase()
+    // A label with nothing after it is a broken paste, not "no pin": it must never fall back to normal TLS silently.
+    if (pin.isEmpty() && typed.isNotEmpty()) throw IllegalArgumentException("Use a 64-digit SHA-256 certificate fingerprint.")
     if (pin.isEmpty()) return null
     require(pin.matches(sha256PinPattern)) { "Use a 64-digit SHA-256 certificate fingerprint." }
     return pin
@@ -119,7 +147,7 @@ private fun canonicalProfileId(id: String): String = try {
 
 internal fun encodeProfiles(profiles: List<ConnectionProfile>): String {
     val document = buildJsonObject {
-        put("version", PROFILE_VERSION)
+        put("version", if (profiles.any { it.sha256Spki != null }) PROFILE_VERSION else PROFILE_VERSION_1)
         put("profiles", buildJsonArray {
             profiles.forEach { profile ->
                 add(buildJsonObject {
@@ -129,6 +157,7 @@ internal fun encodeProfiles(profiles: List<ConnectionProfile>): String {
                     put("origin", profile.origin)
                     put("tokenId", profile.tokenId)
                     if (profile.sha256Pin != null) put("sha256Pin", profile.sha256Pin)
+                    if (profile.sha256Spki != null) put("sha256Spki", profile.sha256Spki)
                 })
             }
         })
@@ -152,12 +181,13 @@ internal fun decodeProfiles(text: String): List<ConnectionProfile> {
     }
     val versionElement = document["version"] ?: throw ProfileStoreException("Saved profiles are missing a supported version. The file was left unchanged.", true)
     val versionPrimitive = versionElement as? JsonPrimitive
-    if (versionPrimitive == null || versionPrimitive.isString || versionPrimitive.intOrNull != PROFILE_VERSION) {
+    val schema = versionPrimitive?.intOrNull
+    if (versionPrimitive == null || versionPrimitive.isString || (schema != PROFILE_VERSION && schema != PROFILE_VERSION_1)) {
         throw ProfileStoreException("Saved profiles use an unsupported version. The file was left unchanged.", blocksSave = true)
     }
     val entries = document["profiles"] as? JsonArray
         ?: throw ProfileStoreException("Saved profiles are not in a supported form. The file was left unchanged.", blocksSave = true)
-    val profiles = entries.map { decodeProfile(it) }
+    val profiles = entries.map { decodeProfile(it, if (schema == PROFILE_VERSION_1) profileKeysV1 else profileKeys) }
     if (profiles.map { it.id }.distinct().size != profiles.size) {
         throw ProfileStoreException("Saved profiles contain a duplicate identity. The file was left unchanged.", blocksSave = true)
     }
@@ -167,10 +197,10 @@ internal fun decodeProfiles(text: String): List<ConnectionProfile> {
 private fun unsupported(keys: Set<String>) =
     "Saved profiles contain unsupported data (${keys.sorted().joinToString()}). The file was left unchanged."
 
-private fun decodeProfile(element: JsonElement): ConnectionProfile {
+private fun decodeProfile(element: JsonElement, allowed: Set<String>): ConnectionProfile {
     val profile = element as? JsonObject
         ?: throw ProfileStoreException("Saved profiles are not in a supported form. The file was left unchanged.", blocksSave = true)
-    val unknown = profile.keys - profileKeys
+    val unknown = profile.keys - allowed
     if (unknown.isNotEmpty()) throw ProfileStoreException(unsupported(unknown), blocksSave = true)
     val missing = requiredProfileKeys - profile.keys
     if (missing.isNotEmpty()) {
@@ -184,6 +214,7 @@ private fun decodeProfile(element: JsonElement): ConnectionProfile {
             origin = requiredText(profile, "origin"),
             tokenId = requiredText(profile, "tokenId"),
             sha256Pin = optionalPin(profile),
+            sha256Spki = optionalPin(profile, "sha256Spki"),
         )
     } catch (e: ProfileStoreException) {
         throw e
@@ -202,9 +233,9 @@ private fun requiredText(profile: JsonObject, key: String): String {
     return primitive.content
 }
 
-private fun optionalPin(profile: JsonObject): String? {
-    if ("sha256Pin" !in profile) return null
-    val primitive = profile["sha256Pin"] as? JsonPrimitive
+private fun optionalPin(profile: JsonObject, key: String = "sha256Pin"): String? {
+    if (key !in profile) return null
+    val primitive = profile[key] as? JsonPrimitive
     if (primitive == null || !primitive.isString || primitive.contentOrNull == null) {
         throw ProfileStoreException("A saved profile has an invalid certificate pin. The file was left unchanged.", blocksSave = true)
     }

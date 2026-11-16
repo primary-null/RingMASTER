@@ -15,6 +15,9 @@ import java.io.File
  */
 val LocalDiagnosticSessions = androidx.compose.runtime.staticCompositionLocalOf<() -> List<DiagnosticSessionInfo>> { { emptyList() } }
 
+/** True while connections other than the one in view are open, so a failure card can say they are not affected. */
+val LocalOtherSessionsOpen = androidx.compose.runtime.compositionLocalOf { false }
+
 /** [session] with the heading's route observation added, when that observation is for the same server. */
 fun withRoute(session: DiagnosticSessionInfo, route: RouteTagState): DiagnosticSessionInfo {
     val seen = (route as? RouteTagState.Observed)?.observation?.takeIf { it.target.origin == session.address } ?: return session

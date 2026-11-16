@@ -67,6 +67,9 @@ class Sessions(private val scope: CoroutineScope, private val newWorkspace: () -
     /** Bring an open session into view. A session that is not connected is dropped when the view leaves it. */
     fun show(id: Long) {
         if (mutableState.value.open.none { it.id == id }) return
+        // The pages are rebuilt for the session coming into view, and the Connect form's secret field with them. A secret
+        // typed before the switch must not stay behind an empty-looking field, where the next Connect would send it.
+        if (id != mutableState.value.activeId) desk?.discardSecrets()
         mutableState.update { it.copy(notice = null) }
         bringIntoView(id)
     }
@@ -161,6 +164,18 @@ class Sessions(private val scope: CoroutineScope, private val newWorkspace: () -
     }
 }
 
+/**
+ * How an open connection trusts its server, for the session card: "Certificate pin", or normal TLS with the store that
+ * accepted the certificate ("Normal TLS · trusted by this computer" or "Normal TLS · public certificate"). Null for the
+ * demo and when nothing is connected.
+ */
+fun connectionTrustLabel(state: WorkspaceState): String? = when {
+    state.demo || !state.connected -> null
+    state.pinned -> "Certificate pin"
+    state.tlsTrust != null -> "Normal TLS · ${state.tlsTrust.label}"
+    else -> "Normal TLS"
+}
+
 internal fun sessionIdentity(kind: String, origin: String, user: String) = "$kind|$origin|$user"
 
 /**
@@ -168,3 +183,29 @@ internal fun sessionIdentity(kind: String, origin: String, user: String) = "$kin
  * first read failed (wrong password, unreachable server) has nothing to show, so the next connection may take its place.
  */
 fun sessionOpen(state: WorkspaceState) = state.demo || (state.connected && !(state.overview == null && state.error != null && !state.loading))
+
+/**
+ * True when a connection has nothing to show and a reason why: the server refused the sign-in and the session closed,
+ * or the first read failed (certificate refused, server not reached) and the session is only trying again. The pages
+ * then show the failure, with the reason, instead of an empty workspace.
+ */
+fun connectionFailed(state: WorkspaceState) = !sessionOpen(state) && state.error != null
+
+/**
+ * What the person can do about a failed connection, in one short paragraph for the failure card. A network or certificate
+ * failure has its own next step ([NetworkFailure.nextStep]); a refused sign-in says what was sent. Null when the reason
+ * says it all.
+ */
+fun connectionFailureAdvice(state: WorkspaceState): String? = when {
+    !connectionFailed(state) -> null
+    state.failure != null -> state.failure.nextStep
+    state.error == CERTIFICATE_ERROR ->
+        "The certificate could not be verified. Return to the Desk and check the server certificate before trusting it."
+    state.error == LOGIN_REFUSED ->
+        "The server answered and refused this sign-in. The app sent the user above and the password as typed. " +
+            "Every server has its own accounts: root@pam is that node’s own root password, and a user made in Proxmox is user@pve. " +
+            "Try the same user and password in the server’s own web page."
+    state.error == SESSION_REFUSED && '!' in state.account && !state.connected ->
+        "For a new connection this means the server does not accept the API token ID or its secret. Every server has its own tokens."
+    else -> null
+}

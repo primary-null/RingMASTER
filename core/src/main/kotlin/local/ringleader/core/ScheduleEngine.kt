@@ -88,6 +88,8 @@ class ScheduleEngine(
     private val busyRetry: Duration = Duration.ofSeconds(20),
     private val follow: Duration = SCHEDULE_FOLLOW,
     private val parallelRuns: Int = 2,
+    /** certificates.json, read-only: the approvals a profile without its own pin connects with. Throws when unreadable. */
+    private val approvedCertificates: () -> List<ApprovedCertificate> = { emptyList() },
 ) {
     private val mutable = MutableStateFlow(SchedulerState())
     val state: StateFlow<SchedulerState> = mutable.asStateFlow()
@@ -327,8 +329,10 @@ class ScheduleEngine(
         val secret = try { secrets.read(profile.id) } catch (e: Exception) {
             return EngineResult.Error("The password safe could not be read: ${(e.message ?: "it failed").take(160)}")
         } ?: return EngineResult.Error("The remembered secret is no longer in ${secrets.vaultName}. Connect with Remember on this computer again.")
-        val connection = try { Connection(profile.origin, profile.tokenId, String(secret), profile.sha256Pin.orEmpty(), profile.kind) }
-            catch (e: Exception) { return EngineResult.Error(e.message ?: "The saved connection is not usable.") }
+        val connection = try {
+            val pin = backgroundPin(profile, loadProfiles().orEmpty()).getOrElse { return EngineResult.Error(it.message ?: SCHEDULE_PIN_CONFLICT) }
+            Connection(profile.origin, profile.tokenId, String(secret), pin, profile.kind)
+        } catch (e: Exception) { return EngineResult.Error(e.message ?: "The saved connection is not usable.") }
             finally { secret.fill('\u0000') }
         return connection.use {
             try { block(it) } catch (e: CancellationException) { throw e } catch (e: Exception) { EngineResult.Error(readError(e)) }
@@ -483,7 +487,8 @@ class ScheduleEngine(
         val secret = try { secrets.read(profile.id) } catch (e: Exception) {
             return finish(RunPhase.Skipped, "The password safe could not be read: ${(e.message ?: "it failed").take(120)} Nothing was sent.")
         } ?: return finish(RunPhase.Skipped, "The remembered secret is no longer in ${secrets.vaultName}. Nothing was sent.")
-        val connection = try { Connection(profile.origin, profile.tokenId, String(secret), profile.sha256Pin.orEmpty(), profile.kind) }
+        val pin = backgroundPin(profile, saved).getOrElse { secret.fill('\u0000'); return finish(RunPhase.Skipped, it.message ?: SCHEDULE_PIN_CONFLICT) }
+        val connection = try { Connection(profile.origin, profile.tokenId, String(secret), pin, profile.kind) }
             catch (e: Exception) { return finish(RunPhase.Skipped, "The saved connection is not usable. Nothing was sent.") }
             finally { secret.fill('\u0000') }
         connection.use { conn -> executeConnected(run, plan, profile, conn) { phase, detail, invalidate -> finish(phase, detail, invalidate) }.also { run = it ?: run } }
@@ -514,7 +519,7 @@ class ScheduleEngine(
         } catch (e: CancellationException) {
             withContext(NonCancellable) { finish(RunPhase.NotSent, "RingMASTER stopped before sending. Nothing was sent.", null) }; throw e
         } catch (e: Exception) {
-            finish(RunPhase.Skipped, "${readError(e)} Nothing was sent.", null); return null
+            finish(RunPhase.Skipped, "${readError(e).removeSuffix(" Nothing was sent.")} Nothing was sent.", null); return null
         }
         val key = GuestKey(profile.origin, target.kind, target.vmid)
         try {
@@ -605,6 +610,22 @@ class ScheduleEngine(
             throw e
         }
         return record(run, RunPhase.Submitted, "The task had not finished after ${follow.toMinutes()} minutes. Open its log to see how it ended.").first
+    }
+
+    /**
+     * The pin a background run connects with ([resolveProfilePin]): the profile's own, else the single approved certificate
+     * for its server, else normal TLS (empty). Never an observed or newly approved certificate. A conflict or an unreadable
+     * certificates.json fails the run before anything is read from the vault or the server.
+     */
+    private fun backgroundPin(profile: ConnectionProfile, saved: List<ConnectionProfile>): Result<String> {
+        val approved = if (profile.sha256Pin != null) emptyList() else try { approvedCertificates() } catch (_: Exception) {
+            return Result.failure(IllegalStateException(SCHEDULE_TRUST_UNREADABLE))
+        }
+        return when (val resolved = resolveProfilePin(profile, approved, saved)) {
+            is ProfilePin.Pinned -> Result.success(resolved.pin)
+            ProfilePin.NormalTls -> Result.success("")
+            ProfilePin.Conflict -> Result.failure(IllegalStateException(SCHEDULE_PIN_CONFLICT))
+        }
     }
 
     private fun readError(e: Exception): String = when (e) {

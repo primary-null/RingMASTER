@@ -1,0 +1,109 @@
+{
+  "schema": 1,
+  "id": "pihole",
+  "templateVersion": "1.0.0",
+  "name": "Pi-hole",
+  "glyph": "shield",
+  "tags": ["dns"],
+  "sources": [
+    "https://github.com/pi-hole/FTL/tree/master/src/api/docs/content/specs",
+    "https://docs.pi-hole.net/api/auth/",
+    "https://github.com/pi-hole/web/blob/master/settings-api.lp"
+  ],
+  "detect": {
+    "catalogue": ["pihole"],
+    "helperScripts": ["pihole"],
+    "ports": [{"port": 443, "secure": true, "path": "/"}, {"port": 80, "secure": false, "path": "/"}]
+  },
+  "variants": [
+    {
+      "id": "v6",
+      "label": "Pi-hole v6",
+      "probe": {"path": "/api/auth", "accept": [200, 401], "expect": "has(@probe/session/valid)"},
+      "auth": {
+        "scheme": "session-password",
+        "login": {"path": "/api/auth", "body": {"password": "secret"}, "token": "/session/sid", "validity": "/session/validity",
+                  "totp": "/session/totp", "sendAs": "X-FTL-SID", "minIntervalSeconds": 60, "extendsOnUse": true},
+        "logout": {"path": "/api/auth"},
+        "fields": [{"id": "secret", "label": "App password", "secret": true}],
+        "ask": "Pi-hole app password",
+        "power": "Pi-hole has no read-only password: the app password can turn blocking on and off, and change settings when app_sudo is on.",
+        "fullPower": true,
+        "readOnly": "Pi-hole has no read-only password.",
+        "where": [
+          "Open Pi-hole's web interface and sign in.",
+          "Go to Settings > Web interface / API and switch the page from Basic to Expert (top right).",
+          "In Advanced Settings choose Configure app password, then Enable new app password, and copy it now: it is shown once.",
+          "Making a new app password signs out every API client, RingMASTER included."
+        ],
+        "errors": {
+          "401": "Pi-hole refused the app password. If you made a new app password, the old one stopped working.",
+          "429": "Pi-hole has no free API sessions, or too many sign-ins were tried. Close other API clients or wait a few minutes.",
+          "totp": "This password needs a two-factor code. Use an app password instead: it does not need one."
+        }
+      },
+      "requests": {
+        "summary": {"path": "/api/stats/summary", "every": "30s", "minEvery": "10s", "maxBytes": 65536},
+        "blocking": {"path": "/api/dns/blocking", "every": "30s", "minEvery": "10s", "maxBytes": 4096},
+        "history": {"path": "/api/history", "every": "5m", "maxBytes": 262144},
+        "topBlocked": {"path": "/api/stats/top_domains", "query": {"blocked": "true", "count": "8"}, "every": "5m", "maxBytes": 65536},
+        "topClients": {"path": "/api/stats/top_clients", "query": {"count": "5"}, "every": "5m", "maxBytes": 65536},
+        "upstreams": {"path": "/api/stats/upstreams", "every": "5m", "maxBytes": 65536, "optional": true},
+        "version": {"path": "/api/info/version", "every": "6h", "maxBytes": 65536, "optional": true}
+      },
+      "readings": [
+        {"id": "queries", "label": "Queries (24 h)", "expr": "@summary/queries/total", "unit": "count", "required": true},
+        {"id": "blocked", "label": "Blocked", "expr": "@summary/queries/blocked", "unit": "count", "required": true},
+        {"id": "blockedPct", "label": "Blocked share", "expr": "@summary/queries/percent_blocked", "unit": "percent"},
+        {"id": "cachedPct", "label": "From cache", "expr": "percent(@summary/queries/cached, @summary/queries/total)", "unit": "percent"},
+        {"id": "forwarded", "label": "Forwarded", "expr": "@summary/queries/forwarded", "unit": "count"},
+        {"id": "qps", "label": "Queries per second", "expr": "@summary/queries/frequency", "unit": "number"},
+        {"id": "clients", "label": "Active clients", "expr": "@summary/clients/active", "unit": "count"},
+        {"id": "domains", "label": "Unique domains", "expr": "@summary/queries/unique_domains", "unit": "count"},
+        {"id": "gravity", "label": "Blocklist domains", "expr": "@summary/gravity/domains_being_blocked", "unit": "count", "levels": {"badBelow": 1}},
+        {"id": "gravityAge", "label": "Blocklist updated", "expr": "@summary/gravity/last_update", "unit": "epoch"},
+        {"id": "gravityOld", "label": "Blocklist age", "expr": "ago(@summary/gravity/last_update)", "unit": "seconds", "levels": {"warnAbove": 1209600, "badAbove": 2592000}},
+        {"id": "blocking", "label": "Blocking", "expr": "@blocking/blocking", "unit": "state",
+         "states": {"enabled": "good", "disabled": "bad", "failed": "bad", "unknown": "warn"}},
+        {"id": "timer", "label": "Blocking resumes in", "expr": "@blocking/timer", "unit": "seconds"},
+        {"id": "core", "label": "Core", "expr": "@version/version/core/local/version", "unit": "version"},
+        {"id": "ftl", "label": "FTL", "expr": "@version/version/ftl/local/version", "unit": "version"},
+        {"id": "update", "label": "Core update", "expr": "ne(@version/version/core/local/version, @version/version/core/remote/version)", "unit": "state",
+         "states": {"true": "info", "false": "good"}}
+      ],
+      "series": [
+        {"id": "history", "label": "Queries per 10 minutes", "unit": "count", "time": "@history/history/*/timestamp",
+         "values": {"Forwarded": "@history/history/*/forwarded", "Cached": "@history/history/*/cached", "Blocked": "@history/history/*/blocked"}}
+      ],
+      "lists": [
+        {"id": "topBlocked", "label": "Top blocked domains", "items": "top(@topBlocked/domains, 8, \"/count\")",
+         "title": "/domain", "value": "/count", "unit": "count", "max": 8, "identity": true},
+        {"id": "topClients", "label": "Busiest clients", "items": "top(@topClients/clients, 5, \"/count\")",
+         "title": "if(eq(@item/name, \"\"), @item/ip, @item/name)", "subtitle": "/ip", "value": "/count", "unit": "count", "max": 5, "identity": true},
+        {"id": "upstreams", "label": "Answered by", "items": "top(filter(@upstreams/upstreams, \"/count\", \"gt\", 0), 6, \"/count\")",
+         "title": "/name", "value": "/count", "unit": "count", "max": 6, "identity": true}
+      ],
+      "panel": [
+        {"block": "hero", "reading": "blockedPct", "sub": "blocked", "state": "blocking", "caption": "of the last 24 hours' queries blocked"},
+        {"block": "tiles", "readings": ["queries", "qps", "clients", "cachedPct", "gravity"], "sparks": {"queries": "history.Forwarded"}},
+        {"block": "chart", "series": "history", "kind": "stacked-bars", "height": 160},
+        {"block": "list", "list": "topBlocked", "bars": true, "open": "/admin/queries?type=blocked"},
+        {"block": "list", "list": "topClients", "bars": true, "open": "/admin/network"},
+        {"block": "breakdown", "list": "upstreams"},
+        {"block": "notice", "when": "eq(@blocking/blocking, \"disabled\")", "text": "Blocking is off. It resumes in {timer}.", "reading": "timer"},
+        {"block": "facts", "readings": ["core", "ftl", "update", "gravityAge"]}
+      ],
+      "compact": {
+        "pin": {"reading": "blockedPct", "state": "blocking"},
+        "ticker": {"label": "Pi-hole", "reading": "blockedPct", "spark": "history.Blocked", "state": "blocking"}
+      },
+      "links": {"home": "/admin/", "help": "https://docs.pi-hole.net/"}
+    },
+    {
+      "id": "v5",
+      "label": "Pi-hole v5",
+      "probe": {"path": "/admin/api.php", "query": {"versions": ""}, "accept": [200], "expect": "has(@probe/core_current)"},
+      "unsupported": "This is Pi-hole v5. RingMASTER reads Pi-hole v6 and later; v5 is not supported yet, because its API key travels in the address. Update Pi-hole to v6 to link it."
+    }
+  ]
+}

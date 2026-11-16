@@ -33,6 +33,8 @@ import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.drawText
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -138,14 +140,44 @@ internal fun sparkTop(values: List<Double?>, floor: Double = .05, ceiling: Doubl
     return (peak * 1.25).coerceIn(low, high)
 }
 
-@Composable fun AnimatedNumber(value: Double, modifier: Modifier = Modifier, fontSize: TextUnit = 15.sp) {
+/**
+ * A percentage that eases to new values. Monospaced digits with the "%" set smaller ([metricText]); its colour is the
+ * tone of the value against [thresholds]. Give it a width and [align] End where digits must not shift as they change.
+ */
+@Composable fun AnimatedNumber(value: Double, modifier: Modifier = Modifier, fontSize: TextUnit = 15.sp, align: TextAlign = TextAlign.Start,
+    thresholds: MetricThresholds = MetricThresholds.Load) {
     val v by animateFloatAsState(value.toFloat(), tween(if (LocalReduceMotion.current) 0 else 400))
-    Text(percent(v.toDouble()), modifier, fontSize = fontSize, color = ramp(value), fontFamily = Tech.Mono, fontWeight = FontWeight.SemiBold, maxLines = 1)
+    Text(metricText(percent(v.toDouble()), unitScaleFor(fontSize)), modifier, fontSize = fontSize, color = thresholds.tone(value).color, fontFamily = Tech.Mono, fontWeight = FontWeight.SemiBold,
+        maxLines = 1, softWrap = false, textAlign = align)
 }
 
 @Composable fun AnimatedCount(value: Int, modifier: Modifier = Modifier, color: Color = Tech.Ink, fontSize: TextUnit = 18.sp) {
     val v by animateIntAsState(value, tween(if (LocalReduceMotion.current) 0 else 400))
-    Text("$v", modifier, fontSize = fontSize, color = color, fontFamily = Tech.Mono, fontWeight = FontWeight.SemiBold)
+    Text("$v", modifier, fontSize = fontSize, color = color, fontFamily = Tech.Mono, fontWeight = FontWeight.SemiBold, maxLines = 1, softWrap = false)
+}
+
+/** Below this many samples a series sparkline keeps this many slots, so a guest that just started draws a short line at the right instead of stretching two samples across. */
+internal const val SPARK_MIN_SLOTS = 30
+
+/** Index into [count] samples drawn right-aligned in max([count], [slots]) slots; null in the empty part on the left. */
+internal fun sparkSlotIndex(x: Float, width: Float, count: Int, slots: Int): Int? {
+    val n = maxOf(count, slots)
+    val at = sparkNearestIndex(x, width, n) ?: return null
+    val i = at - (n - count)
+    return if (i < 0) null else i.coerceAtMost(count - 1)
+}
+
+/** Index ranges of missing samples (null, NaN or negative) that sit between, before or after drawn ones. */
+internal fun sparkGaps(values: List<Double?>): List<IntRange> {
+    val gaps = ArrayList<IntRange>()
+    var start = -1
+    values.forEachIndexed { i, v ->
+        val missing = v == null || !v.isFinite() || v < 0.0
+        if (missing && start < 0) start = i
+        if (!missing && start >= 0) { gaps += start until i; start = -1 }
+    }
+    if (start >= 0) gaps += start until values.size
+    return gaps
 }
 
 /** How long a chart takes to take in a new sample: the slide to the left and the change of scale run together. */
@@ -272,7 +304,8 @@ internal fun sparkPoints(values: List<Double?>, held: List<Boolean>?): List<Int>
  * row rebuilds its paths once per new sample. The strip and the inspector pass ease = true.
  */
 @Composable fun Sparkline(values: List<Double?>, modifier: Modifier = Modifier, color: Color? = null, floor: Double = .05, ceiling: Double = 1.0, grid: Boolean = true, pulse: Boolean = true,
-    held: List<Boolean>? = null, stamp: Any? = null, ease: Boolean = pulse, times: List<Instant>? = null, label: ((Int) -> String)? = null, hover: SparkHover? = null) {
+    held: List<Boolean>? = null, stamp: Any? = null, ease: Boolean = pulse, times: List<Instant>? = null, label: ((Int) -> String)? = null, hover: SparkHover? = null,
+    slots: Int = 0, scaleLabel: ((Double) -> String)? = null, guides: List<Double> = emptyList(), stale: Boolean = false, peak: Boolean = false, scaleKind: AxisKind? = null) {
     val last = values.lastOrNull { it != null }
     val tint = color ?: ramp(last ?: 0.0)
     val reduce = LocalReduceMotion.current
@@ -283,7 +316,10 @@ internal fun sparkPoints(values: List<Double?>, held: List<Boolean>?): List<Int>
     LaunchedEffect(count, stamp ?: values.lastOrNull()) { if (!reduce && count > 2) { shift.snapTo(1f); shift.animateTo(0f, tween(SPARK_SETTLE_MS, easing = LinearOutSlowInEasing)) } else shift.snapTo(0f) }
     // The eased quantity is the gain (height per unit), not the ceiling: a point's height is proportional to the gain, so
     // the line moves evenly. Easing the ceiling made most of the movement happen in the first few frames.
-    val targetGain = (1.0 / sparkTop(values, floor, ceiling)).toFloat()
+    // With a [scaleKind] the top is rounded up to a value worth naming (5, 10, 25, 50, 100 % or a round rate) and labelled.
+    val rawTop = sparkTop(values, floor, ceiling)
+    val axis = scaleKind?.let { remember(it, rawTop) { axisScale(it, rawTop, maxTicks = 4, headroom = 1.0) } }
+    val targetGain = (1.0 / (axis?.top ?: rawTop)).toFloat()
     val eased by animateFloatAsState(targetGain, if (reduce || !ease) snap() else tween(SPARK_SETTLE_MS, easing = FastOutSlowInEasing))
     // Without the ease the animated value is not read at all, so its one-frame snap cannot rebuild the paths a second time.
     val gain = if (reduce || !ease) targetGain else eased
@@ -294,30 +330,44 @@ internal fun sparkPoints(values: List<Double?>, held: List<Boolean>?): List<Int>
     // Hover lives on its own state. This function never reads it, so a pointer move does not rebuild the paths below.
     val owned = remember { SparkHover() }
     val cursor = hover ?: owned
+    val scaleText = axis?.let { it.label(it.top) } ?: scaleLabel?.invoke(1.0 / targetGain)
     Box(modifier) {
         Box(Modifier.matchParentSize().clipToBounds()) {
-            SparklineBody(values, tint, gain, grid, pulsing, held, lead, shift)
-            SparkHoverMarks(cursor, values, gain, tint, shift)
+            SparklineBody(values, tint, gain, grid, pulsing, held, lead, shift, slots, guides, stale, peak, scaleText)
+            SparkHoverMarks(cursor, values, gain, tint, shift, slots)
         }
-        if (label != null) SparkReadout(cursor, count, times, held, label)
+        if (label != null) SparkReadout(cursor, count, times, held, label, slots)
         // Above the line, so the hit is this overlay and not the hairline drawn on top of the path.
         if (hover == null) Box(Modifier.matchParentSize().sparkTrack(owned))
     }
 }
 
-/** The cached stroke and fill. It does not read the pointer, so hover cannot rebuild these paths. */
-@Composable private fun SparklineBody(values: List<Double?>, tint: Color, gain: Float, grid: Boolean, pulsing: Boolean, held: List<Boolean>?, lead: Double?, shift: Animatable<Float, AnimationVector1D>) {
+/**
+ * The cached stroke and fill. It does not read the pointer, so hover cannot rebuild these paths.
+ *
+ * Missing samples break the line and leave a dotted floor under the gap, so "no data" never reads as zero. [guides] are
+ * faint dotted lines at threshold values; [scaleText] names the top of the scale in the top-left corner of a chart tall
+ * enough to carry it; [peak] marks the window's largest sample; [stale] fades the line while the data is out of date.
+ */
+@Composable private fun SparklineBody(values: List<Double?>, tint: Color, gain: Float, grid: Boolean, pulsing: Boolean, held: List<Boolean>?, lead: Double?,
+    shift: Animatable<Float, AnimationVector1D>, slots: Int = 0, guides: List<Double> = emptyList(), stale: Boolean = false, peak: Boolean = false, scaleText: String? = null) {
     val tick = LocalSparkBodyCompositions.current
     SideEffect { if (tick != null) tick.intValue = tick.intValue + 1 }
     val count = values.size
     val phase = LocalMotionPhase.current
+    val measurer = rememberTextMeasurer(cacheSize = 4)
+    val labelColor = MetricColors.axis
+    val plate = Tech.Panel.copy(alpha = .78f)
     Box(Modifier.fillMaxSize().drawWithCache {
         val unit = gain.toDouble()
-        val n = (count - 1).coerceAtLeast(1)
+        val total = maxOf(count, slots)
+        val offset = total - count
+        val n = (total - 1).coerceAtLeast(1)
         val step = size.width / n
         val pad = 2.dp.toPx()
         val h = size.height - pad * 2
         fun y(v: Double) = pad + (h * (1 - (v * unit).coerceIn(0.0, 1.0))).toFloat()
+        fun x(i: Int) = if (total == 1) size.width else step * (i + offset)
         val line = Path(); val area = Path()
         var head: Offset? = null; var start: Offset? = null; var prev: Offset? = null
         fun closeArea() { val s = start; val e = prev; if (s != null && e != null) { area.lineTo(e.x, size.height); area.lineTo(s.x, size.height); area.close() } }
@@ -328,33 +378,51 @@ internal fun sparkPoints(values: List<Double?>, held: List<Boolean>?): List<Int>
             prev = p; head = p
         }
         var expected = 0
-        if (lead != null && count >= 2 && values.first()?.let { it.isFinite() && it >= 0.0 } == true) point(Offset(-step, y(lead)))
+        if (lead != null && count >= 2 && values.first()?.let { it.isFinite() && it >= 0.0 } == true) point(Offset(x(0) - step, y(lead)))
         for (i in sparkPoints(values, held)) {
             // A missing sample between two drawn ones breaks the line; a held one does not.
             if (i > expected && (expected until i).any { values[it]?.let { v -> v.isFinite() && v >= 0.0 } != true }) { closeArea(); prev = null; start = null }
-            point(Offset(if (count == 1) size.width else step * i, y(values[i]!!)))
+            point(Offset(x(i), y(values[i]!!)))
             expected = i + 1
         }
         closeArea()
+        // Dotted floor under each run of missing samples (and the whole width when nothing has arrived yet).
+        val gapSpans = if (count == 0 || values.none { it != null && it.isFinite() && it >= 0.0 }) listOf(0f to size.width)
+            else sparkGaps(values).map { r -> (if (r.first == 0) x(0) else x(r.first - 1)) to (if (r.last == count - 1) size.width else x(r.last + 1)) }
+        val peakAt = if (peak) values.indices.filter { values[it]?.let { v -> v.isFinite() && v >= 0.0 } == true }.maxByOrNull { values[it]!! } else null
         val stroke = Stroke(1.5.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
-        val fill = Brush.verticalGradient(listOf(tint.copy(alpha = .32f), tint.copy(alpha = .04f)))
-        val gridColor = Tech.Edge.copy(alpha = .55f)
+        val fade = if (stale) .45f else 1f
+        val fill = Brush.verticalGradient(listOf(tint.copy(alpha = .30f * fade), tint.copy(alpha = .03f)))
+        val gridColor = MetricColors.grid
+        val dots = PathEffect.dashPathEffect(floatArrayOf(1.5.dp.toPx(), 2.5.dp.toPx()))
+        val guideYs = guides.filter { it.isFinite() && it * unit < 1.0 && it > 0.0 }.map { y(it) }
+        val scaleLayout = if (scaleText != null && size.height >= 28.dp.toPx())
+            measurer.measure(scaleText, TextStyle(fontSize = 8.sp, fontFamily = Tech.Mono, color = labelColor)) else null
+        val headRadius = 2.dp.toPx(); val glowRadius = 5.dp.toPx()
         onDrawBehind {
-            if (grid) { drawLine(gridColor, Offset(0f, size.height - .5f), Offset(size.width, size.height - .5f), 1f); drawLine(gridColor.copy(alpha = .25f), Offset(0f, size.height / 2), Offset(size.width, size.height / 2), 1f) }
+            if (grid) { drawLine(gridColor, Offset(0f, size.height - .5f), Offset(size.width, size.height - .5f), 1f); drawLine(gridColor.copy(alpha = gridColor.alpha * .45f), Offset(0f, size.height / 2), Offset(size.width, size.height / 2), 1f) }
+            guideYs.forEach { gy -> drawLine(gridColor, Offset(0f, gy), Offset(size.width, gy), 1f, pathEffect = dots) }
+            gapSpans.forEach { (a, b) -> if (b - a > 2f) drawLine(labelColor.copy(alpha = .55f), Offset(a, size.height - 1.5f), Offset(b, size.height - 1.5f), 1f, pathEffect = dots) }
             val glowAlpha = if (!pulsing) 0.2f else {
                 val t = ((phase.pulse.floatValue - 0.15f) / 0.45f).coerceIn(0f, 1f)
                 0.10f + 0.28f * t
             }
             translate(left = shift.value * step) {
-                drawPath(area, fill); drawPath(line, tint, style = stroke)
-                head?.let { drawCircle(tint, 5.dp.toPx(), it, alpha = glowAlpha); drawCircle(tint, 2.dp.toPx(), it) }
+                drawPath(area, fill); drawPath(line, tint, style = stroke, alpha = fade)
+                peakAt?.let { i -> val p = Offset(x(i), y(values[i]!!)); drawCircle(tint, 2.5.dp.toPx(), p, style = Stroke(1.dp.toPx())) }
+                head?.let { if (stale) drawCircle(tint, headRadius, it, style = Stroke(1.dp.toPx())) else { drawCircle(tint, glowRadius, it, alpha = glowAlpha); drawCircle(tint, headRadius, it) } }
+            }
+            scaleLayout?.let {
+                // On a quiet plate, so the label reads over the fill.
+                drawRect(plate, Offset(1.dp.toPx(), 1.dp.toPx()), Size(it.size.width + 3.dp.toPx(), it.size.height.toFloat()))
+                drawText(it, topLeft = Offset(2.5.dp.toPx(), 1.dp.toPx()))
             }
         }
     })
 }
 
 /** Pointer tracking that does not take the click. Press and Release stay with the row that selects a guest. */
-private fun Modifier.sparkTrack(cursor: SparkHover): Modifier =
+internal fun Modifier.sparkTrack(cursor: SparkHover): Modifier =
     onPointerEvent(PointerEventType.Enter) { event ->
         cursor.x = event.changes.firstOrNull()?.position?.x
     }.onPointerEvent(PointerEventType.Move) { event ->
@@ -362,14 +430,15 @@ private fun Modifier.sparkTrack(cursor: SparkHover): Modifier =
     }.onPointerEvent(PointerEventType.Exit) { cursor.x = null }
 
 /** Hairline and ring dot. Both are drawn from the hover state, so a pointer move does not rebuild the line. */
-@Composable private fun SparkHoverMarks(cursor: SparkHover, values: List<Double?>, gain: Float, tint: Color, shift: Animatable<Float, AnimationVector1D>) {
+@Composable private fun SparkHoverMarks(cursor: SparkHover, values: List<Double?>, gain: Float, tint: Color, shift: Animatable<Float, AnimationVector1D>, slots: Int = 0) {
     val count = values.size
     Box(Modifier.fillMaxSize().drawBehind {
         val x = cursor.x ?: return@drawBehind
         if (count <= 0 || !(size.width > 0f)) return@drawBehind
-        val index = sparkNearestIndex(x, size.width, count) ?: return@drawBehind
-        val step = if (count <= 1) size.width else size.width / (count - 1)
-        val hair = (if (count <= 1) size.width else step * index + shift.value * step).coerceIn(0f, size.width)
+        val index = sparkSlotIndex(x, size.width, count, slots) ?: return@drawBehind
+        val total = maxOf(count, slots)
+        val step = if (total <= 1) size.width else size.width / (total - 1)
+        val hair = (if (total <= 1) size.width else step * (index + total - count) + shift.value * step).coerceIn(0f, size.width)
         drawLine(Tech.Ink.copy(alpha = .5f), Offset(hair, 0f), Offset(hair, size.height), 1f)
         val sample = values.getOrNull(index)
         if (sample != null && sample.isFinite() && sample >= 0.0) {
@@ -458,51 +527,88 @@ private val readoutPopupProperties = PopupProperties(
 }
 
 /** The only composable that reads the hover position for one sparkline. Past 60% of the width the bubble sits to the left. */
-@Composable private fun BoxScope.SparkBubble(cursor: SparkHover, count: Int, textAt: (Int) -> String) {
+@Composable private fun BoxScope.SparkBubble(cursor: SparkHover, count: Int, slots: Int = 0, textAt: (Int) -> String) {
     // Measured even before the pointer arrives, so the first hover frame already knows the chart width.
     // The popup's anchor is this sparkline, not this zero-content box.
     var width by remember { mutableIntStateOf(0) }
     Box(Modifier.matchParentSize().onSizeChanged { width = it.width })
     val x = cursor.x ?: return
-    val index = sparkNearestIndex(x, width.toFloat(), count) ?: return
+    val index = sparkSlotIndex(x, width.toFloat(), count, slots) ?: return
     HoverReadoutPopup(pointerX = x) {
         Text(textAt(index), Modifier.padding(horizontal = 6.dp, vertical = 3.dp), color = Tech.Ink, fontSize = 10.sp, fontFamily = Tech.Mono, maxLines = 2)
     }
 }
 
-@Composable private fun BoxScope.SparkReadout(cursor: SparkHover, count: Int, times: List<Instant>?, held: List<Boolean>?, label: (Int) -> String) {
-    SparkBubble(cursor, count) { index -> sparkReadoutLine(label(index), held?.getOrNull(index) == true, sparkClock(times, index)) }
+@Composable private fun BoxScope.SparkReadout(cursor: SparkHover, count: Int, times: List<Instant>?, held: List<Boolean>?, label: (Int) -> String, slots: Int = 0) {
+    SparkBubble(cursor, count, slots) { index -> sparkReadoutLine(label(index), held?.getOrNull(index) == true, sparkClock(times, index)) }
 }
 
+/**
+ * A series sparkline. A short series (a guest that just started) is drawn at the right of [slots] slots instead of
+ * stretched across. For a percentage, [floor] = 1.0 fixes the scale at 0..100 % (the table rows and top lists use it, so
+ * rows compare); otherwise the scale follows the data and [scaleLabel] can name its top.
+ */
 @Composable fun Sparkline(series: Series, modifier: Modifier = Modifier, pulse: Boolean = true, grid: Boolean = true, floor: Double = .05, ease: Boolean = pulse,
-    readout: SparkReadout = SparkReadout.Cpu, hover: SparkHover? = null, metric: (Sample) -> Double? = { it.cpu }) =
-    Sparkline(series.samples.map(metric), modifier, floor = floor, grid = grid, pulse = pulse, held = series.samples.map { it.held }, stamp = series.samples.lastOrNull()?.at, ease = ease,
-        times = series.samples.map { it.at }, label = if (readout == SparkReadout.None) null else { i -> sparkSampleValue(series.samples[i], readout) }, hover = hover)
+    readout: SparkReadout = SparkReadout.Cpu, hover: SparkHover? = null, slots: Int = SPARK_MIN_SLOTS, color: Color? = null, scaleLabel: ((Double) -> String)? = null, scaleKind: AxisKind? = null,
+    guides: List<Double> = emptyList(), stale: Boolean = false, peak: Boolean = false, metric: (Sample) -> Double? = { it.cpu }) {
+    val samples = series.samples
+    // Remembered per series, so a pointer move or a parent recomposition does not rebuild these lists.
+    val values = remember(samples, metric) { samples.map(metric) }
+    val held = remember(samples) { samples.map { it.held } }
+    val times = remember(samples) { samples.map { it.at } }
+    Sparkline(values, modifier, color = color, floor = floor, ceiling = maxOf(1.0, floor), grid = grid, pulse = pulse, held = held, stamp = samples.lastOrNull()?.at, ease = ease,
+        times = times, label = if (readout == SparkReadout.None) null else { i -> sparkSampleValue(samples[i], readout) }, hover = hover,
+        slots = slots, scaleLabel = scaleLabel, guides = guides, stale = stale, peak = peak, scaleKind = scaleKind)
+}
 
 /**
- * Inbound (green) and outbound (amber) rates on one shared scale, at least 1 KiB/s tall. The two lines are drawn in
- * bytes per second against the same eased ceiling, so a burst rescales both together and smoothly.
+ * A counter reset: the guest reported (CPU is there) but its rates are missing, because a counter went backwards
+ * (a restart, a migration) and the delta was dropped. Plain missing samples have no CPU either.
  */
-@Composable fun NetSparkline(series: Series, modifier: Modifier = Modifier, pulse: Boolean = true, ease: Boolean = pulse) {
-    val ins = series.samples.map { it.netInRate }; val outs = series.samples.map { it.netOutRate }
-    val top = sparkTop(ins + outs, floor = 1024.0, ceiling = Double.MAX_VALUE)
-    val held = series.samples.map { it.held }; val stamp = series.samples.lastOrNull()?.at
+internal fun netResets(samples: List<Sample>): List<Int> = samples.indices.filter { i ->
+    val s = samples[i]; s.cpu != null && s.netInRate == null && s.netOutRate == null && i > 0
+}
+
+/**
+ * Inbound (blue) and outbound (amber) rates on one shared scale, at least 1 KiB/s tall. The two lines are drawn in
+ * bytes per second against the same eased ceiling, so a burst rescales both together and smoothly. A counter reset
+ * leaves a gap with a short dashed tick, so it reads as "reset" and not as a drop to zero. [scaleLabel] names the top.
+ */
+@Composable fun NetSparkline(series: Series, modifier: Modifier = Modifier, pulse: Boolean = true, ease: Boolean = pulse, slots: Int = SPARK_MIN_SLOTS,
+    scaleLabel: Boolean = false, stale: Boolean = false) {
+    val samples = series.samples
+    val ins = remember(samples) { samples.map { it.netInRate } }; val outs = remember(samples) { samples.map { it.netOutRate } }
+    // Both lines share one round top (1, 2, 2.5 or 5 x 10^n of an IEC unit), so the label names a value worth reading.
+    val raw = sparkTop(ins + outs, floor = 1024.0, ceiling = Double.MAX_VALUE)
+    val axis = remember(raw) { axisScale(AxisKind.Rate, raw, maxTicks = 4, headroom = 1.0) }
+    val top = axis.top
+    val held = remember(samples) { samples.map { it.held } }; val stamp = samples.lastOrNull()?.at
+    val resets = remember(samples) { netResets(samples) }
     val cursor = remember { SparkHover() }
+    val mark = Tech.Muted
     Box(modifier) {
-        Sparkline(ins, Modifier.matchParentSize(), color = Tech.Green, floor = top, ceiling = top, pulse = pulse, held = held, stamp = stamp, ease = ease, hover = cursor)
-        Sparkline(outs, Modifier.matchParentSize(), color = Tech.Amber, floor = top, ceiling = top, grid = false, pulse = pulse, held = held, stamp = stamp, ease = ease, hover = cursor)
+        Sparkline(ins, Modifier.matchParentSize(), color = MetricColors.secondary, floor = top, ceiling = top, pulse = pulse, held = held, stamp = stamp, ease = ease, hover = cursor,
+            slots = slots, scaleLabel = if (scaleLabel) { _ -> axis.label(axis.top) } else null, stale = stale)
+        Sparkline(outs, Modifier.matchParentSize(), color = MetricColors.primary, floor = top, ceiling = top, grid = false, pulse = pulse, held = held, stamp = stamp, ease = ease, hover = cursor,
+            slots = slots, stale = stale)
+        if (resets.isNotEmpty()) Box(Modifier.matchParentSize().drawBehind {
+            val total = maxOf(samples.size, slots); val step = if (total <= 1) size.width else size.width / (total - 1)
+            val dash = PathEffect.dashPathEffect(floatArrayOf(2.dp.toPx(), 2.dp.toPx()))
+            resets.forEach { i -> val x = step * (i + total - samples.size); drawLine(mark, Offset(x, size.height * .25f), Offset(x, size.height), 1.dp.toPx(), pathEffect = dash) }
+        })
         Box(Modifier.matchParentSize().sparkTrack(cursor))
-        NetSparkReadout(cursor, series)
+        NetSparkReadout(cursor, series, slots)
     }
 }
 
 /** One bubble for both rates. It is the only reader of the shared hover, so the two lines are not rebuilt as the pointer moves. */
-@Composable private fun BoxScope.NetSparkReadout(cursor: SparkHover, series: Series) {
+@Composable private fun BoxScope.NetSparkReadout(cursor: SparkHover, series: Series, slots: Int = 0) {
     val samples = series.samples
     val times = remember(samples) { samples.map { it.at } }
-    SparkBubble(cursor, samples.size) { index ->
+    SparkBubble(cursor, samples.size, slots) { index ->
         val sample = samples[index]
-        sparkReadoutLine(sparkNetValue(sample), sample.held, sparkClock(times, index))
+        val value = if (sample.cpu != null && sample.netInRate == null && sample.netOutRate == null && index > 0) "counter reset" else sparkNetValue(sample)
+        sparkReadoutLine(value, sample.held, sparkClock(times, index))
     }
 }
 
@@ -595,47 +701,90 @@ internal fun shortRate(value: Double?): String = when {
     Text(formatRate(value), fontSize = fontSize, lineHeight = fontSize * 1.2f, fontFamily = Tech.Mono, color = Tech.Ink.dimmed(.85f), maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
 }
 
-/** 240° gauge that eases to new values without overshoot, number in the centre, caption and detail below. Hover names the exact value. */
-@Composable fun ArcGauge(value: Double?, caption: String, detail: String? = null, size: Dp = 84.dp, modifier: Modifier = Modifier, series: Series? = null, metric: (Sample) -> Double? = { it.cpu }) {
+/**
+ * 240° gauge that eases to new values without overshoot, number in the centre, caption and detail below. Hover names the exact value.
+ *
+ * Threshold bands sit just outside the track (attention, then critical, from [thresholds]) and each threshold cuts a
+ * notch in the track, so the zone a value is in reads by position as well as by colour. With a [series] the gauge also
+ * shows the range of the live window as a faint arc under the value, and its peak as a bright mark when the peak is
+ * above the current value.
+ */
+@Composable fun ArcGauge(value: Double?, caption: String, detail: String? = null, size: Dp = 84.dp, modifier: Modifier = Modifier, series: Series? = null, metric: (Sample) -> Double? = { it.cpu },
+    thresholds: MetricThresholds = MetricThresholds.Load) {
     var hovered by remember { mutableStateOf(false) }
     val setHovered = remember<(Boolean) -> Unit> { { hovered = it } }
+    val samples = series?.samples
+    // Range and peak of the live window, remembered per sample list: a hover or a recomposition does not walk the series.
+    val range = remember(samples) { samples?.let { s -> gaugeRange(s.map(metric)) } }
     Column(modifier.onPointerEvent(PointerEventType.Enter) { setHovered(true) }
         .onPointerEvent(PointerEventType.Exit) { setHovered(false) },
         horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(2.dp)) {
         Box(Modifier.size(size)) {
-            ArcGaugeFace(value, caption, size)
+            ArcGaugeFace(value, caption, size, thresholds, range)
             GaugeTip(hovered, value, detail, series, metric)
         }
         detail?.let { Text(it, fontSize = 10.sp, lineHeight = 12.sp, color = Tech.Ink.dimmed(.8f), fontFamily = Tech.Mono, maxLines = 1) }
     }
 }
 
+/** Lowest and highest finite, non-negative value, clamped to 0..1, or null when there is none. */
+internal fun gaugeRange(values: List<Double?>): ClosedFloatingPointRange<Double>? {
+    var lo = Double.POSITIVE_INFINITY; var hi = Double.NEGATIVE_INFINITY
+    for (v in values) if (v != null && v.isFinite() && v >= 0.0) { if (v < lo) lo = v; if (v > hi) hi = v }
+    return if (hi < lo) null else lo.coerceIn(0.0, 1.0)..hi.coerceIn(0.0, 1.0)
+}
+
+/** The window's peak when it is worth a mark of its own: more than two points above the value the gauge shows now. */
+internal fun gaugePeak(shown: Double?, range: ClosedFloatingPointRange<Double>?): Double? =
+    range?.endInclusive?.takeIf { shown != null && shown.isFinite() && it - shown > .02 }
+
 /** The arc, the number and the caption. Hover is not a parameter, so the face is left alone when the pointer enters. */
-@Composable private fun ArcGaugeFace(value: Double?, caption: String, size: Dp) {
+@Composable private fun ArcGaugeFace(value: Double?, caption: String, size: Dp, thresholds: MetricThresholds = MetricThresholds.Load, range: ClosedFloatingPointRange<Double>? = null) {
     val reduce = LocalReduceMotion.current
     val shown = value?.takeIf { it.isFinite() && it >= 0.0 }
     // It used to spring with a bounce, so the needle overshot and came back on every reading.
     val v by animateFloatAsState((shown ?: 0.0).toFloat().coerceIn(0f, 1f), if (reduce) snap() else tween(SPARK_SETTLE_MS, easing = FastOutSlowInEasing))
-    val tint by animateColorAsState(ramp(shown ?: 0.0), tween(if (reduce) 0 else 300))
+    val tint by animateColorAsState(thresholds.tone(shown ?: 0.0).color, tween(if (reduce) 0 else 300))
+    val attention = Tech.Amber; val critical = Tech.Red; val track = MetricColors.track; val ink = Tech.Ink; val gap = Tech.Panel
     Box(Modifier.size(size), contentAlignment = Alignment.Center) {
         Box(Modifier.fillMaxSize().drawWithCache {
-            val w = 6.dp.toPx(); val inset = w / 2 + 2.dp.toPx()
+            val w = 6.dp.toPx(); val band = 2.dp.toPx(); val inset = w / 2 + band + 3.dp.toPx()
             val arcSize = Size(this.size.width - inset * 2, this.size.height - inset * 2)
-            val track = Stroke(w, cap = StrokeCap.Round); val glow = Stroke(w * 2.2f, cap = StrokeCap.Round)
+            val bandInset = inset - w / 2 - band / 2 - 1.5.dp.toPx()
+            val bandSize = Size(this.size.width - bandInset * 2, this.size.height - bandInset * 2)
+            val trackStroke = Stroke(w, cap = StrokeCap.Round); val glow = Stroke(w * 2.2f, cap = StrokeCap.Round)
+            val bandStroke = Stroke(band, cap = StrokeCap.Butt); val rangeStroke = Stroke(w, cap = StrokeCap.Butt)
+            val radius = this.size.minDimension / 2 - inset
+            val r1 = radius - w; val r2 = r1 - 3.dp.toPx()
+            val mid = Offset(this.size.width / 2, this.size.height / 2)
+            fun at(fraction: Double, r: Float): Offset {
+                val a = Math.toRadians(150.0 + 240.0 * fraction)
+                return mid + Offset((r * Math.cos(a)).toFloat(), (r * Math.sin(a)).toFloat())
+            }
+            val minor = (0..10).map { at(it / 10.0, r1) to at(it / 10.0, r2) }
+            // Thresholds cut the track, the same notch the bars and rings carry, so nothing floats beside the number.
+            val notches = listOf(thresholds.attention, thresholds.critical).map { at(it, radius - w / 2 - 1f) to at(it, radius + w / 2 + 1f) }
+            val notchWidth = 1.5.dp.toPx()
+            // The window's peak, only when it stands clear of the current value: a short mark across the track, out to the band.
+            val peakMark = gaugePeak(shown, range)?.let { at(it, radius - w / 2 - 1.dp.toPx()) to at(it, radius + w / 2 + band + 2.5.dp.toPx()) }
+            val a0 = 150f + 240f * thresholds.attention.toFloat(); val a1 = 150f + 240f * thresholds.critical.toFloat()
+            val minorColor = Tech.Edge.copy(alpha = .7f)
             onDrawBehind {
-                drawArc(Tech.Edge, 150f, 240f, false, Offset(inset, inset), arcSize, style = track)
-                // tick marks every 10%
-                for (t in 0..10) {
-                    val a = Math.toRadians(150.0 + 24.0 * t); val r1 = this.size.minDimension / 2 - inset - w; val r2 = r1 - 3.dp.toPx()
-                    drawLine(Tech.Edge, center + Offset((r1 * Math.cos(a)).toFloat(), (r1 * Math.sin(a)).toFloat()), center + Offset((r2 * Math.cos(a)).toFloat(), (r2 * Math.sin(a)).toFloat()), 1f)
-                }
+                drawArc(track, 150f, 240f, false, Offset(inset, inset), arcSize, style = trackStroke)
+                // Threshold bands: amber from attention to critical, red from critical to full.
+                drawArc(attention.copy(alpha = .55f), a0, a1 - a0, false, Offset(bandInset, bandInset), bandSize, style = bandStroke)
+                drawArc(critical.copy(alpha = .75f), a1, 390f - a1, false, Offset(bandInset, bandInset), bandSize, style = bandStroke)
+                minor.forEach { (p, q) -> drawLine(minorColor, p, q, 1f) }
                 if (shown != null) {
-                    drawArc(tint.copy(alpha = .18f), 150f, 240f * v, false, Offset(inset, inset), arcSize, style = glow)
-                    drawArc(tint, 150f, 240f * v, false, Offset(inset, inset), arcSize, style = track)
+                    range?.let { r -> if (r.endInclusive > r.start) drawArc(tint.copy(alpha = .22f), 150f + 240f * r.start.toFloat(), 240f * (r.endInclusive - r.start).toFloat(), false, Offset(inset, inset), arcSize, style = rangeStroke) }
+                    drawArc(tint.copy(alpha = .16f), 150f, 240f * v, false, Offset(inset, inset), arcSize, style = glow)
+                    drawArc(tint, 150f, 240f * v, false, Offset(inset, inset), arcSize, style = trackStroke)
                 }
+                notches.forEach { (p, q) -> drawLine(gap, p, q, notchWidth) }
+                peakMark?.let { (p, q) -> drawLine(ink, p, q, notchWidth, cap = StrokeCap.Round) }
             }
         })
-        if (shown == null) Text("—", color = Tech.Muted, fontFamily = Tech.Mono) else AnimatedNumber(shown, fontSize = 16.sp)
+        if (shown == null) Text("—", color = Tech.Muted, fontFamily = Tech.Mono) else AnimatedNumber(shown, fontSize = 16.sp, align = TextAlign.Center, thresholds = thresholds)
         // Caption sits in the open bottom of the arc.
         Text(caption.uppercase(), Modifier.align(Alignment.BottomCenter).padding(bottom = 4.dp), fontSize = 9.sp, lineHeight = 11.sp, color = Tech.Muted, fontFamily = Tech.Mono, letterSpacing = 1.sp, maxLines = 1)
     }
@@ -650,9 +799,13 @@ internal fun shortRate(value: Double?): String = when {
     }
 }
 
-/** Animated proportional bar; colours follow running / stopped / template / other. */
-@Composable fun SplitBar(values: List<Int>, modifier: Modifier = Modifier, colors: List<Color> = listOf(Tech.Green, Tech.Muted.copy(alpha = .55f), Tech.Amber, Tech.Ink.copy(alpha = .7f))) {
-    Row(modifier.height(4.dp).background(Tech.Edge.copy(alpha = .4f)), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+/**
+ * Animated proportional bar; colours follow running / stopped / template / other. Each part is set apart from the next
+ * by a gap, so two neighbours of similar colour stay apart.
+ */
+@Composable fun SplitBar(values: List<Int>, modifier: Modifier = Modifier, colors: List<Color> = listOf(Tech.Green, Tech.Muted.copy(alpha = .55f), Tech.Amber, Tech.Ink.copy(alpha = .7f)),
+    height: Dp = 4.dp) {
+    Row(modifier.height(height).background(MetricColors.track.copy(alpha = .5f)), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
         values.forEachIndexed { i, n ->
             val w by animateFloatAsState(n.toFloat(), tween(if (LocalReduceMotion.current) 0 else 350))
             if (w > 0.01f) Box(Modifier.weight(w).fillMaxHeight().background(colors[i % colors.size]))
@@ -660,12 +813,12 @@ internal fun shortRate(value: Double?): String = when {
     }
 }
 
-/** Thin usage bar for memory and similar fractions. */
-@Composable fun UsageBar(fraction: Double?, modifier: Modifier = Modifier) {
-    val f by animateFloatAsState((fraction ?: 0.0).toFloat().coerceIn(0f, 1f), tween(if (LocalReduceMotion.current) 0 else 350))
-    val tint = ramp(fraction ?: 0.0)
-    Box(modifier.height(4.dp).background(Tech.Edge.copy(alpha = .5f))) { if (fraction != null) Box(Modifier.fillMaxHeight().fillMaxWidth(f).background(tint.copy(alpha = .85f))) }
-}
+/**
+ * Thin usage bar for memory and similar fractions ([BarGauge]): the tone against [thresholds], notches where the meaning
+ * changes, and a dashed track for "no value". [color] makes it a ranking bar with no judgement.
+ */
+@Composable fun UsageBar(fraction: Double?, modifier: Modifier = Modifier, thresholds: MetricThresholds = MetricThresholds.Load, color: Color? = null, notches: Boolean = true) =
+    BarGauge(fraction, modifier, thresholds = thresholds, color = color, notches = notches)
 
 @Composable fun CompactSearchField(value: String, onValue: (String) -> Unit, placeholder: String = "Search name · node · ID · tag", label: String = "Search guests") {
     val focus = LocalSearchFocus.current
@@ -830,15 +983,24 @@ internal fun fleetDigest(state: WorkspaceState, total: FleetTotals?): String {
                 Text(guestSplitDisplay(total), fontSize = 10.sp, lineHeight = 12.sp, color = Tech.Muted, fontFamily = Tech.Mono,
                     modifier = Modifier.weight(1f).padding(bottom = 3.dp), maxLines = 2, overflow = TextOverflow.Ellipsis)
             }
-            SplitBar(listOf(total.running, total.stopped, total.templates, otherGuests(total)), Modifier.fillMaxWidth())
+            // Templates are not a state to worry about: a quiet tone, not amber. "Other" (paused, unknown) keeps amber.
+            SplitBar(listOf(total.running, total.stopped, total.templates, otherGuests(total)), Modifier.fillMaxWidth(),
+                colors = listOf(Tech.Green, Tech.Muted.copy(alpha = .6f), Tech.Ink.copy(alpha = .28f), Tech.Amber), height = 5.dp)
         }
     }
     val cpuMin = textWidth(160.dp, 1.15f)
+    // The range of the live window under the current value: "38–77 %" says how steady the number above it is.
+    val cpuRange = remember(state.history.cluster.samples) { rangeText(state.history.cluster.samples.map { it.cpu }, ::wholePercent)?.let { "$it%" } }
     val cpuCell: @Composable (Modifier) -> Unit = { modifier ->
         if (total?.cpuFraction != null) StripCell("CLUSTER CPU", modifier) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Sparkline(state.history.cluster, Modifier.opensLens { clusterLens(LiveMetric.Cpu) }.weight(1f).height(26.dp))
-                AnimatedNumber(total.cpuFraction!!, Modifier.width(textWidth(54.dp, 1.5f)), fontSize = 16.sp)
+                // Fixed 0..100 % with faint guides where the load colour changes, so the line's height is the load.
+                Sparkline(state.history.cluster, Modifier.opensLens { clusterLens(LiveMetric.Cpu) }.weight(1f).height(26.dp), floor = 1.0,
+                    guides = listOf(MetricThresholds.Load.attention, MetricThresholds.Load.critical), stale = state.stale)
+                Column(Modifier.width(textWidth(54.dp, 1.5f)), horizontalAlignment = Alignment.End) {
+                    AnimatedNumber(total.cpuFraction!!, Modifier.fillMaxWidth(), fontSize = 16.sp, align = TextAlign.End)
+                    if (cpuRange != null) Text(cpuRange, fontSize = 9.sp, lineHeight = 10.sp, color = Tech.Muted, fontFamily = Tech.Mono, maxLines = 1, softWrap = false)
+                }
             }
         }
     }
@@ -849,10 +1011,10 @@ internal fun fleetDigest(state: WorkspaceState, total: FleetTotals?): String {
             val net = state.history.cluster.samples.lastOrNull()
             StripCell("GUEST NETWORK", modifier) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    NetSparkline(state.history.cluster, Modifier.opensLens { clusterLens(LiveMetric.Network) }.weight(1f).height(26.dp))
+                    NetSparkline(state.history.cluster, Modifier.opensLens { clusterLens(LiveMetric.Network) }.weight(1f).height(26.dp), stale = state.stale)
                     Column(Modifier.width(rateWidth), verticalArrangement = Arrangement.spacedBy(1.dp)) {
-                        RateLine("IN", net?.netInRate, Tech.Green)
-                        RateLine("OUT", net?.netOutRate, Tech.Amber)
+                        RateLine("IN", net?.netInRate, MetricColors.secondary)
+                        RateLine("OUT", net?.netOutRate, MetricColors.primary)
                     }
                 }
             }
@@ -873,9 +1035,9 @@ internal fun fleetDigest(state: WorkspaceState, total: FleetTotals?): String {
                 val cpu = latestCpu(series, hot.metrics?.cpuFraction)
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(hot.name.ifBlank { "Guest ${hot.id}" }, Modifier.weight(1f).identity(), fontSize = 13.sp, fontFamily = Tech.Mono, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, softWrap = false)
-                    if (cpu != null) AnimatedNumber(cpu, Modifier.width(textWidth(44.dp, 1.5f)), fontSize = 13.sp)
+                    if (cpu != null) AnimatedNumber(cpu, Modifier.width(textWidth(44.dp, 1.5f)), fontSize = 13.sp, align = TextAlign.End)
                 }
-                Sparkline(series ?: Series(), Modifier.opensLens { guestLens(hot, LiveMetric.Cpu) }.fillMaxWidth().height(10.dp), grid = false, pulse = false, ease = true)
+                Sparkline(series ?: Series(), Modifier.opensLens { guestLens(hot, LiveMetric.Cpu) }.fillMaxWidth().height(12.dp), grid = false, pulse = false, ease = true, floor = 1.0, stale = state.stale)
             }
         }
     }
@@ -889,9 +1051,9 @@ internal fun fleetDigest(state: WorkspaceState, total: FleetTotals?): String {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("${gib(total.memoryBytes)} / ${gib(total.memoryLimitBytes)} GiB", fontSize = 13.sp, fontFamily = Tech.Mono,
                         modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis, softWrap = false)
-                    if (showPercent) Text(percent(f), fontSize = 10.sp, fontFamily = Tech.Mono, color = ramp(f ?: 0.0), modifier = Modifier.padding(bottom = 2.dp), maxLines = 1, softWrap = false)
+                    if (showPercent) Text(metricText(percent(f), unitScaleFor(11.sp)), fontSize = 11.sp, fontFamily = Tech.Mono, fontWeight = FontWeight.SemiBold, color = MetricThresholds.Capacity.tone(f).color, modifier = Modifier.padding(bottom = 1.dp), maxLines = 1, softWrap = false)
                 }
-                UsageBar(f, Modifier.fillMaxWidth())
+                UsageBar(f, Modifier.fillMaxWidth(), thresholds = MetricThresholds.Capacity)
             }
         }
     }

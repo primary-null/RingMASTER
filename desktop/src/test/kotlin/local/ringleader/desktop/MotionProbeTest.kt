@@ -313,7 +313,7 @@ class MotionProbeTest {
     // ---- h. scan radar ping -------------------------------------------------------------------------------------------------------
 
     private fun radar(dir: File, tier: MotionTier, t: String) {
-        val session = ScanSession(scope)
+        val session = quietSession(scope)
         val plan = NetworkPlan(listOf(ScanNetwork(ScanInterface("Ethernet", "192.168.50.2", 24), "192.168.50.0/24", null, (1..254).map { "192.168.50.$it" })))
         fun hit(n: Int, kind: ScanKind) = ScanHit("192.168.50.$n", if (kind == ScanKind.PVE) 8006 else 443, true, kind, "Host $n", "AB:".repeat(31) + "CD", "CN=host$n.local")
         fun set(count: Int, scanned: Int) {

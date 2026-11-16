@@ -1,5 +1,6 @@
 package local.ringleader.desktop
 
+import local.ringleader.core.UPDATE_HOSTS
 import local.ringleader.core.UpdateAsset
 import local.ringleader.core.UpdateState
 import java.nio.file.Files
@@ -21,6 +22,11 @@ class UpdatesCopyTest {
         assertTrue(UPDATE_CONSENT.contains("User-Agent RingMASTER/<version>"))
         assertTrue(UPDATE_CONSENT.contains("nothing about you or your servers"))
         assertFalse(UPDATE_CONSENT.contains("No account or app identifiers"))
+        // Redirects change how many requests a check makes, so the text names no count; it names what is contacted, which the check enforces.
+        assertFalse(UPDATE_CONSENT.contains("two HTTPS requests"), UPDATE_CONSENT)
+        assertFalse(Regex("""\b(one|two|three|four|five|six|\d+) (HTTPS )?(requests|GETs)""").containsMatchIn(UPDATE_CONSENT), UPDATE_CONSENT)
+        for (host in UPDATE_HOSTS) assertTrue(UPDATE_CONSENT.contains(host), "the consent names $host")
+        assertTrue(UPDATE_CONSENT.contains("nowhere else"))
         val readme = Files.readString(repoRoot().resolve("README.md"))
         assertTrue(readme.contains("User-Agent: RingMASTER/<version>"))
         assertTrue(readme.contains("nothing about you or your servers"))

@@ -95,6 +95,7 @@ internal fun guestHasPage(state: WorkspaceState, guest: Guest): Boolean = state.
     val scope = rememberCoroutineScope()
     var diagnosticStatus by remember { mutableStateOf<String?>(null) }
     val diagnosticSessions = LocalDiagnosticSessions.current
+    val otherSessionsOpen = LocalOtherSessionsOpen.current
     // Where the Send button is, so the spark can leave from it after the dialog has closed.
     val sendButton = remember { arrayOfNulls<androidx.compose.ui.layout.LayoutCoordinates>(1) }
     var detailOpen by remember(state.connectionEpoch) { mutableStateOf(false) }
@@ -233,19 +234,41 @@ internal fun guestHasPage(state: WorkspaceState, guest: Guest): Boolean = state.
     val short = maxHeight < 400.dp
     val pageScroll = rememberScrollState()
     Column(Modifier.fillMaxSize().then(if (compact) Modifier.padding(end = 12.dp).verticalScroll(pageScroll) else Modifier), verticalArrangement = Arrangement.spacedBy(if (short) 4.dp else Tech.Space8)) {
-        if (state.connected || state.demo) TelemetryStrip(state, workspace, onDisconnect, short = short)
+        // A connection that never got its first inventory (refused sign-in, refused certificate, server not reached) has no
+        // telemetry to show: the failure card below is the whole page, and the reason is said there, once.
+        val failed = connectionFailed(state)
+        if ((state.connected || state.demo) && !failed) TelemetryStrip(state, workspace, onDisconnect, short = short)
         if (state.loading) TechProgress()
-        // A closed session's reason is on the failure card below, not repeated above it.
-        state.error?.takeIf { state.connected || state.demo || state.overview != null }?.let { Text(it, color = Tech.Red, fontSize = 13.sp) }
+        state.error?.takeIf { !failed && (state.connected || state.demo || state.overview != null) }?.let { Text(it, color = Tech.Red, fontSize = 13.sp) }
         if (state.connected && state.lostPowerResults.isNotEmpty()) LostPowerResults(state, workspace)
         val overview = state.overview
         if (overview == null) {
-            if (!state.loading) TechPanel(Modifier.fillMaxWidth(), rail = if (!state.connected && state.error != null) Tech.Red else Tech.Amber) {
-                if (!state.connected && state.error != null) {
+            if (!state.loading) TechPanel(Modifier.fillMaxWidth(), rail = if (failed) Tech.Red else Tech.Amber) {
+                if (failed) {
+                    // Closed by a refusal: the server is in failedAddress. Still trying after a failed first read: in address.
+                    val server = state.failedAddress.ifEmpty { state.address }
                     Text("Connection failed", fontSize = 20.sp, fontWeight = FontWeight.SemiBold, color = Tech.Red)
                     Spacer(Modifier.height(8.dp))
                     Text(state.error.orEmpty(), color = Tech.Ink)
-                    if (state.failedAddress.isNotEmpty()) Text(if (Appearance.showcase) "Hidden server" else state.failedAddress, Modifier.identity(), color = Tech.Muted, fontSize = 12.sp, fontFamily = Tech.Mono)
+                    if (server.isNotEmpty()) Text(if (Appearance.showcase) "Hidden server" else server, Modifier.identity(), color = Tech.Muted, fontSize = 12.sp, fontFamily = Tech.Mono)
+                    if (state.account.isNotEmpty() && !Appearance.showcase) Text(triedAs(state.account), Modifier.identity(), color = Tech.Muted, fontSize = 12.sp, fontFamily = Tech.Mono)
+                    connectionFailureAdvice(state)?.let {
+                        Spacer(Modifier.height(10.dp))
+                        Text(it, Modifier.widthIn(max = 760.dp), color = Tech.Muted, fontSize = 13.sp, lineHeight = 19.sp)
+                    }
+                    // Other connections are untouched by this one failing; with several open, say so.
+                    if (otherSessionsOpen) {
+                        Spacer(Modifier.height(8.dp))
+                        Text("Your other open connections are not affected.", color = Tech.Muted, fontSize = 13.sp)
+                    }
+                    if (state.connected && state.certificateHold) {
+                        // A certificate refusal is not retried in the background (network audit F7).
+                        Spacer(Modifier.height(8.dp))
+                        Text(CERTIFICATE_HOLD_NOTE, color = Tech.Amber, fontSize = 12.sp, fontFamily = Tech.Mono)
+                    } else if (state.connected) state.liveBackoffSeconds?.let {
+                        Spacer(Modifier.height(8.dp))
+                        Text("Trying again in the background, every $it s.", color = Tech.Amber, fontSize = 12.sp, fontFamily = Tech.Mono)
+                    }
                     diagnosticStatus?.let {
                         Spacer(Modifier.height(8.dp))
                         Text(it, color = Tech.Amber, fontSize = 12.sp, fontFamily = Tech.Mono)
@@ -253,6 +276,10 @@ internal fun guestHasPage(state: WorkspaceState, guest: Guest): Boolean = state.
                     Spacer(Modifier.height(18.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         TechAction("Return to Desk", active = true, onClick = onConnect)
+                        // The session is still there after a failed first read (it holds the typed secret): one more try without retyping.
+                        if (state.connected) TechAction("Try again", onClick = { workspace.refresh(force = true) })
+                        // Still there and still trying: the person can also end it here, not only by connecting to something else.
+                        if (state.connected) TechAction("Disconnect", onClick = onDisconnect)
                         TechAction("Export diagnostics…", onClick = {
                             exportDiagnosticsBundle(scope, host, clipboard, diagnosticSessions()) {
                                 diagnosticStatus = it
@@ -516,7 +543,7 @@ internal fun shortUptime(seconds: Long?): String = when {
             }
         }
         Row(Modifier.width(TableCols.cpu), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (series != null && series.samples.isNotEmpty()) Sparkline(series, Modifier.weight(1f).height(14.dp), pulse = false) else Spacer(Modifier.weight(1f))
+            if (series != null && series.samples.isNotEmpty()) Sparkline(series, Modifier.weight(1f).height(14.dp), pulse = false, floor = 1.0) else Spacer(Modifier.weight(1f))
             Text(percent(cpu), fontSize = 10.sp, fontFamily = Tech.Mono, color = cpu?.let(::ramp) ?: Tech.Muted, modifier = Modifier.width(40.dp), textAlign = androidx.compose.ui.text.style.TextAlign.End)
         }
         val used = latestMemory(series, member?.memoryBytes)
@@ -646,28 +673,28 @@ private fun guestLockMark(guest: Guest): GuestMark? {
                 }
             }
             Row(Modifier.width(TableCols.cpu), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (metering && series != null && series.samples.isNotEmpty()) Sparkline(series, Modifier.weight(1f).height(18.dp), pulse = false) else Spacer(Modifier.weight(1f))
+                if (metering && series != null && series.samples.isNotEmpty()) Sparkline(series, Modifier.weight(1f).height(18.dp), pulse = false, floor = 1.0, stale = stale) else Spacer(Modifier.weight(1f))
                 Text(percent(cpu), fontSize = 11.sp, fontFamily = Tech.Mono, color = if (cpu != null) ramp(cpu) else Tech.Muted,
                     modifier = Modifier.width(40.dp), textAlign = androidx.compose.ui.text.style.TextAlign.End)
             }
             if (TableCols.mem > 0.dp) Column(Modifier.width(TableCols.mem), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                 if (fraction != null && mem != null && memMax != null) {
                     Text("${gib(mem)} / ${gib(memMax)} GiB", fontSize = 10.sp, fontFamily = Tech.Mono, color = Tech.Ink.dimmed(.85f), maxLines = 1)
-                    UsageBar(fraction, Modifier.fillMaxWidth())
+                    UsageBar(fraction, Modifier.fillMaxWidth(), thresholds = MetricThresholds.Capacity)
                 } else Text(if (memMax != null && memMax > 0) "${gib(memMax)} GiB" else "—", fontSize = 10.sp, fontFamily = Tech.Mono, color = Tech.Muted)
             }
             if (TableCols.net > 0.dp) Column(Modifier.width(TableCols.net)) {
                 val rates = series?.samples?.lastOrNull()
                 if (metering && (rates?.netInRate != null || rates?.netOutRate != null)) {
-                    RateLine("IN", rates?.netInRate, Tech.Green, 9.sp)
-                    RateLine("OUT", rates?.netOutRate, Tech.Amber, 9.sp)
+                    RateLine("IN", rates?.netInRate, MetricColors.secondary, 9.sp)
+                    RateLine("OUT", rates?.netOutRate, MetricColors.primary, 9.sp)
                 } else Text("—", fontSize = 10.sp, fontFamily = Tech.Mono, color = Tech.Muted)
             }
             if (TableCols.disk > 0.dp) Column(Modifier.width(TableCols.disk), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                 val disk = if (metering) guestDiskUsage(metrics?.diskBytes, metrics?.diskLimitBytes) else null
                 if (disk != null) {
                     Text("${gib(disk.first)}/${gib(disk.second)}G", fontSize = 10.sp, fontFamily = Tech.Mono, color = Tech.Ink.dimmed(.85f), maxLines = 1)
-                    UsageBar(memoryFraction(disk.first, disk.second), Modifier.fillMaxWidth())
+                    UsageBar(memoryFraction(disk.first, disk.second), Modifier.fillMaxWidth(), thresholds = MetricThresholds.Capacity)
                 } else Text(metrics?.diskLimitBytes?.takeIf { it > 0L }?.let { "${gib(it)} GiB" } ?: "—", fontSize = 10.sp, fontFamily = Tech.Mono, color = Tech.Muted, maxLines = 1)
             }
             if (TableCols.up > 0.dp) Text(if (running) shortUptime(metrics?.uptimeSeconds) else "—", fontSize = 11.sp, fontFamily = Tech.Mono, color = Tech.Muted, modifier = Modifier.width(TableCols.up), maxLines = 1)
@@ -731,7 +758,7 @@ private fun guestLockMark(guest: Guest): GuestMark? {
             val vcpus = guest.metrics?.maxCpu?.toInt() ?: state.details?.cpus
             if (running) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
                 ArcGauge(cpuNow, "CPU", vcpus?.let { "$it vCPU" }, modifier = Modifier.opensLens { guestLens(guest, LiveMetric.Cpu) }, series = live, metric = { it.cpu })
-                ArcGauge(memoryFraction(memNow, memMax), "Memory", if (memMax != null && memMax > 0L) "${gib(memNow)} / ${gib(memMax)} GiB" else null, modifier = Modifier.opensLens { guestLens(guest, LiveMetric.Memory) }, series = live, metric = { memoryFraction(it.mem, it.memMax) })
+                ArcGauge(memoryFraction(memNow, memMax), "Memory", if (memMax != null && memMax > 0L) "${gib(memNow)} / ${gib(memMax)} GiB" else null, modifier = Modifier.opensLens { guestLens(guest, LiveMetric.Memory) }, series = live, metric = { memoryFraction(it.mem, it.memMax) }, thresholds = MetricThresholds.Capacity)
             }
             // Off or template: empty gauges say nothing, so show what the guest is allocated instead.
             else Row(Modifier.fillMaxWidth().border(1.dp, Tech.Edge, Tech.Control).background(Tech.Black.copy(alpha = .35f)).padding(horizontal = 12.dp, vertical = 10.dp),
@@ -750,12 +777,14 @@ private fun guestLockMark(guest: Guest): GuestMark? {
             if (running && live != null && live.samples.size > 1) {
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Row { Text("CPU · LAST ${live.samples.size} SAMPLES", fontSize = 9.sp, letterSpacing = 1.sp, color = Tech.Muted, fontFamily = Tech.Mono, modifier = Modifier.weight(1f)); Text(percent(cpuNow), fontSize = 9.sp, color = Tech.Muted, fontFamily = Tech.Mono) }
-                    Sparkline(live, Modifier.opensLens { guestLens(guest, LiveMetric.Cpu) }.fillMaxWidth().height(48.dp).background(Tech.Black.copy(alpha = .35f)))
+                    Sparkline(live, Modifier.opensLens { guestLens(guest, LiveMetric.Cpu) }.fillMaxWidth().height(48.dp).background(Tech.Black.copy(alpha = .35f)),
+                        scaleKind = AxisKind.Fraction, guides = listOf(MetricThresholds.Load.attention, MetricThresholds.Load.critical), peak = true, stale = state.stale)
                 }
                 MiniHeading("MEMORY", percent(memoryFraction(memNow, memMax)))
-                Sparkline(live, Modifier.opensLens { guestLens(guest, LiveMetric.Memory) }.fillMaxWidth().height(32.dp).background(Tech.Black.copy(alpha = .35f)), floor = .1, pulse = false, ease = true, readout = SparkReadout.Memory) { memoryFraction(it.mem, it.memMax) }
-                MiniHeading("NETWORK", "IN green · OUT amber")
-                NetSparkline(live, Modifier.opensLens { guestLens(guest, LiveMetric.Network) }.fillMaxWidth().height(32.dp).background(Tech.Black.copy(alpha = .35f)), pulse = false, ease = true)
+                Sparkline(live, Modifier.opensLens { guestLens(guest, LiveMetric.Memory) }.fillMaxWidth().height(32.dp).background(Tech.Black.copy(alpha = .35f)), floor = .1, pulse = false, ease = true, readout = SparkReadout.Memory, scaleKind = AxisKind.Fraction, stale = state.stale,
+                    color = MetricThresholds.Capacity.tone(memoryFraction(memNow, memMax)).color, guides = listOf(MetricThresholds.Capacity.attention, MetricThresholds.Capacity.critical)) { memoryFraction(it.mem, it.memMax) }
+                MetricHeading("NETWORK", listOf(LegendEntry("IN", MetricColors.secondary), LegendEntry("OUT", MetricColors.primary)))
+                NetSparkline(live, Modifier.opensLens { guestLens(guest, LiveMetric.Network) }.fillMaxWidth().height(32.dp).background(Tech.Black.copy(alpha = .35f)), pulse = false, ease = true, scaleLabel = true, stale = state.stale)
                 // Each fact is as wide as its value and the row wraps: equal thirds split "77.9 KiB/s" before its "s" at large text.
                 FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     listOf("NET IN" to formatRate(sample?.netInRate), "NET OUT" to formatRate(sample?.netOutRate), "UPTIME" to shortUptime(guest.metrics?.uptimeSeconds)).forEach { (label, value) ->
@@ -781,7 +810,7 @@ private fun guestLockMark(guest: Guest): GuestMark? {
                 facts.forEach { (label, value, fraction) -> Column(Modifier.widthIn(max = 280.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     Text(label.uppercase(), fontSize = 9.sp, lineHeight = 11.sp, letterSpacing = 1.sp, color = Tech.Muted, fontFamily = Tech.Mono)
                     HelpTip(value, identity = label == "Node") { Text(value, fontSize = 11.sp, lineHeight = 14.sp, fontFamily = Tech.Mono, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = if (label == "Node") Modifier.identity() else Modifier) }
-                    if (fraction != null) UsageBar(fraction, Modifier.fillMaxWidth())
+                    if (fraction != null) UsageBar(fraction, Modifier.fillMaxWidth(), thresholds = MetricThresholds.Capacity)
                 } }
             }
             if (guest.tags.isNotEmpty()) { MiniHeading("TAGS", "${guest.tags.size}"); FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) { guest.tags.forEach { PveTag(it) } } }
@@ -816,15 +845,16 @@ private fun guestLockMark(guest: Guest): GuestMark? {
         ArcGauge(total.cpuFraction, "CPU", "${total.nodes} ${if (total.nodes == 1) "node" else "nodes"}", modifier = Modifier.opensLens { clusterLens(LiveMetric.Cpu) }, series = cluster, metric = { it.cpu })
         ArcGauge(memoryFraction(total.memoryBytes, total.memoryLimitBytes), "Memory",
             if ((total.memoryLimitBytes ?: 0L) > 0L) "${gib(total.memoryBytes)} / ${gib(total.memoryLimitBytes)} GiB" else null,
-            modifier = Modifier.opensLens { clusterLens(LiveMetric.Memory) }, series = cluster, metric = { memoryFraction(it.mem, it.memMax) })
+            modifier = Modifier.opensLens { clusterLens(LiveMetric.Memory) }, series = cluster, metric = { memoryFraction(it.mem, it.memMax) }, thresholds = MetricThresholds.Capacity)
     }
     MiniHeading("CPU · LAST ${cluster.samples.size} SAMPLES", percent(total.cpuFraction))
-    Sparkline(cluster, Modifier.opensLens { clusterLens(LiveMetric.Cpu) }.fillMaxWidth().height(56.dp).background(Tech.Black.copy(alpha = .35f)))
-    MiniHeading("GUEST NETWORK")
-    NetSparkline(cluster, Modifier.opensLens { clusterLens(LiveMetric.Network) }.fillMaxWidth().height(40.dp).background(Tech.Black.copy(alpha = .35f)))
+    Sparkline(cluster, Modifier.opensLens { clusterLens(LiveMetric.Cpu) }.fillMaxWidth().height(56.dp).background(Tech.Black.copy(alpha = .35f)),
+        scaleKind = AxisKind.Fraction, guides = listOf(MetricThresholds.Load.attention, MetricThresholds.Load.critical), peak = true, stale = state.stale)
+    MetricHeading("GUEST NETWORK", listOf(LegendEntry("IN", MetricColors.secondary), LegendEntry("OUT", MetricColors.primary)))
+    NetSparkline(cluster, Modifier.opensLens { clusterLens(LiveMetric.Network) }.fillMaxWidth().height(40.dp).background(Tech.Black.copy(alpha = .35f)), scaleLabel = true, stale = state.stale)
     Row(Modifier.fillMaxWidth()) {
-        Box(Modifier.weight(1f)) { RateLine("IN", last?.netInRate, Tech.Green, 11.sp) }
-        Box(Modifier.weight(1f)) { RateLine("OUT", last?.netOutRate, Tech.Amber, 11.sp) }
+        Box(Modifier.weight(1f)) { RateLine("IN", last?.netInRate, MetricColors.secondary, 11.sp) }
+        Box(Modifier.weight(1f)) { RateLine("OUT", last?.netOutRate, MetricColors.primary, 11.sp) }
     }
     val running = overview.guests.filter { it.status == "running" && !it.template }
     // Ranked by the last minute, and a row only moves up when it clearly leads: the lists used to re-sort on every
@@ -838,7 +868,7 @@ private fun guestLockMark(guest: Guest): GuestMark? {
         val cpuNow = latestCpu(series, row.metrics?.cpuFraction)
         Row(Modifier.fillMaxWidth().heightIn(min = 24.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(row.name.ifBlank { "Guest ${row.id}" }, Modifier.weight(1f).identity(), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Sparkline(series ?: Series(), Modifier.opensLens { guestLens(row, LiveMetric.Cpu) }.size(96.dp, 16.dp), pulse = false)
+            Sparkline(series ?: Series(), Modifier.opensLens { guestLens(row, LiveMetric.Cpu) }.size(96.dp, 16.dp), pulse = false, floor = 1.0)
             Text(percent(cpuNow), Modifier.width(40.dp), fontFamily = Tech.Mono, fontSize = 11.sp, textAlign = TextAlign.End, color = if (cpuNow != null) ramp(cpuNow) else Tech.Muted)
         }
     }
@@ -851,7 +881,7 @@ private fun guestLockMark(guest: Guest): GuestMark? {
     }.forEach { (row, used, cap) ->
         Row(Modifier.fillMaxWidth().heightIn(min = 24.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(row.name.ifBlank { "Guest ${row.id}" }, Modifier.weight(1f).identity(), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            UsageBar(memoryFraction(used, cap), Modifier.width(96.dp))
+            UsageBar(memoryFraction(used, cap), Modifier.width(96.dp), thresholds = MetricThresholds.Capacity)
             Text(if (used != null && cap != null) "${gib(used)}/${gib(cap)}G" else "—", Modifier.width(64.dp), fontFamily = Tech.Mono, fontSize = 10.sp, textAlign = TextAlign.End, color = Tech.Muted, maxLines = 1)
         }
     }
@@ -896,10 +926,13 @@ private fun guestLockMark(guest: Guest): GuestMark? {
             if (liveNodeReadAvailable(state)) MiniAction("Refresh", primary = true, enabled = !state.nodeStatusLoading, onClick = workspace::refreshNodeStatus)
             Spacer(Modifier.weight(1f))
             if (state.kind != PDM_KIND && !state.demo && member.status == "online") MiniAction("Shell") { shell = true }
+            // SSH through Tailscale, only for a node that is itself a tailnet machine publishing host keys (the SSH contract).
+            NodeSshButton(state, member.name)
             WebUiAction(if (state.demo || state.kind == PDM_KIND) null else PveWebUi.node(state.address, member.name))
             WatchNodeButton(member.name)
             MiniAction("Close", onClick = workspace::clearMember)
         }
+        NodeSshNote(state, member.name)
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) { CreateGuestActions(state, workspace, member.name) }
         if (state.demo) Text(RECORDED_SAMPLE_CAPTION, fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = Tech.Amber)
         HorizontalDivider(color = Tech.Edge)
@@ -910,7 +943,7 @@ private fun guestLockMark(guest: Guest): GuestMark? {
         val cpuNow = cpuShare(latestCpu(nodeSeries, member.cpuFraction))
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
             ArcGauge(cpuNow, "CPU", member.maxCpu?.let { "${it.toInt()} cores" }, modifier = Modifier.opensLens { nodeLens(member.name, LiveMetric.Cpu) }, series = nodeSeries, metric = { it.cpu })
-            ArcGauge(memoryFraction(used, capacity), "Memory", if ((capacity ?: 0L) > 0L) "${gib(used)} / ${gib(capacity)} GiB" else null, modifier = Modifier.opensLens { nodeLens(member.name, LiveMetric.Memory) }, series = nodeSeries, metric = { memoryFraction(it.mem, it.memMax) })
+            ArcGauge(memoryFraction(used, capacity), "Memory", if ((capacity ?: 0L) > 0L) "${gib(used)} / ${gib(capacity)} GiB" else null, modifier = Modifier.opensLens { nodeLens(member.name, LiveMetric.Memory) }, series = nodeSeries, metric = { memoryFraction(it.mem, it.memMax) }, thresholds = MetricThresholds.Capacity)
         }
         HistoryGroup(state, workspace, member.name)
         LaunchedEffect(member.name, state.connectionEpoch) { workspace.loadNodeNetwork(member.name) }
@@ -945,7 +978,7 @@ private fun guestLockMark(guest: Guest): GuestMark? {
                     else Text(status, fontSize = 9.sp, fontFamily = Tech.Mono, color = if (status == "available") Tech.Green else Tech.Muted, maxLines = 1)
                 }
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    UsageBar(fraction, Modifier.weight(1f))
+                    UsageBar(fraction, Modifier.weight(1f), thresholds = MetricThresholds.Capacity)
                     Text("${storageSize(row.diskBytes)} / ${storageSize(row.maxDiskBytes)}", fontFamily = Tech.Mono, fontSize = 10.sp, color = Tech.Ink.dimmed(.85f), maxLines = 1)
                 }
                 row.content?.let { Text(it, fontFamily = Tech.Mono, fontSize = 9.sp, lineHeight = 11.sp, color = Tech.Muted, maxLines = 1, overflow = TextOverflow.Ellipsis) }
@@ -1026,4 +1059,8 @@ private fun guestLockMark(guest: Guest): GuestMark? {
     }
 }
 
-
+/**
+ * Which identity a failed connection used, for the failure card. "Signed in as" would be wrong: the sign-in was refused or
+ * never reached the server.
+ */
+internal fun triedAs(account: String): String = if ('!' in account) "API token tried: $account" else "User tried: $account"

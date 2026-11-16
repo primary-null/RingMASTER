@@ -41,6 +41,9 @@ class TerminalTest {
         }
     }
 
+    /** A line's text read under the buffer's lock: the emulator thread writes the same lines while a test waits for them. */
+    private fun lineText(model: TerminalModel, y: Int): String { model.buffer.lock(); try { return model.buffer.getLine(y).text } finally { model.buffer.unlock() } }
+
     private fun waitFor(what: String, condition: () -> Boolean) {
         val deadline=System.nanoTime()+5_000_000_000
         while(!condition()) { check(System.nanoTime()<deadline) { "timed out waiting for $what" }; Thread.sleep(5) }
@@ -53,8 +56,8 @@ class TerminalTest {
             assertTrue(session.ready)
             session.receiveText("café \uD83D",false)
             session.receiveText("\uDE00 ok",true)
-            waitFor("text") { session.model.buffer.getLine(0).text.contains("ok") }
-            val line=session.model.buffer.getLine(0).text
+            waitFor("text") { lineText(session.model, 0).contains("ok") }
+            val line=lineText(session.model, 0)
             assertTrue(line.startsWith("café "),line)
             assertFalse('?' in line || '�' in line,line)
         } finally { session.close() }
@@ -94,5 +97,41 @@ class TerminalTest {
         session.receive("NO".toByteArray())
         assertEquals("The terminal refused authentication.",session.reason)
         assertFalse(session.ready)
+    }
+
+    @Test fun anEmulatorThatStopsEndsTheSessionWithASentenceInsteadOfGoingQuiet() {
+        val session=TerminalSession(TerminalModel(40,5),null)
+        try {
+            session.receive("OK".toByteArray())
+            session.model.onUpdate={ error("the display failed") }
+            session.receive("x".toByteArray())
+            waitFor("the session to end") { session.reason!=null && !session.ready }
+            assertEquals(TERMINAL_DISPLAY_STOPPED,session.reason)
+            assertFalse(session.ready)
+            // Output that arrives afterwards is refused, not swallowed into a screen that no longer moves.
+            assertFailsWith<java.io.IOException> { session.model.feed("more".toByteArray()) }
+        } finally { session.close() }
+    }
+
+    @Test fun theLastLinesOfAChannelTheServerClosedAreDrawnBeforeTheSessionEnds() {
+        val session=TerminalSession(TerminalModel(40,5),null)
+        session.receive("OKlogout\r\nbye".toByteArray())
+        session.remoteClosed()
+        assertEquals("The terminal connection closed.",session.reason)
+        assertTrue(session.model.buffer.getScreenLines().contains("bye"),session.model.buffer.getScreenLines())
+        assertFalse(session.ready)
+        assertFailsWith<java.io.IOException> { session.model.feed("late".toByteArray()) }
+    }
+
+    @Test fun aClosedSessionNeverBlocksTheWebsocketThreadThatIsStillFeedingIt() {
+        // A flood the emulator cannot keep up with makes feed wait (back-pressure); closing the session must release it.
+        val session=TerminalSession(TerminalModel(40,5),null)
+        session.receive("OK".toByteArray())
+        val flood=Thread { runCatching { repeat(5000) { session.receive(ByteArray(8192) { 'x'.code.toByte() }) } } }
+        flood.start()
+        Thread.sleep(200)
+        session.close()
+        flood.join(5000)
+        assertFalse(flood.isAlive,"the feeding thread was released by close")
     }
 }

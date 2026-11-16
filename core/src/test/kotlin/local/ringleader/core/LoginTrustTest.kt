@@ -122,7 +122,7 @@ class LoginTrustTest {
         } finally { desk.close();ws.close() }
     }
     @Test fun malformedFutureDuplicateOversizeAndInvalidUtf8AreReadOnly() {
-        for (bytes in listOf("{}".toByteArray(),"{\"version\":2,\"certificates\":[]}".toByteArray(),
+        for (bytes in listOf("{}".toByteArray(),"{\"version\":3,\"certificates\":[]}".toByteArray(),
             "{\"version\":1,\"version\":1,\"certificates\":[]}".toByteArray(),ByteArray(65537){32},byteArrayOf(0xc3.toByte(),0x28))) {
             val file=Files.createTempDirectory("trust-invalid").resolve("certificates.json")
             Files.write(file,bytes)

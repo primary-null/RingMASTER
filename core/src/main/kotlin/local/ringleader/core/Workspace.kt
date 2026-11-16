@@ -1,8 +1,6 @@
 package local.ringleader.core
 
-import java.io.IOException
 import java.time.Instant
-import javax.net.ssl.SSLException
 import kotlin.random.Random
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -12,7 +10,9 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
-class SessionExpiredException : IllegalStateException("The server refused this session. Connect again.")
+/** What a session shows when the server answered HTTP 401 to a request: an API token it does not accept, or a login that ended. */
+const val SESSION_REFUSED = "The server refused this session. Connect again."
+class SessionExpiredException : IllegalStateException(SESSION_REFUSED)
 
 /** Intentionally not a data class: secret values must never enter generated toString/copy/state. */
 class Connection(
@@ -22,11 +22,14 @@ class Connection(
     fingerprint: String,
     val kind: String = DIRECT_PVE_KIND,
     otp: String? = null,
+    /** The key recorded with [fingerprint] when it was approved, so a changed leaf with the same key reads as a renewal. Not trust. */
+    val knownSpki: String? = null,
 ) : AutoCloseable {
     val address = serverOrigin(address).toString()
     /** Canonical HTTPS origin. Stable for this server; node routing and PDM remote id are not part of it. */
     val remoteKey: String get() = address
-    val fingerprint = fingerprint.replace(":", "").trim().lowercase()
+    /** Canonical ([canonicalOptionalPin]), so a pasted openssl line or spaced pin is the same pin everywhere. */
+    val fingerprint = canonicalOptionalPin(fingerprint).orEmpty()
     val passwordLogin: Boolean get() = '!' !in tokenId
     internal val tickets = TicketStore()
     private var code: CharArray? = otp?.toCharArray()
@@ -139,8 +142,20 @@ data class WorkspaceState(
     val connected: Boolean = false, val demo: Boolean = false, val address: String = "",
     val overview: Overview? = null, val loading: Boolean = false, val updatedAt: Instant? = null,
     val error: String? = null, val stale: Boolean = false, val selected: Guest? = null,
+    /** Why the inventory read failed, when it is one of the [NetworkFailure] causes; [error] is its sentence. Null otherwise. */
+    val failure: NetworkFailure? = null,
+    /**
+     * The server's certificate was refused (a certificate [NetworkFailure]): the live and task loops have stopped instead of
+     * retrying every few seconds. They resume only after an explicit read succeeds (Try again, Refresh) or a new Connect.
+     */
+    val certificateHold: Boolean = false,
     /** The server whose session a refused or expired sign-in just closed ([error] says why). Blank otherwise. */
     val failedAddress: String = "",
+    /**
+     * The user or API token ID this connection signs in with, kept after a refusal closed it, so the failure card can
+     * say what was sent. Shown on screen only; never in a diagnostics bundle. Blank for the demo and when nothing is open.
+     */
+    val account: String = "",
     val details: GuestDetails? = null, val detailsLoading: Boolean = false,
     val detailsError: String? = null, val detailsUpdatedAt: Instant? = null,
     val connectionEpoch: Long = 0,
@@ -182,7 +197,15 @@ data class WorkspaceState(
     val storageActions: StorageActionsState = StorageActionsState(),
     /** Immutable non-secret Watcher identity, published atomically with the connection epoch. */
     val watchIdentity: WatchScope? = null,
-)
+    /**
+     * For a connection without a certificate pin: which store accepted the server's certificate on the last successful
+     * read ([PlatformTrust]). Null for a pinned connection, the demo, and before the first read.
+     */
+    val tlsTrust: TrustSource? = null,
+) {
+    /** True when this connection trusts one exact certificate (a pin), false for normal TLS. */
+    val pinned: Boolean get() = watchIdentity?.pin != null
+}
 
 fun requireActiveRemote(remote: String, overview: Overview, kind: String = DIRECT_PVE_KIND): Overview {
     require(overview.guests.all { it.remote == remote }) { "Inventory included a guest from another connection." }
@@ -232,6 +255,8 @@ class Workspace(
     private val storageGateway: StorageGateway = LiveStorageGateway(),
     @Suppress("unused") private val createGateway: CreateGuestGateway = LiveCreateGuestGateway(),
     private val storageActionGateway: StorageActionGateway = LiveStorageActionGateway(),
+    /** Which store accepted the last normal-TLS handshake with an origin. Tests replace it. */
+    private val trustSource: (String) -> TrustSource? = { PlatformTrust.shared.sourceFor(it) },
 ) : AutoCloseable {
     private val mutableState = MutableStateFlow(WorkspaceState())
     val state = mutableState.asStateFlow()
@@ -361,7 +386,7 @@ class Workspace(
         Trace.emit(TraceSource.App, "connect", "Connecting", mapOf("url" to Redact.url(value.address), "kind" to value.kind))
         connection = value
         mutableState.value = WorkspaceState(
-            connected = true, address = value.address, kind = value.kind, connectionEpoch = ++epochCounter,
+            connected = true, address = value.address, account = value.tokenId, kind = value.kind, connectionEpoch = ++epochCounter,
             watchIdentity = WatchScope.of(null, value.kind, value.address, value.tokenId, value.fingerprint.ifEmpty { null }),
             live = true, liveIntervalSeconds = LIVE_INTERVAL_DEFAULT,
             lostPowerResults = lostResults.forRemote(value.address),
@@ -444,7 +469,7 @@ class Workspace(
         val order = ++inventoryOrder
         val remote = current.remoteKey
         dropNodeRead()
-        mutableState.update { it.copy(loading = true, error = null, nodeStatusLoading = false) }
+        mutableState.update { it.copy(loading = true, error = null, failure = null, nodeStatusLoading = false) }
         inventoryJob = scope.launch {
             try {
                 val overview = if (current.kind == PDM_KIND) {
@@ -468,8 +493,10 @@ class Workspace(
             catch (e: LoginRefusedException) { if (generation == expected) expire(e.message) }
             catch (e: Exception) {
                 if (generation == expected && inventoryOrder == order) mutableState.update {
-                    it.copy(loading = false, stale = it.overview != null, error = readableError(e), nodeStatusLoading = false, nodeStatusStale = it.nodeStatus != null || it.nodeStatusStale)
+                    it.copy(loading = false, stale = it.overview != null, error = readableError(e, current.knownSpki), failure = networkFailure(e, current.knownSpki, clock()),
+                        nodeStatusLoading = false, nodeStatusStale = it.nodeStatus != null || it.nodeStatusStale)
                 }
+                if (generation == expected) holdOnCertificate(networkFailure(e, current.knownSpki, clock()))
             }
         }
     }
@@ -508,8 +535,9 @@ class Workspace(
             catch (e: LoginRefusedException) { if (generation == session) expire(e.message) }
             catch (e: Exception) {
                 if (generation == session && taskGeneration == expectedTask) mutableState.update {
-                    it.copy(tasksLoading = false, tasksStale = it.tasks != null, tasksError = readableError(e))
+                    it.copy(tasksLoading = false, tasksStale = it.tasks != null, tasksError = readableError(e, current.knownSpki))
                 }
+                if (generation == session) holdOnCertificate(networkFailure(e, current.knownSpki, clock()))
             }
         }
     }
@@ -1085,7 +1113,7 @@ class Workspace(
         catch (e: SessionExpiredException) { if (generation == session && mutableState.value.connectionEpoch == epoch) expire(); throw e }
         catch (e: Exception) {
             if (generation == session && mutableState.value.connectionEpoch == epoch && order == inventoryOrder)
-                mutableState.update { it.copy(loading = false, stale = it.overview != null, error = readableError(e)) }
+                mutableState.update { it.copy(loading = false, stale = it.overview != null, error = readableError(e, conn.knownSpki), failure = networkFailure(e, conn.knownSpki, clock())) }
             return null
         }
     }
@@ -1923,7 +1951,17 @@ class Workspace(
 
     private fun liveCurrent(session: Long, epoch: Long): Boolean {
         val state = mutableState.value
-        return generation == session && state.connectionEpoch == epoch && state.live && (state.connected || state.demo)
+        return generation == session && state.connectionEpoch == epoch && state.live && (state.connected || state.demo) && !state.certificateHold
+    }
+
+    /**
+     * A refusal of the server's certificate does not go away by asking again: stop the live and task loops (they check
+     * [WorkspaceState.certificateHold] and end themselves) instead of a TLS attempt every 10 s. Network audit F7.
+     */
+    private fun holdOnCertificate(failure: NetworkFailure?) {
+        if (failure?.certificate != true || !mutableState.value.connected) return
+        mutableState.update { it.copy(certificateHold = true, liveBackoffSeconds = null) }
+        traceLoop { TraceLiveLoop(state = "paused") }
     }
 
     /** -1..1, scaled by [liveWaitMillis]. Tests replace it to make the error and resume waits exact. */
@@ -1940,7 +1978,7 @@ class Workspace(
         liveLoop?.cancel()
         liveTick?.cancel()
         val state = mutableState.value
-        if (!state.live || (!state.connected && !state.demo)) { traceLoop { TraceLiveLoop(state = if (state.connected || state.demo) "paused" else "idle") }; return }
+        if (!state.live || (!state.connected && !state.demo) || state.certificateHold) { traceLoop { TraceLiveLoop(state = if (state.connected || state.demo) "paused" else "idle") }; return }
         val session = generation
         val epoch = state.connectionEpoch
         liveLoop = scope.launch {
@@ -1979,11 +2017,12 @@ class Workspace(
         taskTick?.cancel()
         if (!tasksLive) return
         val state = mutableState.value
+        if (state.certificateHold) return
         if (!state.connected && !state.demo) return
         val session = generation
         val epoch = state.connectionEpoch
         taskLoop = scope.launch {
-            while (isActive && tasksLive && generation == session && mutableState.value.connectionEpoch == epoch) {
+            while (isActive && tasksLive && generation == session && mutableState.value.connectionEpoch == epoch && !mutableState.value.certificateHold) {
                 delay(LIVE_TASK_INTERVAL_SECONDS * 1000L)
                 if (!isActive || !tasksLive || generation != session || mutableState.value.connectionEpoch != epoch) break
                 if (mutableState.value.overview == null && !mutableState.value.demo) continue
@@ -2083,15 +2122,20 @@ class Workspace(
         historyReadings = step.readings
         val selected = mutableState.value.selected
         val fresh = selected?.let { findCurrentGuest(remote, it, overview.guests) }
+        // Recorded by the trust manager during the read's own handshake: no extra connection.
+        val trust = connection?.takeIf { it.fingerprint.isEmpty() }?.let { trustSource(it.address) }
+        // An explicit read (Try again, Refresh) got through after a certificate hold: the loops start again below.
+        val resume = mutableState.value.certificateHold
         mutableState.update {
             it.copy(
-                overview = overview, updatedAt = readAt, loading = false,
+                overview = overview, updatedAt = readAt, loading = false, tlsTrust = trust ?: it.tlsTrust,
                 // Nothing recorded when the server had refreshed nothing since the last read: the charts move only with new data.
                 history = if (step.fresh) step.history else it.history,
                 selected = if (fresh != null && it.selected?.resource == fresh.resource) fresh else it.selected,
-                stale = false, error = null, liveBackoffSeconds = null,
+                stale = false, error = null, failure = null, liveBackoffSeconds = null, certificateHold = false,
             )
         }
+        if (resume) { startLiveLoop(); if (tasksLive) startTaskLoop() }
         if (selected != null && fresh == null) clearSelection()
         // Same guest on a new node (migration): read its page again, keeping the old sections up meanwhile.
         else if (selected != null && fresh != null) refreshInspectionIfGuestMoved(selected, fresh)
@@ -2108,14 +2152,17 @@ class Workspace(
     }
 
     private fun markLiveFailure(error: Exception) {
+        val known = connection?.knownSpki
         mutableState.update {
             it.copy(
                 stale = it.overview != null,
-                error = readableError(error),
+                error = readableError(error, known),
+                failure = networkFailure(error, known, clock()),
                 liveBackoffSeconds = nextLiveBackoff(it.liveBackoffSeconds),
                 nodeStatusStale = it.nodeStatus != null || it.nodeStatusStale,
             )
         }
+        holdOnCertificate(networkFailure(error, known, clock()))
     }
 
     private fun quietHoldMember(remote: String) {
@@ -2220,7 +2267,9 @@ class Workspace(
             if (generation == session) expire(e.message)
         } catch (e: Exception) {
             if (generation == session && mutableState.value.connectionEpoch == epoch) {
-                mutableState.update { it.copy(tasksStale = it.tasks != null, tasksError = readableError(e)) }
+                val known = connection?.knownSpki
+                mutableState.update { it.copy(tasksStale = it.tasks != null, tasksError = readableError(e, known)) }
+                holdOnCertificate(networkFailure(e, known, clock()))
             }
         }
     }
@@ -2757,7 +2806,7 @@ class Workspace(
         val failed = connection
         closeSession()
         lastFailure = failed?.let { DiagnosticSessionInfo(it.address, authLabel(it), connected = false, overviewLoaded = false, lastError = message, kind = it.kind, pin = it.fingerprint.ifEmpty { null }) }
-        mutableState.value = WorkspaceState(error = message, failedAddress = failed?.address.orEmpty())
+        mutableState.value = WorkspaceState(error = message, failedAddress = failed?.address.orEmpty(), account = failed?.tokenId.orEmpty())
     }
 
     /** The session a refused or expired sign-in just closed. Kept until the next connect or disconnect, for the failure card and diagnostics. */
@@ -2768,22 +2817,13 @@ class Workspace(
     fun diagnostic(): DiagnosticSessionInfo? {
         val now = mutableState.value
         if (now.demo) return DiagnosticSessionInfo("", "Demo", connected = false, overviewLoaded = now.overview != null)
-        return connection?.let { DiagnosticSessionInfo(it.address, authLabel(it), now.connected, now.overview != null, now.error, kind = it.kind, pin = it.fingerprint.ifEmpty { null }) }
+        // A connection whose first read failed has signed in to nothing: it is reported as not connected, with its reason.
+        return connection?.let { DiagnosticSessionInfo(it.address, authLabel(it), sessionOpen(now), now.overview != null, now.error, kind = it.kind, pin = it.fingerprint.ifEmpty { null }) }
             ?: lastFailure
     }
     override fun close() { mutationLeases.unregister(foregroundView); disconnect() }
 }
 
-/** What a session shows when TLS refused the server's certificate. The desk recognises it and offers the certificate check. */
-const val CERTIFICATE_ERROR = "The server certificate is untrusted, expired, or does not match the supplied fingerprint."
-
-fun readableError(error: Exception): String = when (error) {
-    is SSLException -> CERTIFICATE_ERROR
-    is IOException -> "The server could not be reached. Check the network and try again."
-    is IllegalArgumentException -> "The server response or connection settings were invalid."
-    is IllegalStateException -> error.message ?: "The request could not be completed."
-    else -> "The request could not be completed. Try again."
-}
 
 fun demoDetails(guest: Guest) = GuestDetails(guest, guest.status, 4, if (guest.status == "running") 0.12 else 0.0,
     if (guest.status == "running") 2L * 1024 * 1024 * 1024 else 0, 8L * 1024 * 1024 * 1024,

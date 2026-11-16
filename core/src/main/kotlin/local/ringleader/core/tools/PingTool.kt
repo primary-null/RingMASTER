@@ -1,5 +1,6 @@
 package local.ringleader.core.tools
 
+import local.ringleader.core.IpLiteral
 import local.ringleader.core.findExecutable
 import kotlinx.coroutines.CancellationException
 
@@ -48,9 +49,20 @@ class PingPlugin(
     }
 }
 
-internal fun pingCommand(os: String, exe: String, host: String, count: Int, timeoutMs: Int): List<String> =
-    if (windowsOs(os)) listOf(exe, "-n", count.toString(), "-w", timeoutMs.toString(), host)
-    else listOf(exe, "-c", count.toString(), "-W", ((timeoutMs + 999) / 1000).coerceAtLeast(1).toString(), host)
+/**
+ * The argument list for this computer's ping. An IPv6 address (with or without a zone) gets `-6` on both systems, so a link-local
+ * address is not looked up as a name. On Linux (iputils, getopt) `--` ends the options before the host; Windows ping has no such
+ * marker. In both cases [host] has been validated and cannot start with a hyphen, and this refuses one that does.
+ */
+internal fun pingCommand(os: String, exe: String, host: String, count: Int, timeoutMs: Int): List<String> {
+    require(!host.startsWith("-")) { "A host that starts with a hyphen would be read as an option." }
+    val family = if (isIpv6Host(host)) listOf("-6") else emptyList()
+    return if (windowsOs(os)) listOf(exe, "-n", count.toString(), "-w", timeoutMs.toString()) + family + host
+    else listOf(exe, "-c", count.toString(), "-W", ((timeoutMs + 999) / 1000).coerceAtLeast(1).toString()) + family + listOf("--", host)
+}
+
+/** True for an IPv6 literal, with or without a `%zone`. */
+internal fun isIpv6Host(host: String): Boolean = ':' in host && IpLiteral.parseV6(host.substringBefore('%')) != null
 
 internal data class PingReport(
     val sent: Int,

@@ -175,7 +175,7 @@ class ReadmeShotsTest {
             ScanHit("192.168.50.$octet", if (n % 2 == 0) 80 else 443, n % 2 == 1, kind, title)
         }
         val plan = NetworkPlan(listOf(ScanNetwork(ScanInterface("Ethernet", "192.168.50.2", 24), "192.168.50.0/24", null, (1..254).map { "192.168.50.$it" })))
-        val session = ScanSession(scope)
+        val session = quietSession(scope)
         val progress = stateOf<NetworkProgress?>(session, "progress")
         val running = stateOf<Boolean>(session, "running")
         val seconds = stateOf<Long>(session, "durationSeconds")

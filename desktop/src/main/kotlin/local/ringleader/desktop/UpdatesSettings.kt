@@ -14,8 +14,12 @@ import local.ringleader.core.*
 internal object DesktopUpdates {
     val checker by lazy { UpdateChecker(AppVersion.value, UpdatePreferences(AppData.configDir.resolve("updates.properties"), SaveStatus::notice)) }
 }
-/** Same claim as the README: two HTTPS requests, this User-Agent, nothing about you or your servers. */
-internal const val UPDATE_CONSENT = "A check makes two HTTPS requests with User-Agent RingMASTER/<version> and nothing about you or your servers. GitHub sees normal web request details, including your IP address."
+/**
+ * What a check contacts and what it sends, with no count of requests: redirects change how many there are, and the hosts do not
+ * (UPDATE_HOSTS in core, which UpdatesCopyTest checks this text against). Same claims as the README: this User-Agent, nothing about you
+ * or your servers.
+ */
+internal const val UPDATE_CONSENT = "A check contacts github.com for the signed update feed and its signature, and follows GitHub's redirect to its release file server (release-assets.githubusercontent.com), nowhere else. It sends only an ordinary HTTPS request with User-Agent RingMASTER/<version> and nothing about you or your servers. GitHub sees normal web request details, including your IP address."
 private val updateWhen = java.time.format.DateTimeFormatter.ofPattern("d MMM yyyy, HH:mm").withZone(java.time.ZoneId.systemDefault())
 private val updateDay = java.time.format.DateTimeFormatter.ofPattern("d MMM yyyy").withZone(java.time.ZoneId.systemDefault())
 internal fun updateStateWords(state: UpdateState, consent: String? = null): String = when(state) {

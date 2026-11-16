@@ -78,7 +78,6 @@ import kotlin.math.cos
 import kotlin.math.sin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.yield
-import local.ringleader.core.CERTIFICATE_ERROR
 import local.ringleader.core.ConnectionProfile
 import local.ringleader.core.certificateOrigin
 import local.ringleader.core.DEFAULT_PASSWORD_USER
@@ -86,6 +85,7 @@ import local.ringleader.core.DIRECT_PVE_KIND
 import local.ringleader.core.DeskState
 import local.ringleader.core.ManualForm
 import local.ringleader.core.ManualTrust
+import local.ringleader.core.NormalTls
 import local.ringleader.core.VaultStatus
 import local.ringleader.core.completeLoginUser
 import local.ringleader.core.passwordUserAfterSwitch
@@ -96,9 +96,17 @@ import local.ringleader.core.ProfileDesk
 import local.ringleader.core.ScanHit
 import local.ringleader.core.ScanKind
 import local.ringleader.core.WorkspaceState
+import local.ringleader.core.connectionFailed
+import local.ringleader.core.connectionTrustLabel
 import local.ringleader.core.connectionKindLabel
+import local.ringleader.core.sessionOpen
 import local.ringleader.core.completeServerAddress
-import local.ringleader.core.probeTlsFingerprint
+import local.ringleader.core.canonicalOptionalPin
+import local.ringleader.core.ProbedCertificate
+import local.ringleader.core.ProfileDraft
+import local.ringleader.core.forgetCertificateQuestion
+import local.ringleader.core.NetworkFailure
+import local.ringleader.core.certificateDay
 
 private val DeskContentWidth = 1180.dp
 private val DeskSplitWidth = 1000.dp
@@ -111,17 +119,24 @@ private val ConnectPanelWidth = 520.dp
 @Composable fun DeskScreen(
     workspaceState: WorkspaceState, deskState: DeskState, desk: ProfileDesk, scanned: ScanHit? = null, initialScroll: Int = 0, onScan: () -> Unit = {},
     sessions: List<OpenSession> = emptyList(), activeSession: Long = 0, sessionNotice: String? = null,
-    onShowSession: (Long) -> Unit = {}, onDisconnectSession: (Long) -> Unit = {}, motion: MotionPreferences? = null, onOpenWorkspace: () -> Unit,
+    onShowSession: (Long) -> Unit = {}, onDisconnectSession: (Long) -> Unit = {}, motion: MotionPreferences? = null,
+    /** When [scanned] was picked (System.nanoTime), so its certificate offer lapses five minutes after the pick. Null: now. */
+    scannedAt: Long? = null,
+    /** Called when the scanned certificate's offer is over for good: cancelled, edited away or used. The window then forgets the pick. */
+    onScannedEnded: () -> Unit = {}, onOpenWorkspace: () -> Unit,
 ) {
     val motionPreferences = motion ?: remember { MotionPreferences() }
     val active = deskState.profiles.find { it.id == deskState.connectedProfileId }
     val scroll = rememberScrollState(initialScroll)
-    val inViewOpen = workspaceState.connected || workspaceState.demo
+    // A connection whose first read failed (certificate refused, server not reached) is not an open one: it gets no
+    // session card and does not turn Connect into Add connection. Its reason is in the messages below.
+    val inViewOpen = sessionOpen(workspaceState)
     // Anything open counts, in view or not: the Connect button then adds a connection.
     val anyOpen = inViewOpen || sessions.any { it.id != activeSession }
     val connectedProfiles = sessions.mapNotNull { it.profileId }.toSet() + listOfNotNull(deskState.connectedProfileId)
-    // The session in view was refused on the server's certificate: the saved connection's panel then reads that certificate.
-    val certificateRefused = workspaceState.address.takeIf { workspaceState.error == CERTIFICATE_ERROR && it.isNotBlank() }
+    // The session in view was refused on the server's certificate (any certificate cause of NetworkFailure): the saved
+    // connection's panel then reads that certificate.
+    val certificateRefused = workspaceState.address.takeIf { workspaceState.failure?.certificate == true && it.isNotBlank() }
     Box(Modifier.fillMaxSize()) {
         Column(
             Modifier.fillMaxSize().verticalScroll(scroll).padding(end = 12.dp),
@@ -136,7 +151,7 @@ private val ConnectPanelWidth = 520.dp
                             key(open.id) {
                                 val state by open.workspace.state.collectAsState()
                                 val inView = open.id == activeSession
-                                if (state.connected || state.demo) SessionCard(state, deskState.profiles.find { it.id == open.profileId }, inView.takeIf { sessions.size > 1 },
+                                if (sessionOpen(state)) SessionCard(state, deskState.profiles.find { it.id == open.profileId }, inView.takeIf { sessions.size > 1 },
                                     { if (!inView) onShowSession(open.id); onOpenWorkspace() }, number = (index + 1).takeIf { sessions.size > 1 }) { onDisconnectSession(open.id) }
                             }
                         }
@@ -145,11 +160,11 @@ private val ConnectPanelWidth = 520.dp
                     if (split) {
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.Top) {
                             SavedConnections(Modifier.weight(1f), deskState, desk, onScan, onOpenWorkspace, anyOpen, connectedProfiles, showQuickStart = scanned == null, certificateRefused = certificateRefused)
-                            ManualConnection(Modifier.width(ConnectPanelWidth), anyOpen, deskState, desk, scanned, motionPreferences, onOpenWorkspace)
+                            ManualConnection(Modifier.width(ConnectPanelWidth), anyOpen, deskState, desk, scanned, scannedAt, motionPreferences, onScannedEnded, onOpenWorkspace)
                         }
                     } else {
                         if (scanned == null) SavedConnections(Modifier.fillMaxWidth(), deskState, desk, onScan, onOpenWorkspace, anyOpen, connectedProfiles, showQuickStart = scanned == null, certificateRefused = certificateRefused)
-                        ManualConnection(Modifier.widthIn(max = ConnectPanelWidth).fillMaxWidth(), anyOpen, deskState, desk, scanned, motionPreferences, onOpenWorkspace)
+                        ManualConnection(Modifier.widthIn(max = ConnectPanelWidth).fillMaxWidth(), anyOpen, deskState, desk, scanned, scannedAt, motionPreferences, onScannedEnded, onOpenWorkspace)
                         if (scanned != null) SavedConnections(Modifier.fillMaxWidth(), deskState, desk, onScan, onOpenWorkspace, anyOpen, connectedProfiles, showQuickStart = scanned == null, certificateRefused = certificateRefused)
                     }
                 }
@@ -167,7 +182,16 @@ private val ConnectPanelWidth = 520.dp
         formError?.let { Text(it, color = Tech.Red, fontSize = 12.sp, fontFamily = Tech.Mono) }
         deskState.notice?.let { Text(it, color = Tech.Amber, fontSize = 12.sp, fontFamily = Tech.Mono) }
         sessionNotice?.let { Text(it, color = Tech.Amber, fontSize = 12.sp, fontFamily = Tech.Mono) }
-        workspaceState.error?.let { Text(it, color = Tech.Red, fontSize = 12.sp, fontFamily = Tech.Mono) }
+        workspaceState.error?.let { error ->
+            // With several connections open, a refusal has to say which server it came from.
+            val server = workspaceState.failedAddress.ifEmpty { workspaceState.address }
+            if (connectionFailed(workspaceState) && server.isNotEmpty()) {
+                Text("Connection to ${if (Appearance.showcase) "the server" else server} failed", Modifier.identity(), color = Tech.Red, fontSize = 12.sp, fontFamily = Tech.Mono)
+            }
+            Text(error, color = Tech.Red, fontSize = 12.sp, fontFamily = Tech.Mono)
+            // Each cause has its own next step; a certificate cause is handled in the panels below as well.
+            workspaceState.failure?.let { Text(it.nextStep, color = Tech.Muted, fontSize = 12.sp, lineHeight = 16.sp) }
+        }
     }
 }
 
@@ -246,7 +270,7 @@ private val ConnectPanelWidth = 520.dp
     val steps = listOf(
         Triple("01", "SIGN IN", "Password · your Proxmox VE user, for example root@pam, with a two-factor code if the account uses one.\nAPI token · PVE: Datacenter → Permissions → API Tokens → Add. PDM: Configuration → Access Control → API Token.\nThe token ID looks like user@realm!name; copy the secret once, it is shown only at creation."),
         Triple("02", "GRANT ACCESS", "Read-only fleet view · PVEAuditor on /.\nPower and snapshots · add VM.PowerMgmt and VM.Snapshot where you want them.\nWith privilege separation on, the token needs its own permissions."),
-        Triple("03", "PIN THE CERTIFICATE", "Self-signed servers · on the node run\nopenssl x509 -in /etc/pve/local/pve-ssl.pem -noout -fingerprint -sha256\nand paste the value after the = sign (colons are fine). Use pveproxy-ssl.pem if a custom certificate is installed."),
+        Triple("03", "PIN THE CERTIFICATE", "Self-signed servers · on the node run\nopenssl x509 -in /etc/pve/local/pve-ssl.pem -noout -fingerprint -sha256\nand paste the fingerprint; the whole output line is fine. Use pveproxy-ssl.pem if a custom certificate is installed."),
     )
     steps.forEach { (n, title, body) ->
         Row(Modifier.fillMaxWidth().border(1.dp, Tech.Edge, Tech.Control).background(Tech.Black.copy(alpha = .4f)).padding(10.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -356,6 +380,7 @@ private val ConnectPanelWidth = 520.dp
         CompactDeskField(draft.origin, { desk.updateDraft(draft.displayName, it, draft.tokenId, draft.sha256Pin) }, "Server address", originHint(draft.kind), identity = true)
         CompactDeskField(draft.tokenId, { desk.updateDraft(draft.displayName, draft.origin, it, draft.sha256Pin) }, if (passwordMode) "User · user@realm, for example root@pam" else "API token ID · user@realm!token", identity = true, passwordUser = passwordMode && draft.kind == DIRECT_PVE_KIND)
         CompactDeskField(draft.sha256Pin, { desk.updateDraft(draft.displayName, draft.origin, draft.tokenId, it) }, "Trusted certificate SHA-256 · optional")
+        EditorCertificateCheck(draft, desk)
         Text("Passwords and token secrets are not part of a profile; you enter them when you connect. Saving a different server, user, token ID, certificate pin, or connection kind on the connection in use disconnects that session.", style = MaterialTheme.typography.bodySmall, color = Tech.Muted)
         if (draft.id != null && draft.id in deskState.remembered) {
             Text("Changing the server, kind, user or token ID, or pin forgets the remembered secret.", color = Tech.Muted, fontSize = 12.sp)
@@ -373,6 +398,45 @@ private val ConnectPanelWidth = 520.dp
             }
             TechAction("Cancel", onClick = desk::cancelEdit)
         }
+    }
+}
+
+/**
+ * The editor's certificate step (network audit W3): read the server's certificate, compare it with the draft's pin, and
+ * "Use this certificate" fills the draft pin with it and its key. Nothing is trusted until Save profile, which stays the
+ * approval. An out-of-date certificate cannot be used.
+ */
+@Composable private fun EditorCertificateCheck(draft: ProfileDraft, desk: ProfileDesk) {
+    val scope = rememberCoroutineScope()
+    val target = completeServerAddress(draft.origin, draft.kind)
+    var read by remember(draft.id, target) { mutableStateOf<ProbedCertificate?>(null) }
+    var checking by remember(draft.id) { mutableStateOf(false) }
+    var problem by remember(draft.id, target) { mutableStateOf<String?>(null) }
+    val shownServer = if (Appearance.showcase) "this server" else target
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        MiniAction(if (read == null) "Check server certificate" else "Re-check server certificate", enabled = target.isNotBlank() && !checking) {
+            scope.launch {
+                checking = true; problem = null
+                val certificate = try { certificateProbe(target) } finally { checking = false }
+                if (certificate != null) read = certificate else problem = "No certificate could be read from $shownServer. Check the address and that this computer can reach it."
+            }
+        }
+        if (checking) Text("Checking server certificate…", color = Tech.Muted, fontSize = 12.sp)
+    }
+    problem?.let { Text(it, color = Tech.Red, fontSize = 12.sp) }
+    val certificate = read ?: return
+    val known = runCatching { canonicalOptionalPin(draft.sha256Pin) }.getOrNull()
+    val trust = ManualTrust(known = listOfNotNull(known), observed = certificate.fingerprint,
+        knownKeys = listOfNotNull(draft.key?.let { it.pin to it.spki }).toMap(), certificate = certificate,
+        observedOutOfDate = !certificate.validAt(java.time.Instant.now()))
+    known?.let { Text("Known SHA-256: ${if (Appearance.showcase) "Hidden" else it}", Modifier.identity(), fontFamily = Tech.Mono, fontSize = 11.sp, color = Tech.Muted) }
+    Text("${if (trust.changed) "Certificate changed" else "Server certificate"} \u00b7 $shownServer", color = Tech.Amber, fontSize = 12.sp)
+    Text("Observed SHA-256: ${if (Appearance.showcase) "Hidden" else certificate.fingerprint}", Modifier.identity(), fontFamily = Tech.Mono, fontSize = 11.sp, color = Tech.Amber)
+    CertificateDetails(trust)
+    if (known == certificate.fingerprint) Text("The pin above is this server's certificate.", color = Tech.Muted, fontSize = 12.sp)
+    else if (!trust.observedOutOfDate) Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        MiniAction("Use this certificate") { desk.useCertificateInDraft(certificate) }
+        Text("Compare it with the server's fingerprint first. Nothing is trusted until you save the profile.", Modifier.weight(1f, fill = false), color = Tech.Muted, fontSize = 12.sp)
     }
 }
 
@@ -398,14 +462,17 @@ private val ConnectPanelWidth = 520.dp
         val scope = rememberCoroutineScope()
         // A profile without its own certificate pin trusts what the Connect form trusts: the certificate approved for this
         // address and port. With none yet, the certificate is read first and trust stays an explicit click, as there.
+        // A profile WITH its own pin gets the same step after a certificate refusal: its pin is the known certificate,
+        // and an explicit approval here replaces it (same key: one click; otherwise with the replacement checkbox).
         val pinless = profile.sha256Pin == null
-        var seen by remember(profile.id, profile.origin) { mutableStateOf<String?>(null) }
+        var seenCertificate by remember(profile.id, profile.origin, profile.sha256Pin) { mutableStateOf<ProbedCertificate?>(null) }
+        val seen = seenCertificate?.fingerprint
         var checking by remember(profile.id) { mutableStateOf(false) }
         var checkError by remember(profile.id, profile.origin) { mutableStateOf<String?>(null) }
         var trustRevision by remember(profile.id) { mutableStateOf(0) }
         var replacementChecked by remember(profile.id, seen) { mutableStateOf(false) }
-        val trust = remember(profile.id, profile.origin, pinless, seen, deskState.profiles, deskState.saveBlocked, trustRevision) {
-            if (pinless) desk.manualTrust(profile.origin, seen) else ManualTrust()
+        val trust = remember(profile, pinless, seen, deskState.profiles, deskState.saveBlocked, trustRevision, deskState.trustGeneration) {
+            if (pinless) desk.manualTrust(profile.origin, seen, seenCertificate) else desk.profileTrust(profile, seenCertificate)
         }
         val canConnect = deskState.profileSecretPresent || (remembered && vaultReady && !deskState.vaultBusy)
         val shownServer = if (Appearance.showcase) "this server" else profile.origin
@@ -414,8 +481,8 @@ private val ConnectPanelWidth = 520.dp
                 checking = true
                 checkError = null
                 val origin = profile.origin
-                val fingerprint = try { probeTlsFingerprint(origin) } finally { checking = false }
-                if (fingerprint != null) { seen = fingerprint; trustRevision++ }
+                val certificate = try { certificateProbe(origin) } finally { checking = false }
+                if (certificate != null) { seenCertificate = certificate; trustRevision++ }
                 else checkError = "No certificate could be read from $shownServer. Check that this computer can reach it."
             }
         }
@@ -429,17 +496,17 @@ private val ConnectPanelWidth = 520.dp
             trustRevision++
         }
         // Enter connects as it always did, and never approves new or changed trust: once a certificate has been read and
-        // needs approval, only Trust and connect goes on. A server with a certificate this computer trusts needs no check.
+        // needs approval, only the explicit button goes on. A server with a certificate this computer trusts needs no check.
         val submit = {
             when {
                 !canConnect -> Unit
-                pinless && (trust.needsApproval || trust.conflict) -> Unit
+                trust.needsApproval || trust.conflict -> Unit
                 else -> connect(false, false)
             }
         }
         // TLS refused this server's certificate on the last try: read it now, so the way forward is on screen.
-        val refusedHere = pinless && certificateRefused != null && runCatching { certificateOrigin(certificateRefused) == certificateOrigin(profile.origin) }.getOrDefault(false)
-        LaunchedEffect(profile.id, refusedHere) { if (refusedHere && seen == null && trust.known.isEmpty()) checkCertificate() }
+        val refusedHere = certificateRefused != null && runCatching { certificateOrigin(certificateRefused) == certificateOrigin(profile.origin) }.getOrDefault(false)
+        LaunchedEffect(profile.id, refusedHere) { if (refusedHere && seen == null) checkCertificate() }
         val explanation = when {
             remembered && password -> "The password is remembered on this computer. Leave the field empty to use it, or type a new one."
             remembered -> "The token secret is remembered on this computer. Leave the field empty to use it, or type a new one."
@@ -451,36 +518,98 @@ private val ConnectPanelWidth = 520.dp
         if (password) CompactDeskField(otp, { otp = it.filter { c -> !c.isWhitespace() }.take(64) }, "Two-factor code · only if the account uses one", onSubmit = submit)
         if (!web) RememberRow(deskState, desk, profile.id, remembered)
         if (deskState.vaultBusy) Text("Reading the remembered secret…", color = Tech.Muted, fontSize = 12.sp)
-        if (pinless) {
+        if (pinless || refusedHere || seen != null) {
             if (checking) Text("Checking server certificate…", color = Tech.Muted, fontSize = 12.sp)
             checkError?.let { Text(it, color = Tech.Red, fontSize = 12.sp) }
             trust.error?.let { Text(it, color = Tech.Red, fontSize = 12.sp) }
             trust.known.forEach { known ->
-                Text("Known SHA-256: ${if (Appearance.showcase) "Hidden" else known}", fontFamily = Tech.Mono, fontSize = 11.sp, color = Tech.Muted)
+                Text("Known SHA-256: ${if (Appearance.showcase) "Hidden" else known}", Modifier.identity(), fontFamily = Tech.Mono, fontSize = 11.sp, color = Tech.Muted)
             }
-            if (trust.known.isNotEmpty()) Text(if (trust.savedPin) "Trusted through another saved connection to this server." else "Approved certificate for this server address and port.", color = Tech.Muted, fontSize = 11.sp)
+            if (trust.known.isNotEmpty()) Text(when {
+                !pinless -> "This profile's pinned certificate."
+                trust.savedPin -> "Trusted through another saved connection to this server."
+                else -> "Approved certificate for this server address and port."
+            }, color = Tech.Muted, fontSize = 11.sp)
             seen?.let { fingerprint ->
                 Text("${if (trust.changed) "Certificate changed" else "Server certificate"} \u00b7 $shownServer", color = Tech.Amber, fontSize = 12.sp)
-                Text("Observed SHA-256: ${if (Appearance.showcase) "Hidden" else fingerprint}", fontFamily = Tech.Mono, fontSize = 11.sp, color = Tech.Amber)
-                if (trust.needsApproval) Text("Compare with the server's fingerprint before trusting. Approval is remembered for this address and port, even if sign-in fails. No password is saved.", color = Tech.Muted, fontSize = 12.sp)
+                Text("Observed SHA-256: ${if (Appearance.showcase) "Hidden" else fingerprint}", Modifier.identity(), fontFamily = Tech.Mono, fontSize = 11.sp, color = Tech.Amber)
+                SameCertificateAs(trust)
+                CertificateDetails(trust)
+                if (trust.needsApproval && trust.canApprove) Text(
+                    if (pinless) "Compare with the server's fingerprint before trusting. Approval is remembered for this address and port, even if sign-in fails. No password is saved."
+                    else "Compare with the server's fingerprint before trusting. Approval replaces this profile's pin, even if sign-in fails. No password is saved.",
+                    color = Tech.Muted, fontSize = 12.sp)
             }
             if (trust.conflict) Text("Saved pins conflict. Review saved connections and remembered trust before connecting.", color = Tech.Red, fontSize = 12.sp)
-            if (trust.changed && trust.canApprove) TechCheck(replacementChecked, { replacementChecked = it }, "Replace the known certificate with this one")
+            if (trust.changed && trust.canApprove && !trust.sameKey) TechCheck(replacementChecked, { replacementChecked = it }, "Replace the known certificate with this one")
             if (refusedHere && trust.known.isEmpty()) Text("The last connection was refused on the server's certificate. A self-signed server needs its certificate approved once.", color = Tech.Amber, fontSize = 12.sp)
-            else if (seen == null && trust.known.isEmpty() && trust.error == null) Text("No certificate is approved for this server yet. A self-signed server, such as a new Proxmox VE install, needs its certificate checked and approved once.", color = Tech.Muted, fontSize = 12.sp)
-            if (seen == null && !checking) MiniAction(if (trust.known.isEmpty()) "Check server certificate" else "Re-check server certificate") { checkCertificate() }
+            else if (pinless && seen == null && trust.known.isEmpty() && trust.error == null) Text("No certificate is approved for this server yet. A self-signed server, such as a new Proxmox VE install, needs its certificate checked and approved once.", color = Tech.Muted, fontSize = 12.sp)
+            if (seen == null && !checking) MiniAction(if (trust.known.isEmpty() || !pinless) "Check server certificate" else "Re-check server certificate") { checkCertificate() }
         }
+        // Normal TLS works only for a server whose certificate this computer already trusts, and a private one never is.
+        // Once the certificate has been read the platform is asked; the button stays until it has said no.
+        val normalTlsOffered = pinless && trust.needsApproval && trust.known.isEmpty() && trust.error == null
+        val normalTls = rememberNormalTls(profile.origin, normalTlsOffered, profile.id, seen)
+        val normalTlsRefused = normalTlsOffered && normalTls == NormalTls.Refused
+        if (normalTlsRefused) NormalTlsRefusedNote()
         FlowRow(horizontalArrangement = Arrangement.spacedBy(Tech.Space12), verticalArrangement = Arrangement.spacedBy(Tech.Space8)) {
-            if (pinless && trust.needsApproval) {
-                TechAction(if (trust.changed) "Replace trust and connect" else "Trust and connect", active = true,
-                    enabled = canConnect && trust.canApprove && (!trust.changed || replacementChecked)) { connect(true, false) }
-                if (trust.known.isEmpty() && trust.error == null) TechAction("Connect with normal TLS", enabled = canConnect) { connect(false, true) }
+            if (trust.needsApproval) {
+                TrustAction(trust, canConnect, replacementChecked) { connect(true, false) }
+                if (pinless && trust.known.isEmpty() && trust.error == null && !normalTlsRefused) TechAction("Connect with normal TLS", enabled = canConnect) { connect(false, true) }
             } else {
-                TechAction("Connect", active = true, enabled = canConnect && !(pinless && trust.conflict), onClick = submit)
+                TechAction("Connect", active = true, enabled = canConnect && !trust.conflict, onClick = submit)
             }
             TechAction("Clear secret", onClick = desk::discardSecrets)
         }
     }
+}
+
+/**
+ * The explicit approval button for a certificate that needs it: "Trust and connect" for a new one, "Replace trust and
+ * connect" (with the replacement checkbox) for a changed one, and "Accept renewed certificate and connect" in one click
+ * when the server kept its key. Disabled for an out-of-date certificate. Enter never reaches it.
+ */
+@Composable private fun TrustAction(trust: ManualTrust, canConnect: Boolean, replacementChecked: Boolean, onApprove: () -> Unit) {
+    when {
+        trust.sameKey -> TechAction("Accept renewed certificate and connect", active = true, enabled = canConnect && trust.canApprove, onClick = onApprove)
+        trust.changed -> TechAction("Replace trust and connect", active = true, enabled = canConnect && trust.canApprove && replacementChecked, onClick = onApprove)
+        else -> TechAction("Trust and connect", active = true, enabled = canConnect && trust.canApprove, onClick = onApprove)
+    }
+}
+
+/**
+ * What the certificate check read, to compare before trusting: subject, issuer, validity, and for a changed certificate
+ * whether the server kept its key. An out-of-date certificate says its date and this computer's clock and is not offered.
+ * Showcase hides the subject and issuer.
+ */
+@Composable internal fun CertificateDetails(trust: ManualTrust) {
+    val certificate = trust.certificate ?: return
+    val hide = Appearance.showcase
+    Text("Subject: ${if (hide) "Hidden" else certificate.subject}", Modifier.identity(), fontFamily = Tech.Mono, fontSize = 11.sp, color = Tech.Muted)
+    Text("Issuer: ${if (hide) "Hidden" else certificate.issuer}", Modifier.identity(), fontFamily = Tech.Mono, fontSize = 11.sp, color = Tech.Muted)
+    Text("Valid ${certificateDay(certificate.notBefore)} to ${certificateDay(certificate.notAfter)}", fontFamily = Tech.Mono, fontSize = 11.sp, color = Tech.Muted)
+    if (trust.changed && !trust.conflict) Text("Same key as before: " + when {
+        trust.sameKey -> "yes"
+        trust.keyChanged -> "no"
+        else -> "not known (no key was recorded with the approved certificate)"
+    }, fontFamily = Tech.Mono, fontSize = 11.sp, color = if (trust.keyChanged) Tech.Red else Tech.Muted)
+    if (trust.sameKey && trust.canApprove) Text("The server renewed its certificate with the same key. Proxmox does this when it renews its own certificate. " +
+        "Compare the new fingerprint with the server's, then accept it with one click.", color = Tech.Amber, fontSize = 12.sp)
+    if (trust.observedOutOfDate) {
+        val now = java.time.Instant.now()
+        val dates = NetworkFailure.CertificateDates(now.isAfter(certificate.notAfter), now, certificate.notBefore, certificate.notAfter)
+        Text("${dates.sentence} It cannot be accepted: renew it on the server (pvecm updatecerts --force) or correct this computer's clock.", color = Tech.Red, fontSize = 12.sp)
+    }
+}
+
+/**
+ * The observed certificate is the one already approved or pinned for another address (network audit M3). It still needs
+ * the explicit Trust and connect here: two names with one certificate may be two machines that share a cloned key.
+ */
+@Composable private fun SameCertificateAs(trust: ManualTrust) {
+    if (trust.sameAs.isEmpty() || !trust.needsApproval) return
+    val names = if (Appearance.showcase) "another server you approved" else trust.sameAs.take(3).joinToString(", ") + if (trust.sameAs.size > 3) " and ${trust.sameAs.size - 3} more" else ""
+    Text("Same certificate as $names. Trusting it here is still your decision for this address.", if (Appearance.showcase) Modifier else Modifier.identity(), color = Tech.Muted, fontSize = 12.sp, lineHeight = 16.sp)
 }
 
 @Composable private fun RememberRow(deskState: DeskState, desk: ProfileDesk, profileId: String, remembered: Boolean) {
@@ -509,31 +638,49 @@ private fun rememberHelp(vaultName: String): String = when {
     else -> "Kept in your password safe, and only after the sign-in works. Programs you run can read it while the safe is unlocked."
 }
 
-@Composable private fun ManualConnection(modifier: Modifier, anyOpen: Boolean, deskState: DeskState, desk: ProfileDesk, scanned: ScanHit?, motion: MotionPreferences, onOpenWorkspace: () -> Unit) {
-    // A scan result fills the form; otherwise it opens with what was typed last (never a secret), so that a refused sign-in
-    // or a look at another page does not empty the server address.
-    var address by remember(scanned) { mutableStateOf(scanned?.origin ?: desk.manualForm.address) }
+@Composable private fun ManualConnection(modifier: Modifier, anyOpen: Boolean, deskState: DeskState, desk: ProfileDesk, scanned: ScanHit?, scannedAt: Long?, motion: MotionPreferences, onScannedEnded: () -> Unit, onOpenWorkspace: () -> Unit) {
+    // The form opens with what it held last (never a secret), so that a refused sign-in or a look at another page does not empty the server
+    // address. A picked scan result was put into it when it was picked, so what is typed after that is the person's own and stays;
+    // the pick fills the form here only where it holds nothing.
+    val start = remember { scanFormStart(desk.manualForm, scanned) }
+    var address by remember { mutableStateOf(start.address) }
     var tokenId by remember { mutableStateOf(desk.manualForm.tokenId) }
     // The first start keeps API token. Password mode fills the usual user; the choice itself is the only thing remembered.
     var passwordChoice by remember { mutableStateOf(motion.option(DESK_PASSWORD_MODE, false)) }
     var user by remember { mutableStateOf(desk.manualForm.user.ifBlank { if (passwordChoice) DEFAULT_PASSWORD_USER else "" }) }
     var otp by remember(deskState.secretGeneration) { mutableStateOf("") }
-    var fingerprint by remember(scanned) { mutableStateOf("") }
-    var kind by remember(scanned) { mutableStateOf(if (scanned != null) (if (scanned.kind == ScanKind.PDM) PDM_KIND else DIRECT_PVE_KIND) else desk.manualForm.kind) }
+    var fingerprint by remember { mutableStateOf("") }
+    var kind by remember { mutableStateOf(start.kind) }
     val passwordMode = passwordChoice && kind == DIRECT_PVE_KIND
     androidx.compose.runtime.SideEffect { desk.manualForm = ManualForm(address, tokenId, user, kind) }
-    // An edit permanently invalidates this scan offer, even if the address is later restored.
-    val scanOffer = remember(scanned) { ScannedPinOffer(scanned?.origin.orEmpty(), kind, scanned?.fingerprint) }
-    var manualOffer by remember(scanned) { mutableStateOf<ScannedPinOffer?>(null) }
-    var scanExpired by remember(scanned) { mutableStateOf(false) }
-    var scanValid by remember(scanned) { mutableStateOf(true) }
+    // An edit permanently invalidates this scan offer, even if the address is later restored, and the window forgets the pick (so
+    // leaving the Desk and coming back cannot bring the offer back). Timed from the pick, not from this composition.
+    val scanOffer = remember(scanned, scannedAt) { ScannedPinOffer(scanned?.origin.orEmpty(), kind, scanned?.fingerprint, created = scannedAt) }
+    var manualOffer by remember { mutableStateOf<ScannedPinOffer?>(null) }
+    var probed by remember { mutableStateOf<ProbedCertificate?>(null) }
+    var scanExpired by remember { mutableStateOf(false) }
+    var scanValid by remember { mutableStateOf(true) }
     var probingCert by remember { mutableStateOf(false) }
     var probeError by remember { mutableStateOf<String?>(null) }
     var replacementChecked by remember(scanned, address, kind) { mutableStateOf(false) }
     var trustRevision by remember { mutableStateOf(0) }
+    var forgetAsked by remember(address) { mutableStateOf(false) }
     val currentOffer = manualOffer ?: scanOffer
+    // The offer is looked at again every second while it is on screen, and at the moment it lapses: its age and what is left are shown,
+    // and when it lapses the approval goes away then, not on the next unrelated change.
+    var tick by remember { mutableStateOf(0L) }
+    LaunchedEffect(currentOffer) {
+        while (currentOffer.live()) {
+            val untilLapse = currentOffer.remainingNanos() / 1_000_000L + 2
+            kotlinx.coroutines.delay(minOf(ScanOfferClock.tickMillis, untilLapse).coerceAtLeast(1))
+            tick++
+        }
+    }
+    @Suppress("UNUSED_VARIABLE") val ticked = tick
     val observed = currentOffer.current(address, kind).takeIf { scanValid }
-    val trust = remember(address, observed, deskState.profiles, deskState.saveBlocked, trustRevision) { desk.manualTrust(address, observed) }
+    val trust = remember(address, observed, probed, deskState.profiles, deskState.saveBlocked, trustRevision, deskState.trustGeneration) {
+        desk.manualTrust(address, observed, probed?.takeIf { observed != null && it.fingerprint == runCatching { canonicalOptionalPin(observed) }.getOrNull() })
+    }
     // A host typed without https://. The certificate check completes it; until then it is not yet a server address.
     val bare = address.isNotBlank() && "://" !in address
     val scope = rememberCoroutineScope()
@@ -546,12 +693,13 @@ private fun rememberHelp(vaultName: String): String = when {
             scope.launch {
                 probingCert = true
                 probeError = null
-                val fp = try { probeTlsFingerprint(target) } finally { probingCert = false }
+                val read = try { certificateProbe(target) } finally { probingCert = false }
                 // The answer belongs to the address and kind it was asked for; an edit made meanwhile wins.
                 if (address != typed || kind != probeKind) return@launch
                 address = target
-                if (fp != null) {
-                    manualOffer = ScannedPinOffer(target, probeKind, fp)
+                if (read != null) {
+                    probed = read
+                    manualOffer = ScannedPinOffer(target, probeKind, read.fingerprint.chunked(2).joinToString(":") { it.uppercase() })
                     scanValid = true
                     scanExpired = false
                     trustRevision++
@@ -567,7 +715,7 @@ private fun rememberHelp(vaultName: String): String = when {
             HelpTip("A new connection opens beside the ones already open; nothing is replaced. Verify private certificate fingerprints with your administrator.") {
                 Text(if (anyOpen) "Opens beside the open connection · secrets stay in memory" else "Connect without saving a profile · secrets stay in memory", fontSize = 11.sp, lineHeight = 15.sp, color = Tech.Muted, fontFamily = Tech.Mono)
             }
-            KindChoice(kind) { if (kind != it) { scanValid = false; scanOffer.invalidate(); manualOffer = null; fingerprint = "" }; kind = it }
+            KindChoice(kind) { if (kind != it) { scanValid = false; scanOffer.invalidate(); manualOffer = null; fingerprint = ""; onScannedEnded() }; kind = it }
             if (kind == DIRECT_PVE_KIND) AuthChoice(passwordMode) { chosen ->
                 passwordChoice = chosen
                 motion.put(DESK_PASSWORD_MODE, chosen)
@@ -585,7 +733,7 @@ private fun rememberHelp(vaultName: String): String = when {
                             otp = if (passwordMode) otp.ifBlank { null } else null, passwordLogin = login,
                             observed = if (normalTls) null else observed, approval = if (approve) trust else null)
                     trustRevision++
-                    if (opened) onOpenWorkspace()
+                    if (opened) { onScannedEnded(); onOpenWorkspace() }
                 }
             }
             // Enter in a secret field never approves new or changed trust; probes unknown cert first.
@@ -599,7 +747,7 @@ private fun rememberHelp(vaultName: String): String = when {
                 }
             }
             CompactDeskField(address, {
-                if (address != it) { scanValid = false; scanOffer.invalidate(); manualOffer = null; probeError = null; fingerprint = "" }
+                if (address != it) { scanValid = false; scanOffer.invalidate(); manualOffer = null; probeError = null; fingerprint = ""; onScannedEnded() }
                 address = it
             }, "Server address", identity = true)
             if (passwordMode) {
@@ -617,6 +765,7 @@ private fun rememberHelp(vaultName: String): String = when {
                 MiniAction(if (trust.known.isEmpty()) "Check server certificate" else "Re-check server certificate", onClick = probeAction)
             }
             if (scanExpired) Text("Scan offer expired. Scan again before trusting a certificate.", color = Tech.Red, fontSize = 12.sp)
+            else if (manualOffer == null && scanValid && scanOffer.expired()) Text("The scanned certificate is more than five minutes old. Check the server certificate again before trusting it.", color = Tech.Amber, fontSize = 12.sp)
             if (address.isNotBlank()) {
                 if (bare) Text("Will be checked as ${if (Appearance.showcase) "an HTTPS address" else completeServerAddress(address, kind)}", color = Tech.Muted, fontSize = 11.sp, fontFamily = Tech.Mono)
                 else trust.error?.let { Text(it, color = Tech.Red, fontSize = 12.sp) }
@@ -625,21 +774,38 @@ private fun rememberHelp(vaultName: String): String = when {
                 }
                 if (trust.known.isNotEmpty()) {
                     Text(if (trust.savedPin) "Includes saved-profile trust. Edit that profile to change its pin." else "Approved certificate for this server address and port.", color = Tech.Muted, fontSize = 11.sp)
-                    MiniAction("Forget remembered certificate") { desk.forgetManualTrust(address); trustRevision++ }
+                    // One question first (network audit F4); nothing is forgotten by the first click.
+                    if (!forgetAsked) MiniAction("Forget remembered certificate") { forgetAsked = true }
+                    else TechPanel(Modifier.fillMaxWidth(), rail = Tech.Amber, padding = 8.dp) {
+                        Text(forgetCertificateQuestion(if (Appearance.showcase) "this server" else runCatching { certificateOrigin(address) }.getOrDefault(address)),
+                            Modifier.identity(), color = Tech.Ink, fontSize = 12.sp, lineHeight = 16.sp)
+                        Spacer(Modifier.height(8.dp))
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(Tech.Space12), verticalArrangement = Arrangement.spacedBy(Tech.Space8)) {
+                            TechAction("Forget certificate", active = true) { desk.forgetManualTrust(address); forgetAsked = false; trustRevision++ }
+                            TechAction("Keep") { forgetAsked = false }
+                        }
+                    }
                 }
                 observed?.let { seen ->
-                    Text("${if (trust.changed) "Certificate changed" else "Scanned certificate"} \u00b7 ${if (Appearance.showcase) "Hidden server" else address}", color = Tech.Amber, fontSize = 12.sp)
-                    Text("Observed SHA-256: ${if (Appearance.showcase) "Hidden" else seen}", fontFamily = Tech.Mono, fontSize = 11.sp, color = Tech.Amber)
+                    Text("${if (trust.changed) "Certificate changed" else if (manualOffer != null) "Server certificate" else "Scanned certificate"} \u00b7 ${if (Appearance.showcase) "Hidden server" else address}", color = Tech.Amber, fontSize = 12.sp)
+                    Text("${if (manualOffer != null) "Checked" else "Scanned"} ${offerAgeText(currentOffer.ageNanos())}. This offer lapses in ${offerRemainingText(currentOffer.remainingNanos())}.", color = Tech.Muted, fontSize = 11.sp)
+                    Text("Observed SHA-256: ${if (Appearance.showcase) "Hidden" else seen}", Modifier.identity(), fontFamily = Tech.Mono, fontSize = 11.sp, color = Tech.Amber)
+                    SameCertificateAs(trust)
+                    CertificateDetails(trust)
                     if (trust.needsApproval) Text("Compare with the server's fingerprint before trusting. Approval is remembered for this address and port, even if sign-in fails. No password is saved.", color = Tech.Muted, fontSize = 12.sp)
                 }
                 if (trust.conflict) Text("Saved pins conflict. Review saved connections and remembered trust before connecting.", color = Tech.Red, fontSize = 12.sp)
-                if (trust.changed && trust.canApprove) TechCheck(replacementChecked, { replacementChecked = it }, "Replace the known certificate with this scanned certificate")
-                if (trust.needsApproval) MiniAction("Cancel scanned certificate") { scanValid = false; scanOffer.invalidate(); manualOffer = null; replacementChecked = false }
+                if (trust.changed && trust.canApprove && !trust.sameKey) TechCheck(replacementChecked, { replacementChecked = it }, "Replace the known certificate with this scanned certificate")
+                if (trust.needsApproval) MiniAction("Cancel scanned certificate") { scanValid = false; scanOffer.invalidate(); manualOffer = null; replacementChecked = false; onScannedEnded() }
             }
+            // As for a saved profile: normal TLS is offered until the platform has said it cannot verify this certificate.
+            val normalTlsOffered = trust.needsApproval && trust.known.isEmpty() && trust.error == null
+            val normalTls = rememberNormalTls(address, normalTlsOffered, observed, kind)
+            val normalTlsRefused = normalTlsOffered && normalTls == NormalTls.Refused
+            if (normalTlsRefused) NormalTlsRefusedNote()
             if (trust.needsApproval) Column(verticalArrangement = Arrangement.spacedBy(Tech.Space8)) {
-                TechAction(if (trust.changed) "Replace trust and connect" else "Trust and connect", active = true,
-                    enabled = canConnect && trust.canApprove && (!trust.changed || replacementChecked)) { connect(true, false) }
-                if (trust.known.isEmpty() && trust.error == null) TechAction("Connect with normal TLS", enabled = canConnect && fingerprint.isBlank()) { connect(false, true) }
+                TrustAction(trust, canConnect, replacementChecked) { connect(true, false) }
+                if (trust.known.isEmpty() && trust.error == null && !normalTlsRefused) TechAction("Connect with normal TLS", enabled = canConnect && fingerprint.isBlank()) { connect(false, true) }
                 TechAction("Explore demo") { if (desk.exploreDemo()) onOpenWorkspace() }
             } else FlowRow(horizontalArrangement = Arrangement.spacedBy(Tech.Space12), verticalArrangement = Arrangement.spacedBy(Tech.Space8)) {
                 TechAction(if (anyOpen) "Add connection" else "Connect", active = true,
@@ -763,10 +929,14 @@ internal fun submitOnEnter(event: KeyEvent, onSubmit: (() -> Unit)?): Boolean {
     }
 }
 
-private fun sessionText(state: WorkspaceState, active: ConnectionProfile?) = when {
-    state.demo -> "Demo workspace is open."
-    active != null && state.connected -> "Connected with ${active.displayName} · ${connectionKindLabel(active.kind)} · ${active.origin}"
-    else -> "Current connection: ${connectionKindLabel(state.kind)} · ${state.address}"
+private fun sessionText(state: WorkspaceState, active: ConnectionProfile?): String {
+    val base = when {
+        state.demo -> return "Demo workspace is open."
+        active != null && state.connected -> "Connected with ${active.displayName} · ${connectionKindLabel(active.kind)} · ${active.origin}"
+        else -> "Current connection: ${connectionKindLabel(state.kind)} · ${state.address}"
+    }
+    // How the server is trusted: a pin, or normal TLS and which store accepted it (PlatformTrust).
+    return connectionTrustLabel(state)?.let { "$base · $it" } ?: base
 }
 
 /**

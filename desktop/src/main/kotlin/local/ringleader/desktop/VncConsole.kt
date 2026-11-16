@@ -438,7 +438,7 @@ private class ConsoleFrameSnap {
             lease.session.onUpdate = null
             lease.session.onClosed = null
             lease.release(keep = false)
-        } else live.close()
+        } else live.closeInBackground()
         session.value = null
     }
     val hardware = state.inspection?.takeIf { it.resource == guest.resource && it.node == guest.node }?.hardware?.value

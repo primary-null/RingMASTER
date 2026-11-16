@@ -2,7 +2,6 @@ package local.ringleader.core
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runInterruptible
-import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -48,7 +47,7 @@ class LiveScheduleGateway internal constructor(private val transport: ProxmoxTra
         catch (e: SessionExpiredException) { throw ScheduleRefusedException(401) }
         catch (e: StorageRejected) { throw ScheduleRefusedException(e.status) }
         catch (e: StorageUnclear) { throw ScheduleUncertainException() }
-        catch (e: java.io.IOException) { throw ScheduleNotSentException("The server could not be reached securely. Nothing was sent.") }
+        catch (e: java.io.IOException) { throw ScheduleNotSentException(scheduleNotSentReason(e)) }
     }
 
     override suspend fun guests(connection: Connection): List<Guest> = runInterruptible(Dispatchers.IO) {
@@ -77,7 +76,7 @@ class LiveScheduleGateway internal constructor(private val transport: ProxmoxTra
             catch (e: StorageRejected) { throw ScheduleRefusedException(e.status) }
             catch (e: StorageUnclear) { throw ScheduleUncertainException() }
             catch (e: StorageCancelledBeforeSend) { throw ScheduleNotSentException("The run was stopped before sending. Nothing was sent.") }
-            catch (e: java.io.IOException) { throw ScheduleNotSentException("The server could not be reached securely. Nothing was sent.") }
+            catch (e: java.io.IOException) { throw ScheduleNotSentException(scheduleNotSentReason(e)) }
         try { parseAcceptedUpid(raw, node, vmid) } catch (e: PowerResponseUnclearException) { throw ScheduleUncertainException() }
     }
 
@@ -91,7 +90,7 @@ class LiveScheduleGateway internal constructor(private val transport: ProxmoxTra
 }
 
 private fun dataObject(body: String): JsonObject =
-    (runCatching { Json.parseToJsonElement(body) }.getOrNull() as? JsonObject)?.get("data") as? JsonObject
+    (runCatching { serverJson(body) }.getOrNull() as? JsonObject)?.get("data") as? JsonObject
         ?: error("The server returned an unreadable answer.")
 
 private fun plain(row: JsonObject, key: String): String? {

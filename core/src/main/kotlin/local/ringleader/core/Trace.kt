@@ -6,7 +6,7 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import kotlinx.serialization.json.*
 
-enum class TraceSource { PveApi, PdmApi, Auth, Console, Terminal, Task, LiveLoop, Scan, Tools, Vpn, Bluetooth, Settings, App, Web }
+enum class TraceSource { PveApi, PdmApi, Auth, Console, Terminal, Task, LiveLoop, Scan, Tools, Vpn, Bluetooth, Settings, App, Web, Services }
 enum class TraceOutcome { Ok, Warn, Error, Info }
 data class TraceMoment(val at: Instant, val kind: String, val status: Int?, val outcome: TraceOutcome)
 

@@ -9,15 +9,17 @@ import kotlinx.serialization.json.*
 
 fun findExecutable(name: String): String? = findExecutableIn(name, System.getenv("PATH"), extraExecutableDirs())
 
-/** Directories after PATH. On Linux, admin tools often live outside a desktop user's PATH. */
+/** Directories after PATH. On Linux, admin tools often live outside a desktop user's PATH; snap packages install into /snap/bin. */
 internal fun extraExecutableDirs(): List<String> =
-    if (System.getProperty("os.name").startsWith("Windows", true)) emptyList() else listOf("/usr/local/bin", "/usr/sbin", "/sbin")
+    if (System.getProperty("os.name").startsWith("Windows", true)) emptyList() else listOf("/usr/local/bin", "/usr/sbin", "/sbin", "/snap/bin")
 
 internal fun findExecutableIn(name: String, path: String?, extra: List<String>): String? {
     val direct = runCatching { Path.of(name) }.getOrNull() ?: return null
     // A full path is checked as given; only bare names are looked up on PATH.
     if (direct.isAbsolute || name.contains('/') || name.contains('\\')) return direct.toString().takeIf { Files.isRegularFile(direct) }
+    // Relative PATH entries ("." or "bin") would resolve against the working directory: never searched.
     return (path.orEmpty().split(java.io.File.pathSeparator).filter { it.isNotBlank() } + extra).asSequence().distinct()
+        .filter { runCatching { Path.of(it).isAbsolute }.getOrDefault(false) }
         .flatMap { dir -> sequenceOf(runCatching { Path.of(dir, name) }.getOrNull(), runCatching { Path.of(dir, "$name.exe") }.getOrNull()).filterNotNull() }
         .firstOrNull { Files.isRegularFile(it) }?.toString()
 }
@@ -33,16 +35,37 @@ internal fun applyVpnCommandEnvironment(builder: ProcessBuilder, command: List<S
     vpnCommandEnvironment(command).forEach { (key, value) -> builder.environment()[key] = value }
 }
 
-fun runVpnCommand(command: List<String>, timeout: Long): String {
+/** A VPN command that did not finish within its time limit; the process tree was stopped. */
+class VpnCommandTimeoutException : IllegalStateException("VPN command timed out.")
+
+/** Most output a VPN helper may print on stdout or stderr. More is not a status a person needs; the process is stopped. */
+const val VPN_OUTPUT_LIMIT = 16 * 1024 * 1024
+
+/** A VPN command printed more than its output limit; the process tree was stopped. */
+class VpnOutputLimitException(limit: Int) : IllegalStateException("The VPN command printed more than ${if (limit >= 1024 * 1024) "${limit / (1024 * 1024)} MiB" else "$limit bytes"}, so it was stopped.")
+
+/** Reads [stream] up to [limit] bytes. Past that, [over] runs (it stops the process) and the rest is not kept. */
+internal fun readCapped(stream: java.io.InputStream, limit: Int, over: () -> Unit): String {
+    val bytes = stream.readNBytes(limit + 1)
+    if (bytes.size > limit) { over(); return String(bytes, 0, limit, Charsets.UTF_8) }
+    return String(bytes, Charsets.UTF_8)
+}
+
+fun runVpnCommand(command: List<String>, timeout: Long): String = runVpnCommand(command, timeout, VPN_OUTPUT_LIMIT)
+
+internal fun runVpnCommand(command: List<String>, timeout: Long, limit: Int): String {
     val trace = Trace.begin(TraceSource.Vpn, command.firstOrNull().orEmpty(), Redact.commandDetails(command))
     try {
     val builder = ProcessBuilder(command).redirectInput(java.io.File(if(System.getProperty("os.name").startsWith("Windows")) "NUL" else "/dev/null"))
     applyVpnCommandEnvironment(builder, command)
     val p = builder.start()
-    val out = CompletableFuture.supplyAsync { p.inputStream.bufferedReader().use { it.readText() } }
-    val err = CompletableFuture.supplyAsync { p.errorStream.bufferedReader().use { it.readText() } }
+    val overflow = java.util.concurrent.atomic.AtomicBoolean(false)
+    fun stop() { overflow.set(true); p.descendants().forEach { it.destroyForcibly() }; p.destroyForcibly() }
+    val out = CompletableFuture.supplyAsync { p.inputStream.use { readCapped(it, limit, ::stop) } }
+    val err = CompletableFuture.supplyAsync { p.errorStream.use { readCapped(it, limit, ::stop) } }
     try {
-        if(!p.waitFor(timeout, TimeUnit.SECONDS)) throw IllegalStateException("VPN command timed out.")
+        if(!p.waitFor(timeout, TimeUnit.SECONDS)) throw if(overflow.get()) VpnOutputLimitException(limit) else VpnCommandTimeoutException()
+        if(overflow.get()) throw VpnOutputLimitException(limit)
         val stderr = err.get(5, TimeUnit.SECONDS)
         if(p.exitValue() != 0) {
             val line = stderr.lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() }.orEmpty()
@@ -50,6 +73,7 @@ fun runVpnCommand(command: List<String>, timeout: Long): String {
         }
         // Read stdout before ending the span, so a failed read still ends it as an error.
         val stdout = out.get(5, TimeUnit.SECONDS)
+        if(overflow.get()) throw VpnOutputLimitException(limit)
         trace.endProcess(p.exitValue())
         return stdout
     } finally { if(p.isAlive) { p.descendants().forEach { it.destroyForcibly() }; p.destroyForcibly() } }
@@ -59,6 +83,7 @@ internal fun psQuote(value: String) = "'${Regex("['‘’‚‛]").replace(value
 internal fun windowsSystemRoot(): String = System.getenv("SystemRoot")?.takeIf { it.isNotBlank() } ?: System.getenv("WINDIR")?.takeIf { it.isNotBlank() } ?: "C:\\Windows"
 internal fun windowsPowerShell(): String = windowsSystemRoot() + "\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
 internal fun windowsRasdial(): String = windowsSystemRoot() + "\\System32\\rasdial.exe"
+internal fun windowsReg(): String = windowsSystemRoot() + "\\System32\\reg.exe"
 /** UTF-8 without a BOM, so a non-ASCII tunnel name survives the trip back to the JVM. */
 internal fun psUtf8Prefix() = "[Console]::OutputEncoding = [Text.UTF8Encoding]::new(${'$'}false)\n${'$'}OutputEncoding = [Console]::OutputEncoding\n"
 internal fun vpnPowerShell(script: String) = listOf(windowsPowerShell(), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", Base64.getEncoder().encodeToString(script.toByteArray(Charsets.UTF_16LE)))
@@ -81,10 +106,16 @@ internal fun windowsRouteScript(address: String) = psUtf8Prefix() + "Find-NetRou
 class LocalVpnBackend(os: String = System.getProperty("os.name"), private val run: (List<String>, Long) -> String = ::runVpnCommand, private val which: (String) -> String? = ::findExecutable,
     private val imports: WireGuardImports = WireGuardImports(), private val hostActions: Boolean = false, private val stagingRoot: Path? = null,
     private val counters: (String) -> Pair<Long?, Long?> = ::interfaceCounters,
-    private val routes: RouteProbe = LocalRouteProbe(os, run, which)) : VpnBackend {
+    private val routes: RouteProbe = LocalRouteProbe(os, run, which),
+    private val env: (String) -> String? = System::getenv) : VpnBackend {
     private val windows = os.startsWith("Windows", true)
     override val platform = if(windows) "Windows" else "Linux"
-    private fun ts() = if(windows) which("C:\\Program Files\\Tailscale\\tailscale.exe") ?: which("tailscale") else which("tailscale")
+    /**
+     * The Tailscale CLI: on Windows `%ProgramFiles%\Tailscale`, then the default install folder, then PATH; on Linux PATH and
+     * the admin and snap folders ([extraExecutableDirs]). Always an absolute path; the working directory is never searched.
+     */
+    private fun ts(): String? = if(windows) listOfNotNull(env("ProgramFiles")?.takeIf { it.isNotBlank() }?.let { "${it.trimEnd('\\')}\\Tailscale\\tailscale.exe" },
+        "C:\\Program Files\\Tailscale\\tailscale.exe").distinct().firstNotNullOfOrNull { which(it) } ?: which("tailscale") else which("tailscale")
     private fun wg() = which(if(windows) "C:\\Program Files\\WireGuard\\wireguard.exe" else "wg")
     private fun exec(args: List<String>, timeout: Long = 30) = run(args, timeout)
     private fun ps(script: String) = exec(vpnPowerShell(script))
@@ -118,8 +149,11 @@ class LocalVpnBackend(os: String = System.getProperty("os.name"), private val ru
             tunnels += ipTunnels.filter { i -> managed.none { it.interfaceName == i.interfaceName } }
             for(i in tunnels.indices) tunnels[i] = withUnprivilegedCounters(tunnels[i], details)
         }
-        return VpnSnapshot(Instant.now(), tunnels.sortedWith(compareBy({ it.state != VpnState.Up }, { when(it.kind) { VpnKind.Tailscale -> 0; VpnKind.WireGuard -> 1; else -> 2 } }, { it.name.lowercase() })), tsExe != null, status, wgExe != null, details, notes)
+        return VpnSnapshot(Instant.now(), tunnels.sortedWith(compareBy({ it.state != VpnState.Up }, { when(it.kind) { VpnKind.Tailscale -> 0; VpnKind.WireGuard -> 1; else -> 2 } }, { it.name.lowercase() })), tsExe != null, status, wgExe != null, details, notes, tsExe)
     }
+    override fun tailscaleStatus(): TailscaleStatus? = ts()?.let { parseTailscaleStatus(exec(listOf(it, "status", "--json"), 10)) }
+    /** The same read-only status call; only the one peer's keys are taken from it, and they are returned, never kept. */
+    override fun tailscaleSshHostKeys(peerId: String): SshPeerKeys? = ts()?.let { parsePeerSshHostKeys(exec(listOf(it, "status", "--json"), 10), peerId) }
     /** Active connections decide Up, so a translated STATE word cannot mark a live tunnel as down. */
     private fun nmTunnels(nm: String): List<VpnTunnel> {
         val shown = parseNmConnections(exec(listOf(nm, "-t", "--escape", "yes", "-f", "UUID,NAME,TYPE,DEVICE", "connection", "show")))
@@ -132,7 +166,39 @@ class LocalVpnBackend(os: String = System.getProperty("os.name"), private val ru
         val handshake = details.firstOrNull { it.name == tunnel.interfaceName || it.name == tunnel.name }?.peers?.mapNotNull { it.lastHandshakeEpoch }?.maxOrNull()
         return tunnel.copy(rxBytes = sysRx ?: tunnel.rxBytes, txBytes = sysTx ?: tunnel.txBytes, lastHandshakeEpoch = handshake ?: tunnel.lastHandshakeEpoch)
     }
-    private fun tailscale(args: List<String>) { try { exec(listOf(ts() ?: error("Tailscale is not installed.")) + args) } catch(e: Exception) { if(!windows && Regex("permission|access|denied|root", RegexOption.IGNORE_CASE).containsMatchIn(e.message.orEmpty())) error("Tailscale refused the change. On Linux run: sudo tailscale set --operator=${'$'}USER"); throw e } }
+    /**
+     * One Tailscale change, run once. When it fails or overruns [timeout], the status is read again (a read, never a
+     * retry) and the message says what Tailscale reports now, with a plain sentence for the refusals the CLI is known to give.
+     */
+    private fun tailscale(args: List<String>, timeout: Long = 30, sudoCommand: String? = null) {
+        val exe = ts() ?: error("Tailscale is not installed.")
+        try { exec(listOf(exe) + args, timeout) }
+        catch(e: Exception) {
+            val now = runCatching { parseTailscaleStatus(exec(listOf(exe, "status", "--json"))) }.getOrNull()
+            throw IllegalStateException(tailscaleChangeFailure(vpnFailureMessage(e.message.orEmpty()), e is VpnCommandTimeoutException, timeout, now, windows, sudoCommand), e)
+        }
+    }
+    /**
+     * Read-only: `tailscale get --json` (any local user may read preferences), else the OS route into an advertised
+     * network ([detectAcceptRoutes]). For networks that overlap a local one, the OS route says which way wins once routes
+     * are accepted ([overlapWinners]). Route reads use the same probe as the route tag.
+     */
+    override fun acceptRoutes(status: TailscaleStatus?, local: List<LocalNetwork>): AcceptRoutesReading {
+        val exe = ts() ?: return AcceptRoutesReading.unknown("Tailscale is not installed.")
+        val s = status ?: return AcceptRoutesReading.unknown("Tailscale's status could not be read.")
+        val offered = tailnetSubnetRoutes(s, local)
+        val self = s.self?.addresses.orEmpty()
+        val tunnel = listOf(VpnTunnel("tailscale", VpnKind.Tailscale, "Tailscale", VpnState.Up, if(windows) "Tailscale" else "tailscale0", self))
+        val read: (String) -> OsRoute = { routes.route(it) }
+        val reading = detectAcceptRoutes(platform, runCatching { exec(listOf(exe, "get", "--json"), 10) }, offered, tunnel, self, read)
+        return if (reading.accepted && offered.any { !it.own && it.overlap != null }) reading.copy(overlaps = overlapWinners(offered, tunnel, self, read)) else reading
+    }
+    /** One `tailscale set --accept-routes=…`, never retried; a refusal on Linux names the exact sudo command. */
+    override fun setAcceptRoutes(accept: Boolean) {
+        requireHostActions()
+        val flag = "--accept-routes=${if(accept) "true" else "false"}"
+        tailscale(listOf("set", flag), sudoCommand = "sudo tailscale set $flag")
+    }
     /** Runs [script] elevated (one UAC prompt). [failures] maps the script's exit codes to the sentence shown for each. */
     private fun elevate(script: String, failures: Map<Int, String> = emptyMap()) {
         Trace.emit(TraceSource.Vpn, "elevated", "Request elevated VPN action")
@@ -146,7 +212,11 @@ class LocalVpnBackend(os: String = System.getProperty("os.name"), private val ru
         requireHostActions()
         require(tunnel.canToggle) { "This tunnel is read-only." }
         when {
-            tunnel.id == "tailscale" -> tailscale(listOf(if(up) "up" else "down"))
+            // Bare `up` is Tailscale's "simple up": it only sets WantRunning. Any flag (even --timeout) makes it a full up,
+            // which refuses to run while a setting differs from its default unless every such setting is repeated; an exit
+            // node chosen on this page would trigger that. So the wait is bounded here, and a sign-in wait is read back
+            // from the status afterwards.
+            tunnel.id == "tailscale" -> if(up) tailscale(listOf("up"), TAILSCALE_UP_SECONDS) else tailscale(listOf("down"))
             !windows && tunnel.id.startsWith("nm:") -> exec(listOf(which("nmcli") ?: error("NetworkManager is not installed."), "connection", if(up) "up" else "down", "uuid", tunnel.id.removePrefix("nm:")))
             windows && tunnel.id.startsWith("ras:") -> exec(listOf(windowsRasdial(), tunnel.id.removePrefix("ras:")) + if(up) emptyList() else listOf("/disconnect"))
             windows && tunnel.id.startsWith("wg:") -> {
@@ -163,10 +233,28 @@ class LocalVpnBackend(os: String = System.getProperty("os.name"), private val ru
         if(peer == null) tailscale(listOf("set", "--exit-node="))
         else tailscale(listOf("set", "--exit-node=$address", "--exit-node-allow-lan-access=${if(allowLanAccess) "true" else "false"}"))
     }
-    override fun importWireGuard(config: Path, name: String): String {
+    /**
+     * Read-only: `HKLM\Software\WireGuard\DangerousScriptExecution` in the 64-bit view on Windows. An absent value is
+     * WireGuard's default (scripts off); a read that fails for any other reason is Unknown.
+     */
+    override fun wireGuardScriptPolicy(): WireGuardScriptPolicy {
+        if(!windows) return WireGuardScriptPolicy.DroppedOnImport
+        return try {
+            if(parseDangerousScriptExecution(exec(listOf(windowsReg(), "query", "HKLM\\Software\\WireGuard", "/v", "DangerousScriptExecution", "/reg:64"), 15)) == true)
+                WireGuardScriptPolicy.RunAsSystem else WireGuardScriptPolicy.NotRun
+        } catch(e: Exception) {
+            if(e.message.orEmpty().contains("unable to find", ignoreCase = true)) WireGuardScriptPolicy.NotRun else WireGuardScriptPolicy.Unknown
+        }
+    }
+    override fun importWireGuard(config: Path, name: String): String = importWireGuardReviewed(config, name, scriptsAccepted = false)
+    override fun importWireGuardReviewed(config: Path, name: String, scriptsAccepted: Boolean): String {
         requireHostActions()
         require(validWireGuardName(name)) { "Invalid WireGuard name." }
-        require(Files.size(config) <= 65536 && Files.readString(config).lineSequence().any { it.trim().equals("[Interface]", true) }) { "That file is not a WireGuard configuration." }
+        val review = readWireGuardReview(config)
+        require(review.isConfig) { if(review.tooLarge) "That file is too large to be a WireGuard configuration." else "That file is not a WireGuard configuration." }
+        // Checked again here, right before the copy: the confirmation's answer only counts for the risk it showed.
+        if(windows && !scriptsAccepted && review.scripts.isNotEmpty() && wireGuardScriptsNeedConsent(review, wireGuardScriptPolicy()))
+            error("This configuration has scripts that WireGuard would run as Local System. Nothing was imported.")
         if(windows) {
             // Straight from the chosen file into WireGuard's protected store, with administrator rights: the private key
             // is never staged anywhere user-writable, and the tunnel service later reads the store's copy on every start.

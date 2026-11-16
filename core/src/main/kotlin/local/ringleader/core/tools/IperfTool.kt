@@ -59,7 +59,7 @@ class Iperf3Plugin(private val which: (String) -> String? = ::findExecutable) : 
         val server = clean["server"] == "true"
         val host = clean["host"].orEmpty()
         if (!server && host.isEmpty()) return ToolResult(false, "Enter a host.")
-        if (!server && !isHostToken(host)) return ToolResult(false, "Host must be a hostname or an IP address.")
+        if (!server) hostRefusal(host)?.let { return ToolResult(false, it) }
         val raw = clean["executable"].orEmpty()
         if (isBatchFile(raw)) return ToolResult(false, BATCH_FILE_REFUSED)
         val exe = resolveIperf(raw, which) ?: return ToolResult(false, IPERF_MISSING)
@@ -122,9 +122,12 @@ internal fun resolveIperf(configured: String, which: (String) -> String?): Strin
     return file.toString()
 }
 
+/** The argument list for iperf3. In client mode the host is the argument of `-c`, which no option parser reads as an option; an IPv6 address also gets `-6`. */
 internal fun iperfCommand(exe: String, server: Boolean, host: String, port: Int, seconds: Int, parallel: Int, reverse: Boolean, udp: Boolean): List<String> {
     if (server) return listOf(exe, "-s", "-1", "-p", port.toString(), "--forceflush")
+    require(!host.startsWith("-")) { "A host that starts with a hyphen would be read as an option." }
     val command = mutableListOf(exe, "-c", host, "-p", port.toString(), "-t", seconds.toString(), "-P", parallel.toString(), "--forceflush")
+    if (isIpv6Host(host)) command += "-6"
     if (reverse) command += "-R"
     if (udp) command += "-u"
     return command

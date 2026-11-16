@@ -63,6 +63,49 @@ class PveTicketTest {
     @Test fun twoFactorRequired() = fixture({ 200 to challenge }) { c ->
         assertFailsWith<TwoFactorRequiredException> { ProxmoxTransport().direct(c, "/api2/json/test") }
     }
+    /** Every ticket POST (sign-in, two-factor step, renewal) states new-format=1; PVE 8 and 9 ignore it and assume 1. */
+    @Test fun everyTicketPostSendsNewFormat() {
+        val bodies = mutableListOf<Map<String, String>>()
+        var now = Instant.parse("2026-11-09T00:00:00Z")
+        fixture({ e -> bodies += fields(e); 200 to if (bodies.size == 1) challenge else success }) { c ->
+            Connection(c.address, c.tokenId, "password", c.fingerprint, otp = "123456").use { auth ->
+                val store = TicketStore { now }
+                store.get(auth); now = now.plusSeconds(61 * 60); store.get(auth)
+            }
+        }
+        assertEquals(3, bodies.size)
+        assertTrue(bodies.all { it["new-format"] == "1" }, "$bodies")
+        assertEquals(listOf("password", "totp:123456", "ticket+value"), bodies.map { it["password"] })
+        assertEquals("challenge", bodies[1]["tfa-challenge"])
+    }
+    /** NeedTFA as 1, true or "1" asks for the code; a success may carry cap and clustername, and a NeedTFA object is no request. */
+    @Test fun ticketAnswerShapes() {
+        for (need in listOf("1", "true", "\"1\"")) {
+            var calls = 0
+            fixture({ calls++; 200 to if (calls == 1) """{"data":{"ticket":"challenge","NeedTFA":$need,"username":"root@pam","CSRFPreventionToken":"x"}}""" else success }) { c ->
+                Connection(c.address, c.tokenId, "password", c.fingerprint, otp = "123456").use { auth -> assertEquals("csrf", auth.tickets.get(auth).csrf) }
+            }
+            assertEquals(2, calls, need)
+        }
+        fixture({ 200 to """{"data":{"ticket":"t","CSRFPreventionToken":"c","username":"root@pam","clustername":"lab","cap":{"vms":{"VM.Audit":1}},"NeedTFA":{"odd":1}}}""" }) { c ->
+            assertEquals("c", c.tickets.get(c).csrf)
+        }
+    }
+    @Test fun oneTimeCodeKinds() {
+        val yubikey = "cccjgjgkhcbbirdrfdnlnghhfgrtnnlgedjlftrbdeut"
+        assertEquals(44, yubikey.length)
+        assertEquals("yubico:$yubikey", tfaResponse(yubikey))
+        assertEquals("yubico:${yubikey.uppercase()}", tfaResponse(yubikey.uppercase()))
+        assertEquals("totp:123456", tfaResponse("123456"))
+        assertEquals("totp:12345678", tfaResponse("12345678"))
+        assertEquals("recovery:1a2b-3c4d-5e6f-7a8b", tfaResponse("1a2b-3c4d-5e6f-7a8b"))
+        assertEquals("recovery:1a2b3c4d5e6f7a8b", tfaResponse("1a2b3c4d5e6f7a8b"))
+        assertEquals("recovery:abc-def", tfaResponse("abc-def"))
+        assertEquals("totp:12345", tfaResponse("12345"))
+        for (typed in listOf("totp:1", "recovery:x", "webauthn:{}", "yubico:abc")) assertEquals(typed, tfaResponse(typed))
+        // 44 characters that are not all ModHex (digits) stay a recovery key.
+        assertEquals("recovery:" + "1".repeat(44), tfaResponse("1".repeat(44)))
+    }
     @Test fun twoFactorPrefixesAndOneUse() {
         for ((code, expected) in listOf("123456" to "totp:123456", "abc-def" to "recovery:abc-def", "yubico:abc" to "yubico:abc")) {
             val bodies = mutableListOf<Map<String, String>>()
@@ -225,7 +268,7 @@ class PveTicketTest {
     }
     @Test fun refusedTicketIsDroppedWithoutClosing() = fixture({ 200 to success }) { c ->
         val first = c.tickets.get(c)
-        c.tickets.clear()
+        c.tickets.clear(first)
         assertNotSame(first, c.tickets.get(c))
     }
     @Test fun passwordLoginPinAndRedirectBoundaries() {

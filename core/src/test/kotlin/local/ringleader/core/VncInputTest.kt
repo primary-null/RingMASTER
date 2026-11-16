@@ -157,7 +157,7 @@ class VncInputTest {
         var pings = 0
         var lost = 0
         var result: () -> CompletionStage<*> = { pings++; CompletableFuture.completedFuture(null) }
-        val beat = VncKeepalive({ result() }) { lost++ }
+        val beat = WebSocketKeepalive({ result() }) { lost++ }
         beat.tick(); beat.pong(); beat.tick(); beat.pong(); beat.tick()
         assertEquals(3, pings); assertEquals(0, lost)
         beat.tick()
@@ -167,12 +167,12 @@ class VncInputTest {
 
         lost = 0
         result = { CompletableFuture.failedFuture<Any>(java.io.IOException("reset")) }
-        VncKeepalive({ result() }) { lost++ }.tick()
+        WebSocketKeepalive({ result() }) { lost++ }.tick()
         assertEquals(1, lost, "a ping that cannot be sent ends the session")
 
         lost = 0
         result = { CompletableFuture.failedFuture<Any>(IllegalStateException("pong pending")) }
-        val busy = VncKeepalive({ result() }) { lost++ }
+        val busy = WebSocketKeepalive({ result() }) { lost++ }
         busy.tick(); busy.tick()
         assertEquals(0, lost, "a ping refused because another control frame is in flight skips one beat")
     }
@@ -215,6 +215,9 @@ class VncInputTest {
         var pongs = 0
         socket.onPong = { pongs++ }
         assertContentEquals(byteArrayOf(1), socket.read(1))
+        // The reader asks from another thread (a delivery must never run on the reader's own), so the count follows shortly.
+        val until = System.nanoTime() + 2_000_000_000L
+        while (ws.requested < 3 && System.nanoTime() < until) Thread.sleep(5)
         assertEquals(3, ws.requested, "the reader resumes the flow once there is room")
         socket.onBinary(ws, ByteBuffer.wrap(byteArrayOf(3)), true)
         assertContentEquals(byteArrayOf(2, 3), socket.read(2))

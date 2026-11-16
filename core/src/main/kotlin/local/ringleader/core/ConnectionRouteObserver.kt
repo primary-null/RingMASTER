@@ -62,7 +62,16 @@ class VpnInventorySource(
     private val clock: () -> Instant = Instant::now,
     val maxAgeMillis: Long = 300_000,
     val sharedMaxAgeMillis: Long = 60_000,
+    /**
+     * A fresh Tailscale status for the peer path alone (one `tailscale status --json`, no PowerShell). Direct and relayed
+     * change within seconds, so the path is not taken from the long-lived snapshot when this is given.
+     */
+    private val freshTailscale: (() -> TailscaleStatus?)? = null,
 ) {
+    /** A fresh Tailscale status, or null when there is no fresh source. Blocks; throws when the read fails. */
+    fun freshTailscale(): TailscaleStatus? = freshTailscale?.invoke()
+    val hasFreshTailscale get() = freshTailscale != null
+
     private var own: VpnSnapshot? = null
     private var ownGeneration = 0L
     private var generation = 0L
@@ -223,7 +232,20 @@ class ConnectionRouteObserver(
         // A failed route read is Unknown whatever the VPN list says, so no snapshot is taken for it.
         if (route.isFailure) return classifyConnectionRoute(t, at, null, addresses, route, VpnInventory(null, "Not checked, because the route read failed."))
         val vpn = bounded { inventory.current() }.getOrElse { VpnInventory(null, "The VPN check took too long.") }
-        return classifyConnectionRoute(t, at, null, addresses, route, vpn)
+        val observed = classifyConnectionRoute(t, at, null, addresses, route, vpn)
+        return withFreshPeerPath(observed)
+    }
+
+    /**
+     * The tunnel list may be minutes old; Tailscale's path to a peer changes within seconds. When the route goes through
+     * Tailscale to a peer's own address, or to a network a peer routes for, the path (and the router) is read again from a
+     * fresh status. If that read fails the snapshot's path stays, as before.
+     */
+    private suspend fun withFreshPeerPath(o: RouteObservation): RouteObservation {
+        val address = o.address ?: return o
+        if (o.vpnKind != VpnKind.Tailscale || o.peerPath == null || o.peerPath == PeerPath.NotPeer || !inventory.hasFreshTailscale) return o
+        val fresh = bounded { inventory.freshTailscale() }.getOrNull() ?: return o
+        return o.copy(peerPath = tailscalePeerPath(fresh, address))
     }
 
     private suspend fun watchNetwork(gen: Long) {

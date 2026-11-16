@@ -95,7 +95,11 @@ class WebModeTest {
         }
     }
 
-    @Test fun failedLoginsAreDelayedThenLockedOut() {
+    /**
+     * N-09: the lock used to be one switch for every login, so five bad guesses from anyone also locked out the valid one-time link
+     * (this test pinned that). The count is now per remote address and the live one-time link never waits.
+     */
+    @Test fun failedLoginsAreDelayedThenLockedOutPerAddressAndTheOneTimeLinkStillWorks() {
         WebServer(WebOptions(port=0),operatorLogin,WebLimits(failedLoginDelayMs=300,failuresBeforeLock=3,lockMs=60_000)).use { server ->
             server.start()
             val started=System.nanoTime()
@@ -104,12 +108,16 @@ class WebModeTest {
             // Any length of guess is compared the same way, including a long one.
             assertEquals(403,get("${server.origin}/login?key=${"y".repeat(500)}").statusCode())
             assertEquals(403,get("${server.origin}/login?key=").statusCode())
-            val locked=get(server.loginUrl)
+            // Three failures from this address: every key someone could guess now waits, the operator's own key included.
+            val locked=get("${server.origin}/login?key=$operatorLogin")
             assertEquals(429,locked.statusCode())
             assertTrue(locked.headers().firstValue("retry-after").isPresent)
             assertContains(locked.body(),"Try again")
-            assertEquals(429,get("${server.origin}/login?key=$operatorLogin").statusCode())
+            assertEquals(429,get("${server.origin}/login?key=another-guess").statusCode())
+            // The one-time link is 256 random bits nobody can guess: it is not held up, so a peer cannot keep the owner out.
             assertFalse(server.link.value!!.used,"a refused attempt does not spend the link")
+            assertEquals(302,get(server.loginUrl).statusCode())
+            assertTrue(server.link.value!!.used)
         }
         WebServer(WebOptions(port=0),operatorLogin,WebLimits(failedLoginDelayMs=0,failuresBeforeLock=3)).use { server ->
             server.start()
@@ -147,7 +155,7 @@ class WebModeTest {
             server.start()
             val login=get(server.loginUrl)
             val setCookie=login.headers().firstValue("set-cookie").get()
-            assertTrue(setCookie.startsWith("ringmaster="),setCookie)
+            assertTrue(setCookie.startsWith("ringmaster-${server.port}="),setCookie)
             val flags=setCookie.split(';').map { it.trim().lowercase() }
             assertTrue("httponly" in flags,setCookie); assertTrue("samesite=strict" in flags,setCookie); assertTrue("path=/" in flags,setCookie)
             assertFalse("secure" in flags,"plain loopback HTTP cannot keep a Secure cookie")
@@ -254,6 +262,16 @@ class WebModeTest {
         // --allow-host-actions
         assertFalse(parseWebArgs(listOf("--web"))!!.hostActions)
         assertTrue(parseWebArgs(listOf("--web","--allow-host-actions"))!!.hostActions)
+        // Host actions on a listener other computers can reach are remote code execution for whoever holds a login: a second flag must say so.
+        for (reach in listOf(listOf("--bind","192.0.2.10","--allow-remote","--tls-keystore","ring.p12"), listOf("--bind","0.0.0.0","--allow-remote","--public-origin","https://ring.example.com"), listOf("--public-origin","https://ring.example.com"))) {
+            val refused=assertFails { parseWebArgs(listOf("--web")+reach+"--allow-host-actions") }
+            assertContains(refused.message.orEmpty(),"--allow-remote-host-actions"); assertContains(refused.message.orEmpty(),"remote code execution"); assertContains(refused.message.orEmpty(),"run programs on this computer")
+            val accepted=parseWebArgs(listOf("--web")+reach+listOf("--allow-host-actions","--allow-remote-host-actions"))!!
+            assertTrue(accepted.hostActions && accepted.acknowledgeRemoteHostActions)
+            assertNotNull(parseWebArgs(listOf("--web")+reach), "the remote listener itself is not affected")
+        }
+        assertFails { parseWebArgs(listOf("--web","--allow-remote-host-actions")) }
+        assertFails { WebServer(WebOptions(bind="192.0.2.10",allowRemote=true,keystore="ring.p12",hostActions=true,port=0),"x".repeat(32)).use { it.start() } }
         assertFalse(AppHost(true).hostActions)
         assertTrue(AppHost(true, true).hostActions)
         assertTrue(DesktopAppHost().hostActions)
@@ -348,7 +366,7 @@ class WebModeTest {
             assertEquals(302,login.statusCode())
             val setCookie=login.headers().firstValue("set-cookie").get()
             assertTrue(setCookie.lowercase().contains("secure"))
-            assertTrue(setCookie.startsWith("__Host-ringmaster="),setCookie)
+            assertTrue(setCookie.startsWith("__Host-ringmaster-${server.port}="),setCookie)
             // The public name is served (a proxy that keeps Host), as is the listener address (a proxy that rewrites it).
             assertEquals(200,rawStatus(server.port,"/","ring.example.com"))
             assertEquals(200,rawStatus(server.port,"/","127.0.0.1:${server.port}"))

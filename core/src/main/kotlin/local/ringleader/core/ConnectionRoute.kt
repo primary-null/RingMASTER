@@ -67,16 +67,62 @@ enum class RouteEvidence(val label: String) {
     TunnelAdapter("the interface is a tunnel adapter"),
 }
 
-/** Tailscale's own path to the peer that owns the server address. Only set when that address is a peer's address. */
+/**
+ * Tailscale's own path to a peer. On the route tag it is only set when the server address is that peer's own address.
+ * Derived as `tailscale status` does: an inactive peer is idle (or offline); an active one is relayed through DERP only
+ * when it has neither a direct address nor a peer relay.
+ */
 sealed interface PeerPath {
     /** Tailscale reaches the peer straight over UDP. Still encrypted inside Tailscale. */
     data class Direct(val endpoint: String) : PeerPath
-    /** Traffic is relayed through a Tailscale DERP server. */
+    /** Traffic goes through a peer relay (a tailnet node relaying UDP; "ip:port:vni"). Still encrypted inside Tailscale. */
+    data class PeerRelayed(val relay: String) : PeerPath
+    /** Traffic is relayed through a Tailscale DERP server in [region]. */
     data class Relayed(val region: String) : PeerPath
-    /** The peer is known but Tailscale reports no current path (idle or offline). */
+    /** Online, but no recent traffic: Tailscale reports no current path. */
+    data object Idle : PeerPath
+    /** Tailscale reports the peer offline. */
+    data object Offline : PeerPath
+    /** Active, or activity not reported, and no path is reported. */
     data object NotReported : PeerPath
-    /** The address is not a tailnet peer's own address: a subnet route or an exit node carries it. */
+    /**
+     * The address lies in a network a tailnet peer routes for ([cidr], from its `PrimaryRoutes`, or `AllowedIPs` on older
+     * clients) and the operating system's route already goes through Tailscale: the router [router] carries it. [path] is
+     * Tailscale's path to that router. Only attached after OS route evidence; the range alone never makes this claim.
+     */
+    data class SubnetRouter(val router: String, val cidr: String, val path: PeerPath) : PeerPath
+    /** The address is not a tailnet peer's own address and no peer routes for it: an exit node (or nothing known) carries it. */
     data object NotPeer : PeerPath
+}
+
+/** One peer's path, as `tailscale status` decides it. `Relay` is the home region and is a path only while active. */
+fun peerPath(peer: TailscalePeer): PeerPath {
+    val direct = peer.direct?.takeIf { it.isNotBlank() }
+    val relayed = peer.peerRelay?.takeIf { it.isNotBlank() }
+    val region = peer.relay?.takeIf { it.isNotBlank() }
+    return when {
+        peer.active == false -> if (peer.online) PeerPath.Idle else PeerPath.Offline
+        !peer.online && direct == null && relayed == null -> PeerPath.Offline
+        peer.active == true && region != null && direct == null && relayed == null -> PeerPath.Relayed(region)
+        direct != null -> PeerPath.Direct(direct)
+        relayed != null -> PeerPath.PeerRelayed(relayed)
+        else -> PeerPath.NotReported
+    }
+}
+
+/**
+ * The short label shared by the VPN page's peer table and the route tag: "direct", "peer relay", "DERP <region>",
+ * "idle", "offline". No address is part of it.
+ */
+fun peerPathLabel(path: PeerPath): String = when (path) {
+    is PeerPath.Direct -> "direct"
+    is PeerPath.PeerRelayed -> "peer relay"
+    is PeerPath.Relayed -> "DERP ${path.region}"
+    PeerPath.Idle -> "idle"
+    PeerPath.Offline -> "offline"
+    PeerPath.NotReported -> "no path"
+    is PeerPath.SubnetRouter -> "subnet router"
+    PeerPath.NotPeer -> "not a peer"
 }
 
 /** What the VPN inspection could see when the route was classified. */
@@ -194,7 +240,7 @@ fun classifyConnectionRoute(
     val physical = iface.medium == RouteMedium.Ethernet || iface.medium == RouteMedium.WiFi || iface.medium == RouteMedium.Mobile
     fun vpnResult(kind: VpnKind, name: String?, evidence: RouteEvidence) = seen.copy(kind = RouteKind.Vpn, vpnKind = kind, tunnelName = name, evidence = evidence,
         peerPath = if (kind == VpnKind.Tailscale) tailscalePeerPath(snapshot?.tailscale, address) else null)
-    return when {
+    val result = when {
         // A VPN that shares a physical interface (policy-based IPsec on the parent device) cannot be told apart from an
         // ordinary route to an address outside its networks, so neither answer is claimed.
         match != null && physical -> seen.copy(tunnelName = match.first.name, vpnKind = match.first.kind,
@@ -209,23 +255,43 @@ fun classifyConnectionRoute(
         vpn.complete -> seen.copy(kind = RouteKind.Direct)
         else -> seen.copy(reason = "The interface type was not reported and the VPN check was incomplete, so a VPN cannot be ruled out.")
     }
+    // Userspace Tailscale has no interface, so the OS route to a tailnet address is its default route, which cannot carry
+    // it. Direct is withheld (never replaced by a VPN claim).
+    val status = snapshot?.tailscale
+    if (result.kind == RouteKind.Direct && status != null && status.userspace && tailnetDestination(address, status))
+        return result.copy(kind = RouteKind.Unknown, reason = TAILSCALE_USERSPACE_NOTE)
+    return result
 }
 
 /**
- * Tailscale's path to the peer whose own Tailscale address is [address]. A subnet route or an exit node is not a peer
- * address, so no peer's path is attached to it.
+ * The address is a tailnet peer's own address or lies in Tailscale's own ranges (100.64.0.0/10, fd7a:115c:a1e0::/48).
+ * Used only to withhold an answer, never as evidence that traffic goes through Tailscale.
+ */
+fun tailnetDestination(address: String, status: TailscaleStatus): Boolean {
+    if (status.peers.any { p -> p.addresses.any { sameAddress(it, address) } }) return true
+    val bytes = ipLiteral(address)?.address ?: return false
+    return if (bytes.size == 4) (bytes[0].toInt() and 0xff) == 100 && (bytes[1].toInt() and 0xc0) == 64
+    else bytes.size == 16 && bytes.take(6).map { it.toInt() and 0xff } == listOf(0xfd, 0x7a, 0x11, 0x5c, 0xa1, 0xe0)
+}
+
+/**
+ * Tailscale's path to the peer whose own Tailscale address is [address]. Otherwise, when a peer routes for a network that
+ * holds [address] (the narrowest one wins, as in longest-prefix routing), that router and its path. Called only once the
+ * operating system's route is known to go through Tailscale, so the status and the OS route agree. This computer's own
+ * routes and exit routes (`/0`) are not subnet routers; an exit node stays [PeerPath.NotPeer].
  */
 fun tailscalePeerPath(status: TailscaleStatus?, address: String): PeerPath? {
     status ?: return null
-    val peer = status.peers.firstOrNull { p -> p.addresses.any { sameAddress(it, address) } } ?: return PeerPath.NotPeer
-    val direct = peer.direct?.takeIf { it.isNotBlank() }
-    val relay = peer.relay?.takeIf { it.isNotBlank() }
-    return when {
-        direct != null -> PeerPath.Direct(direct)
-        // Relay is the peer's home DERP region and is reported even when idle; it is the path only while active.
-        relay != null && peer.active == true && peer.online -> PeerPath.Relayed(relay)
-        else -> PeerPath.NotReported
-    }
+    status.peers.firstOrNull { p -> p.addresses.any { sameAddress(it, address) } }?.let { return peerPath(it) }
+    return subnetRouterFor(status, address) ?: PeerPath.NotPeer
+}
+
+/** The peer that routes for [address] (IPv4 only), from its primary routes or, where none are reported, allowed IPs. */
+internal fun subnetRouterFor(status: TailscaleStatus, address: String): PeerPath.SubnetRouter? {
+    val n = ScanRules.ipv4(address.substringBefore('%')) ?: return null
+    return status.peers.filter { it.location == null }.flatMap { p ->
+        (if (p.primaryRoutes.isNotEmpty()) p.primaryRoutes else p.allowedIps).mapNotNull(::parseIpv4Net).filter { it.prefix in 1..31 && it.contains(n) }.map { it to p }
+    }.maxByOrNull { it.first.prefix }?.let { (net, p) -> PeerPath.SubnetRouter(p.hostName, net.toString(), peerPath(p)) }
 }
 
 private fun routeFailure(error: Throwable): String {

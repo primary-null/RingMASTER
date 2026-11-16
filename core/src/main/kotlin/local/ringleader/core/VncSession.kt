@@ -27,15 +27,37 @@ const val VNC_GUEST_STOPPED = "The guest is stopped."
 const val VNC_NO_PERMISSION = "This token lacks VM.Console on this VM."
 const val VNC_LOST = "The connection was lost."
 const val VNC_TEXT_FRAME = "The console sent text instead of screen data."
+/**
+ * What a console (the VNC screen or a terminal) says when TLS refused the server's certificate: it did not match the pin, or is not
+ * trusted, or does not name this address. Said apart from [VNC_LOST], so that a changed certificate is not mistaken for a dropped
+ * network. It holds no address, ticket or certificate detail.
+ */
+const val CONSOLE_CERTIFICATE_REFUSED = "The server's certificate is not the one you trusted. Reconnect from the Desk."
+
+/**
+ * True when a connection failed because of the server's certificate: somewhere in the cause chain is a [java.security.cert.CertificateException]
+ * (a pin that no longer matches, an untrusted or expired certificate, a name that does not match) or an unverified peer. A TLS error that
+ * says nothing about a certificate (a reset in the middle of the handshake, a protocol error) is not one.
+ */
+internal fun certificateRefused(error: Throwable): Boolean =
+    generateSequence(error) { it.cause }.take(10).any { it is java.security.cert.CertificateException || it is javax.net.ssl.SSLPeerUnverifiedException }
 
 /** Client messages waiting for the writer. Far more than a live socket ever holds; a full outbox means a stall. */
 internal const val VNC_OUTBOX_LIMIT = 4096
 /** Websocket chunks the reader may lag behind before the socket stops asking the server for more. */
 internal const val VNC_SOCKET_CHUNKS = 256
-/** Keepalive period. A ping still unanswered at the next period ends the session. */
-internal const val VNC_PING_SECONDS = 30L
+/** Keepalive period. A ping still unanswered at the next period ends the session (see [WebSocketKeepalive]). */
+internal const val VNC_PING_SECONDS = WEBSOCKET_PING_SECONDS
 internal const val VNC_CLOSE_FLUSH_MS = 300L
-private val VNC_PING_PAYLOAD = "ringmaster".toByteArray(Charsets.US_ASCII)
+/**
+ * Longest side of a framebuffer, and so of any rectangle in it. A rectangle is validated against the framebuffer before a
+ * byte of it is read, which bounds every encoding at once: at most 8192 x 8192 x 4 bytes (256 MiB) of pixels, though no
+ * rectangle is ever held in memory whole (a 7680 x 4320 screen is 126.6 MiB of pixels, the biggest the console is meant for).
+ */
+internal const val VNC_MAX_SIDE = 8192
+/** Compressed or raw bytes read, and decompressed bytes converted, at a time. A multiple of 4, so a Raw slice is whole pixels. */
+internal const val VNC_SLICE_BYTES = 64 * 1024
+private val VNC_PING_PAYLOAD = WEBSOCKET_PING_PAYLOAD
 
 /** True when [requireSpiceDisplay] accepts this VM config `vga` value (qxl, including options after a comma). */
 fun spiceDisplayAvailable(vga: String?): Boolean = runCatching { requireSpiceDisplay(vga) }.isSuccess
@@ -165,28 +187,6 @@ class LiveVncConsoleGateway(private val client: PveClient = PveClient()) : VncCo
 }
 
 /**
- * Websocket keepalive. Each [tick] sends one ping; a tick that finds the previous ping still unanswered, or a ping
- * that cannot be sent, reports [lost]. Nothing is retried and no new console ticket is requested.
- */
-internal class VncKeepalive(private val ping: () -> CompletionStage<*>, private val lost: () -> Unit) {
-    private val waiting = AtomicBoolean(false)
-    private val ended = AtomicBoolean(false)
-    fun tick() {
-        if (ended.get()) return
-        if (waiting.getAndSet(true)) { end(); return }
-        try { ping().whenComplete { _, error -> if (error != null) failed(error) } }
-        catch (e: Exception) { failed(e) }
-    }
-    /** IllegalStateException only says another ping or pong is still being sent (or the socket is closing): skip one beat. */
-    private fun failed(error: Throwable) {
-        val root = if (error is java.util.concurrent.CompletionException && error.cause != null) error.cause!! else error
-        if (root is IllegalStateException) waiting.set(false) else end()
-    }
-    fun pong() { waiting.set(false) }
-    private fun end() { if (ended.compareAndSet(false, true)) lost() }
-}
-
-/**
  * Keys and buttons the guest currently sees as held. A key-up repeats what its key-down sent, so a modifier that
  * changed the character in between still releases the same key. [Physical] keys are identified by the caller.
  */
@@ -225,6 +225,7 @@ class VncSession internal constructor(rawChannel: RfbChannel) : AutoCloseable {
     private val trace = Trace.begin(TraceSource.Console, "VNC session", session=true)
     private val channel = object : RfbChannel {
         override fun read(n: Int) = rawChannel.read(n).also { trace.bytes(bytesIn=it.size.toLong()) }
+        override fun readInto(dest: ByteArray, offset: Int, length: Int) { rawChannel.readInto(dest, offset, length); trace.bytes(bytesIn=length.toLong()) }
         override fun write(bytes: ByteArray) { rawChannel.write(bytes); trace.bytes(bytesOut=bytes.size.toLong()) }
         override fun close() = rawChannel.close()
     }
@@ -234,14 +235,16 @@ class VncSession internal constructor(rawChannel: RfbChannel) : AutoCloseable {
     private val writeLock = Any()
     private val frameLock = Any()
     private val inflater = Inflater()
-    private var zbuf = ByteArray(0)
+    /** Reused for every rectangle: compressed (or raw) bytes in, and the decompressed bytes waiting to become pixels. */
+    private val sliceIn = ByteArray(VNC_SLICE_BYTES)
+    private val sliceOut = ByteArray(VNC_SLICE_BYTES)
     private var pixels = IntArray(0)
     private var thread: Thread? = null
     private val outbox = LinkedBlockingQueue<ByteArray>(VNC_OUTBOX_LIMIT)
     private val stop = ByteArray(0)
     @Volatile private var writer: Thread? = null
     private var keepalive: java.util.concurrent.ScheduledExecutorService? = null
-    @Volatile private var heartbeat: VncKeepalive? = null
+    @Volatile private var heartbeat: WebSocketKeepalive? = null
     private val held = VncHeldInput()
     /** True once the server confirmed QEMU extended key events; keys with a keycode then use [vncQemuKeyEvent]. */
     @Volatile var extendedKeys: Boolean = false
@@ -366,7 +369,7 @@ class VncSession internal constructor(rawChannel: RfbChannel) : AutoCloseable {
         }
         channel.write(byteArrayOf(1))
         val w = u16(); val h = u16()
-        check(w in 1..8192 && h in 1..8192) { "The console dimensions are invalid." }
+        check(w in 1..VNC_MAX_SIDE && h in 1..VNC_MAX_SIDE) { "The console dimensions are invalid." }
         channel.read(16)
         skip(i32())
         synchronized(frameLock) {
@@ -397,7 +400,7 @@ class VncSession internal constructor(rawChannel: RfbChannel) : AutoCloseable {
             catch (e: Exception) { if (!closed.get()) finish(VNC_LOST) }
         }, "vnc-console-writer").apply { isDaemon = true; start() }
         pinger?.let { ping ->
-            val beat = VncKeepalive(ping) { if (!closed.get()) finish(VNC_LOST) }
+            val beat = WebSocketKeepalive(ping) { if (!closed.get()) finish(VNC_LOST) }
             heartbeat = beat
             keepalive = java.util.concurrent.Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "vnc-keepalive").apply { isDaemon = true } }
                 .also { it.scheduleAtFixedRate({ beat.tick() }, VNC_PING_SECONDS, VNC_PING_SECONDS, TimeUnit.SECONDS) }
@@ -439,7 +442,7 @@ class VncSession internal constructor(rawChannel: RfbChannel) : AutoCloseable {
             when (encoding) {
                 0 -> { raw(x, y, w, h); dirty = true }
                 1 -> { copyRect(x, y, w, h, u16(), u16()); dirty = true }
-                6 -> { rawBytes(x, y, w, h, zlibRect(w, h)); dirty = true }
+                6 -> { zlibRect(x, y, w, h); dirty = true }
                 -223 -> resize(w, h)
                 -239 -> cursor(x, y, w, h)
                 VNC_QEMU_EXTENDED_KEY -> extendedKeys = true
@@ -450,66 +453,121 @@ class VncSession internal constructor(rawChannel: RfbChannel) : AutoCloseable {
         if (!closed.get() && !paused) request(true)
     }
 
-    private fun raw(x: Int, y: Int, w: Int, h: Int) {
+    /** A rectangle must lie inside the framebuffer; it is checked before any of its bytes are read. */
+    private fun checkRect(x: Int, y: Int, w: Int, h: Int) {
         check(w > 0 && h > 0 && x + w <= width && y + h <= height) { "The console rectangle is invalid." }
-        val bytes = channel.read(w * h * 4)
-        rawBytes(x, y, w, h, bytes)
     }
 
-    private fun rawBytes(x: Int, y: Int, w: Int, h: Int, bytes: ByteArray) {
-        check(w > 0 && h > 0 && x + w <= width && y + h <= height && bytes.size >= w * h * 4) { "The console rectangle is invalid." }
+    /**
+     * Raw pixels, read a slice at a time straight into the framebuffer: a full-screen rectangle on a big screen is tens of
+     * megabytes, and it is never held whole.
+     */
+    private fun raw(x: Int, y: Int, w: Int, h: Int) {
+        checkRect(x, y, w, h)
+        var left = w.toLong() * h * 4
+        var done = 0L
+        while (left > 0) {
+            val n = minOf(left, sliceIn.size.toLong()).toInt()
+            channel.readInto(sliceIn, 0, n)
+            storePixels(x, y, w, done, sliceIn, 0, n)
+            done += n / 4
+            left -= n
+        }
+    }
+
+    /**
+     * Converts [count] bytes (whole B,G,R,pad pixels) of the rectangle at [x],[y] with width [w] into the framebuffer,
+     * starting at pixel number [done] of the rectangle (row by row). The frame lock is held for one slice at a time, so the
+     * picture is never locked while a rectangle is still on the network.
+     */
+    private fun storePixels(x: Int, y: Int, w: Int, done: Long, src: ByteArray, from: Int, count: Int) {
         synchronized(frameLock) {
-            var i = 0
-            repeat(h) { row ->
-                val dest = (y + row) * width + x
-                repeat(w) { col ->
-                    val b = bytes[i].toInt() and 255
-                    val g = bytes[i + 1].toInt() and 255
-                    val r = bytes[i + 2].toInt() and 255
-                    pixels[dest + col] = (255 shl 24) or (r shl 16) or (g shl 8) or b
+            var i = from
+            val end = from + count
+            var row = (done / w).toInt()
+            var col = (done % w).toInt()
+            while (i < end) {
+                val run = minOf((end - i) / 4, w - col)
+                var dest = (y + row) * width + x + col
+                val stop = i + run * 4
+                while (i < stop) {
+                    pixels[dest++] = (255 shl 24) or ((src[i + 2].toInt() and 255) shl 16) or ((src[i + 1].toInt() and 255) shl 8) or (src[i].toInt() and 255)
                     i += 4
                 }
+                col += run
+                if (col == w) { col = 0; row++ }
             }
         }
     }
 
+    /**
+     * Moves a rectangle within the framebuffer, a row at a time, in the order that never overwrites a row that has not been
+     * moved yet (bottom up when moving down, top down otherwise), so no copy of the rectangle is needed.
+     */
     private fun copyRect(x: Int, y: Int, w: Int, h: Int, sx: Int, sy: Int) {
-        check(w > 0 && h > 0 && x + w <= width && y + h <= height && sx + w <= width && sy + h <= height) { "The console rectangle is invalid." }
+        checkRect(x, y, w, h)
+        check(sx + w <= width && sy + h <= height) { "The console rectangle is invalid." }
         synchronized(frameLock) {
-            val tmp = IntArray(w * h)
-            repeat(h) { row ->
-                val src = (sy + row) * width + sx
-                pixels.copyInto(tmp, row * w, src, src + w)
-            }
-            repeat(h) { row -> tmp.copyInto(pixels, (y + row) * width + x, row * w, row * w + w) }
+            val rows = if (y > sy) (h - 1 downTo 0) else (0 until h)
+            for (row in rows) System.arraycopy(pixels, (sy + row) * width + sx, pixels, (y + row) * width + x, w)
         }
     }
 
-    /** One persistent inflater. Unconsumed input is prepended to the next rectangle so the zlib stream stays continuous. */
-    private fun zlibRect(w: Int, h: Int): ByteArray {
-        val need = w * h * 4
-        check(need in 4..16_777_216) { "The console rectangle is too large." }
-        val length = u32()
-        check(length in 0..16_777_216) { "The console message is too large." }
-        val chunk = if (length == 0) ByteArray(0) else channel.read(length)
-        val unused = inflater.remaining
-        val tail = if (unused > 0 && zbuf.size >= unused) zbuf.copyOfRange(zbuf.size - unused, zbuf.size) else ByteArray(0)
-        zbuf = if (tail.isEmpty()) chunk else tail + chunk
-        if (zbuf.isEmpty()) error("The console zlib data ended early.")
-        inflater.setInput(zbuf)
-        val out = ByteArray(need)
-        var filled = 0
-        while (filled < need) {
-            val n = try { inflater.inflate(out, filled, need - filled) }
-            catch (e: DataFormatException) { error("The console zlib data is invalid.") }
-            if (n == 0) error("The console zlib data ended early.")
-            filled += n
+    /**
+     * Hands the inflater the next slice of the rectangle's compressed bytes; [left] counts those not yet read, and what is
+     * still left is returned.
+     */
+    private fun feedInflater(left: Long): Long {
+        if (left == 0L) error("The console zlib data ended early.")
+        val n = minOf(left, sliceIn.size.toLong()).toInt()
+        channel.readInto(sliceIn, 0, n)
+        inflater.setInput(sliceIn, 0, n)
+        return left - n
+    }
+
+    /**
+     * One zlib rectangle. The connection has ONE inflater, so each rectangle continues the stream of the last. The
+     * compressed bytes are read a slice at a time, inflated into a reused buffer and converted to pixels as they come: the
+     * rectangle is held whole neither compressed nor decompressed, however big the screen. The compressed length is bounded
+     * by what the rectangle needs plus generous room for zlib's worst case (about 0.03 % over for data that cannot be
+     * compressed).
+     */
+    private fun zlibRect(x: Int, y: Int, w: Int, h: Int) {
+        checkRect(x, y, w, h)
+        val need = w.toLong() * h * 4
+        val length = u32().toLong()
+        check(length <= need + need / 64 + 65_536) { "The console message is too large." }
+        var inLeft = length
+        var produced = 0L
+        var held = 0                // decompressed bytes in sliceOut that are not yet a whole pixel
+        var done = 0L               // pixels stored
+        while (produced < need) {
+            if (inflater.needsInput()) inLeft = feedInflater(inLeft)
+            val room = minOf((sliceOut.size - held).toLong(), need - produced).toInt()
+            val got = try { inflater.inflate(sliceOut, held, room) } catch (e: DataFormatException) { error("The console zlib data is invalid.") }
+            if (got == 0) {
+                if (inflater.needsInput()) continue
+                error("The console zlib data ended early.")
+            }
+            produced += got
+            held += got
+            val whole = held and 3.inv()
+            if (whole > 0) { storePixels(x, y, w, done, sliceOut, 0, whole); done += whole / 4 }
+            held -= whole
+            if (held > 0) System.arraycopy(sliceOut, whole, sliceOut, 0, held)
         }
-        return out
+        // A rectangle's data ends with a sync flush, an empty block that produces nothing. Take in what is left of it, so the
+        // next rectangle continues the same stream, and refuse data that runs on past the rectangle.
+        while (true) {
+            if (inflater.needsInput()) { if (inLeft == 0L) break; inLeft = feedInflater(inLeft) }
+            val extra = try { inflater.inflate(sliceOut, 0, 1) } catch (e: DataFormatException) { error("The console zlib data is invalid.") }
+            if (extra > 0) error("The console zlib data is longer than its rectangle.")
+            if (!inflater.needsInput()) error("The console zlib data is invalid.")
+        }
     }
 
     private fun resize(w: Int, h: Int) {
-        check(w in 1..8192 && h in 1..8192) { "The console dimensions are invalid." }
+        check(w in 1..VNC_MAX_SIDE && h in 1..VNC_MAX_SIDE) { "The console dimensions are invalid." }
         synchronized(frameLock) {
             val next = IntArray(w * h)
             val copyW = minOf(width, w)
@@ -602,12 +660,30 @@ class VncSession internal constructor(rawChannel: RfbChannel) : AutoCloseable {
      * Ends the session. A clean close first releases held keys and buttons, and gives the writer a moment to send
      * those key-ups, so the guest is never left with a modifier down.
      */
-    override fun close() {
-        if (closed.get()) return
+    override fun close() { if (begin()) end() }
+
+    /**
+     * Closes the session for the caller at once ([isClosed] is true, no more input is taken) and finishes the slow part on a short-lived
+     * thread: the writer's last flush (up to 300 ms), the reader's end (up to 500 ms), the socket. For callers on the UI thread, where a
+     * session whose socket has stalled would otherwise hold the window for most of a second. The order of the steps is the same as [close].
+     */
+    fun closeInBackground() {
+        if (!begin()) return
+        Thread({ runCatching { end() } }, "vnc-console-closer").apply { isDaemon = true }.start()
+    }
+
+    /** The part of closing that is quick: release what the guest sees as held, mark the session closed, stop the keepalive. False if already closed. */
+    private fun begin(): Boolean {
+        if (closed.get()) return false
         if (ready && !lost) runCatching { releaseInput() }
-        if (!closed.compareAndSet(false, true)) return
+        if (!closed.compareAndSet(false, true)) return false
         trace.end()
         keepalive?.shutdownNow()
+        return true
+    }
+
+    /** The part that can wait on the network: see [closeInBackground]. */
+    private fun end() {
         val out = writer
         if (out != null) {
             outbox.offer(stop)
@@ -687,7 +763,8 @@ internal fun openVncSession(connection: Connection, base: String, proxy: (String
         val origin = serverOrigin(connection.address)
         val uri = URI("wss://${origin.rawAuthority}$base/vncwebsocket?port=$port&vncticket=${URLEncoder.encode(ticket, Charsets.UTF_8)}")
         val http = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NEVER).connectTimeout(Duration.ofSeconds(20)).apply {
-            pinnedSslContext(connection.fingerprint)?.let { sslContext(it) }
+            sslContext(pinnedSslContext(connection.fingerprint) ?: platformSslContext())
+            sslParameters(tlsFloorParameters())
         }.build()
         val pipe = VncSocket()
         try {
@@ -718,6 +795,7 @@ internal fun openVncSession(connection: Connection, base: String, proxy: (String
 }
 
 private fun sanitized(e: Exception): Exception {
+    if (certificateRefused(e)) return IllegalStateException(CONSOLE_CERTIFICATE_REFUSED)
     if (e is java.util.concurrent.ExecutionException) return sanitized((e.cause as? Exception) ?: IllegalStateException(VNC_LOST))
     val message = e.message.orEmpty()
     if ("vncticket" in message || "wss://" in message) return IllegalStateException(VNC_LOST)
@@ -729,8 +807,23 @@ private fun sanitized(e: Exception): Exception {
  * Byte pipe over one PVE vncwebsocket. Reads block after the handshake; the ticket is never stored. The queue is
  * bounded by flow control: the socket asks the server for one more message only while the queue has room, and the
  * reader asks again once it has taken a chunk, so a slow reader never piles up websocket data.
+ *
+ * The one-shot screen capture ([captureConsoleStill]) reads through this too, with [handshake] left on so that every read
+ * is bounded by the 20 s from construction, and with its own sentences for a wait that ran out and a channel that closed.
  */
-internal class VncSocket(private val chunks: Int = VNC_SOCKET_CHUNKS) : RfbChannel, WebSocket.Listener {
+/** Runs the reader's requests for more websocket data, so a delivery never happens on a reader's own thread. */
+private val consoleDemand = java.util.concurrent.Executors.newCachedThreadPool { task -> Thread(task, "console-demand").apply { isDaemon = true } }
+
+/** How long a websocket message may wait for room in a full queue before the channel is given up as lost. */
+private const val FULL_QUEUE_WAIT_SECONDS = 20L
+
+internal class VncSocket(
+    private val chunks: Int = VNC_SOCKET_CHUNKS,
+    private val timeoutMessage: String = "The console timed out.",
+    private val lostMessage: String = VNC_LOST,
+    /** How long reads may wait from construction while [handshake] is on. */
+    private val deadlineSeconds: Long = 20,
+) : RfbChannel, WebSocket.Listener {
     private val queue = LinkedBlockingQueue<ByteArray>(chunks)
     private val writeLock = Any()
     private var pending = ByteArray(0)
@@ -743,11 +836,35 @@ internal class VncSocket(private val chunks: Int = VNC_SOCKET_CHUNKS) : RfbChann
     @Volatile var onPong: (() -> Unit)? = null
     @Volatile private var socket: WebSocket? = null
     fun attach(webSocket: WebSocket) { socket = webSocket }
-    override fun onOpen(webSocket: WebSocket) { socket = webSocket; webSocket.request(1) }
+    /** A channel closed before the upgrade finished is not opened: nothing is asked of the server, and the socket is let go. */
+    override fun onOpen(webSocket: WebSocket) { socket = webSocket; if (ended) webSocket.abort() else webSocket.request(1) }
     override fun onBinary(webSocket: WebSocket, data: ByteBuffer, last: Boolean): CompletionStage<*>? {
         val bytes = ByteArray(data.remaining()); data.get(bytes)
-        if (bytes.isNotEmpty() && !queue.offer(bytes)) { end(VNC_LOST); return null }
+        if (bytes.isNotEmpty() && !queue.offer(bytes)) {
+            // The socket asks for a message only while the queue has room, so this should not happen; it was still seen
+            // about once in 150 captures (2026-11-16, cause not found). The safe answer is to hold this one message until
+            // the reader has taken a chunk: no further message is delivered while this call has not returned.
+            if (!offerHolding(bytes)) { end(lostMessage); return null }
+        }
         more(webSocket); return null
+    }
+    /**
+     * Waits for room, up to [FULL_QUEUE_WAIT_SECONDS], whatever the thread's interrupt flag says: the client's own threads
+     * are interrupted when a neighbouring exchange is shut down, and that must not cost this console a message. The flag is
+     * put back afterwards. False when the channel ended or no room came in time.
+     */
+    private fun offerHolding(bytes: ByteArray): Boolean {
+        val until = System.nanoTime() + TimeUnit.SECONDS.toNanos(FULL_QUEUE_WAIT_SECONDS)
+        var interrupted = false
+        try {
+            while (!ended) {
+                val left = until - System.nanoTime()
+                if (left <= 0) return false
+                try { if (queue.offer(bytes, minOf(left, TimeUnit.MILLISECONDS.toNanos(250)), TimeUnit.NANOSECONDS)) return true }
+                catch (_: InterruptedException) { interrupted = true }
+            }
+            return false
+        } finally { if (interrupted) Thread.currentThread().interrupt() }
     }
     /** PVE's vncwebsocket is binary. A text frame means something in between speaks another protocol: stop at once. */
     override fun onText(webSocket: WebSocket, data: CharSequence, last: Boolean): CompletionStage<*>? { end(VNC_TEXT_FRAME); return null }
@@ -768,30 +885,37 @@ internal class VncSocket(private val chunks: Int = VNC_SOCKET_CHUNKS) : RfbChann
         paused.set(true)
         if (queue.remainingCapacity() > 0 && paused.compareAndSet(true, false)) webSocket.request(1)
     }
-    override fun read(n: Int): ByteArray {
-        val result = ByteArray(n); var written = 0
-        while (written < n) {
-            if (offset == pending.size) {
-                pending = next(); offset = 0
-                check(pending.isNotEmpty()) { failure ?: VNC_LOST }
+    override fun read(n: Int): ByteArray { val result = ByteArray(n); readInto(result, 0, n); return result }
+    /** Copies straight from the queued websocket chunks into the caller's buffer, so a big rectangle is not assembled in one array. */
+    override fun readInto(dest: ByteArray, offset: Int, length: Int) {
+        var written = 0
+        while (written < length) {
+            if (this.offset == pending.size) {
+                pending = next(); this.offset = 0
+                check(pending.isNotEmpty()) { failure ?: lostMessage }
             }
-            val count = minOf(n - written, pending.size - offset)
-            pending.copyInto(result, written, offset, offset + count); offset += count; written += count
+            val count = minOf(length - written, pending.size - this.offset)
+            pending.copyInto(dest, offset + written, this.offset, this.offset + count); this.offset += count; written += count
         }
-        return result
     }
     private fun next(): ByteArray {
-        val chunk = queue.poll() ?: if (ended) ByteArray(0) else if (!handshake) queue.take() else {
-            val left = openedAt + TimeUnit.SECONDS.toNanos(20) - System.nanoTime()
-            if (left <= 0) error("The console timed out.")
-            queue.poll(left, TimeUnit.NANOSECONDS) ?: error("The console timed out.")
+        // Seeing the end flag after an empty poll is not yet the end: the listener may have queued its last chunk and
+        // ended between the two looks. Everything queued before the flag is visible to one more poll.
+        val chunk = queue.poll() ?: if (ended) (queue.poll() ?: ByteArray(0)) else if (!handshake) queue.take() else {
+            val left = openedAt + TimeUnit.SECONDS.toNanos(deadlineSeconds) - System.nanoTime()
+            if (left <= 0) error(timeoutMessage)
+            queue.poll(left, TimeUnit.NANOSECONDS) ?: error(timeoutMessage)
         }
-        if (chunk.isNotEmpty() && paused.compareAndSet(true, false)) socket?.request(1)
+        // Asked from another thread, never from the reader's own: the JDK may run the delivery inside request() on the
+        // calling thread, and a message delivered on the reader's thread into a full queue would wait for the reader itself
+        // (seen as a 20 s stall ending in a lost channel, about once in 150 captures, 2026-11-16).
+        if (chunk.isNotEmpty() && paused.compareAndSet(true, false)) socket?.let { ws -> consoleDemand.execute { runCatching { ws.request(1) } } }
         return chunk
     }
     override fun write(bytes: ByteArray) {
-        val ws = socket ?: error(VNC_LOST)
+        val ws = socket ?: error(lostMessage)
         synchronized(writeLock) { ws.sendBinary(ByteBuffer.wrap(bytes), true).get(20, TimeUnit.SECONDS) }
     }
-    override fun close() { end(null); socket?.abort() }
+    /** Ends the channel and lets go of anything queued, so a listener call holding a message for a full queue returns at once. */
+    override fun close() { ended = true; queue.clear(); queue.offer(ByteArray(0)); socket?.abort() }
 }

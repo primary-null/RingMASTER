@@ -131,12 +131,14 @@ private fun observedView(o: RouteObservation, refreshing: Boolean, showcase: Boo
         rows += "Tunnel" to listOfNotNull(kind, name).joinToString(" · ")
         o.evidence?.let { rows += "Matched" to it.label.replaceFirstChar { c -> c.uppercase() } }
     }
-    when (val peer = o.peerPath) {
-        is PeerPath.Direct -> rows += "Peer link" to "Direct UDP to the peer (${hide(peer.endpoint)}), still inside Tailscale"
-        is PeerPath.Relayed -> rows += "Peer link" to "Relayed through Tailscale DERP ${peer.region}"
-        PeerPath.NotReported -> rows += "Peer link" to "No current path reported by Tailscale"
-        PeerPath.NotPeer -> rows += "Peer link" to "Not a peer's own address (subnet route or exit node); no peer path is shown"
+    when (val path = o.peerPath) {
         null -> {}
+        // The OS route goes through Tailscale and the status names the router for this network: both agree.
+        is PeerPath.SubnetRouter -> {
+            rows += "Through" to subnetRouterText(path, showcase)
+            rows += "Router link" to peerLinkText(path.path, showcase)
+        }
+        else -> rows += "Peer link" to peerLinkText(path, showcase)
     }
     // The estimate note belongs to a route that was actually read (an interface was named).
     val routeRead = o.interfaceName != null
@@ -159,6 +161,31 @@ private fun observedView(o: RouteObservation, refreshing: Boolean, showcase: Boo
         RouteKind.Local -> RouteTagView("LOCALHOST", "LOCAL", RouteTone.Quiet, RouteGlyph.Local, rows, notes)
         RouteKind.Unknown -> RouteTagView("ROUTE UNKNOWN", "UNKNOWN", RouteTone.Quiet, RouteGlyph.Unknown, rows, notes)
     }
+}
+
+/**
+ * The tooltip's peer-link line. It starts with the same short label the VPN page's peer table shows ([peerPathLabel]),
+ * so the two never disagree. Endpoints and relay addresses are hidden in Showcase.
+ */
+internal fun peerLinkText(path: PeerPath, showcase: Boolean): String {
+    fun hide(value: String) = if (showcase) ROUTE_HIDDEN else value
+    val label = peerPathLabel(path)
+    return when (path) {
+        is PeerPath.Direct -> "$label \u00b7 UDP straight to the peer (${hide(path.endpoint)}), still inside Tailscale"
+        is PeerPath.PeerRelayed -> "$label \u00b7 through a peer relay (${hide(path.relay)}), still inside Tailscale"
+        is PeerPath.Relayed -> "$label \u00b7 relayed through Tailscale's DERP server in region ${path.region}"
+        PeerPath.Idle -> "$label \u00b7 no recent traffic, so Tailscale reports no current path"
+        PeerPath.Offline -> "$label \u00b7 Tailscale reports this peer offline"
+        PeerPath.NotReported -> "$label \u00b7 no current path reported by Tailscale"
+        is PeerPath.SubnetRouter -> "$label ${hide(path.router)} · ${hide(path.cidr)}"
+        PeerPath.NotPeer -> "Not a peer's own address and no subnet router covers it (an exit node, or not known); no peer path is shown"
+    }
+}
+
+/** "Tailscale · subnet router <name> (<network>)": the router and network are hidden in Showcase. */
+internal fun subnetRouterText(path: PeerPath.SubnetRouter, showcase: Boolean): String {
+    fun hide(value: String) = if (showcase) ROUTE_HIDDEN else value
+    return "Tailscale · subnet router ${hide(path.router)} (${hide(path.cidr)})"
 }
 
 /** Tool diagnostics can quote identities that are not otherwise in this observation. */

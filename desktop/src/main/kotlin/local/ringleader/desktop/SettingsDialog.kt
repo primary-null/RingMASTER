@@ -129,6 +129,14 @@ internal fun settingsSheetSize(maxWidth: androidx.compose.ui.unit.Dp, maxHeight:
         }
     }
     Text("A console you leave stays connected this long, so coming back is instant. It is paused meanwhile, and at most 4 are kept per connection.", fontSize = 12.sp, color = Tech.Muted)
+    // Under the Hood does not exist in the browser, so the tray that leads there does not either.
+    if (LocalAppHost.current.traceView) {
+        SectionLabel("Live ticker")
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            TickerMode.entries.forEach { mode -> MiniAction(mode.label, primary = LiveTickerPreference.mode == mode) { LiveTickerPreference.choose(mode) } }
+        }
+        Text("A small tray of readings over the page. Automatic opens it for a few seconds when something starts, fails or finishes; Always open keeps it open; Off hides it. Each tile leads to the matching part of Under the Hood.", fontSize = 12.sp, color = Tech.Muted)
+    }
 }
 
 @Composable private fun SettingsToggle(title: String, description: String, value: Boolean, onChange: (Boolean) -> Unit) {

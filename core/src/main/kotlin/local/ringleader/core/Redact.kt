@@ -10,7 +10,12 @@ object Redact {
     private val headers = Regex("""(?im)(authorization|cookie|set-cookie|csrfpreventiontoken)["']?\s*[:=]\s*[^\r\n]+""")
     private val assignment = Regex("(?i)([\\\"']?(?:password|passwd|totp|otp|vncticket|ticket|token|secret|PVEAuthCookie|CSRFPreventionToken|tfa-challenge)[\\\"']?\\s*[:=]\\s*)(?:\\\"[^\\\"]*\\\"|'[^']*'|[^\\s&,;}]+)")
     private val apiToken = Regex("(?i)(PVEAPIToken|PDMAPIToken)=[^\\s,;\\\"']+")
-    private val ticket = Regex("(?i)(?:PVESPICEPROXY|PVEVNC|PVNC|PTERM|PVE|PDM):[^\\s&\\\"'<>]+")
+    /**
+     * A console or login ticket. `PVE:` and `PDM:` are also the default host names of the products ("connect to pve:8006 failed"), so
+     * they count only in the shape of a ticket, `PVE:user@realm:...`: a user id with an `@` right after the colon. The console
+     * ticket prefixes cannot be a host name and are masked whatever follows. Tickets are not found inside a longer word.
+     */
+    private val ticket = Regex("(?i)(?:PVESPICEPROXY|PVEVNC|PVNC|PTERM):[^\\s&\\\"'<>]+|\\b(?:PVE|PDM):(?=[^\\s:@/&\\\"'<>]{1,64}@)[^\\s&\\\"'<>]+")
     /**
      * Query parameters whose values stay readable: Proxmox routing and paging data the API client and consoles send.
      * Every other query value is masked, so a name the secret list does not know (api_key, sig, jwt) is hidden too.

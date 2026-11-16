@@ -3,13 +3,13 @@ package local.ringleader.core
 import java.net.URLEncoder
 import java.time.Instant
 import java.time.Duration
-import java.security.cert.X509Certificate
 import java.util.concurrent.CountDownLatch
-import javax.net.ssl.HttpsURLConnection
 import kotlinx.serialization.json.*
 
 class TwoFactorRequiredException : IllegalStateException("This account uses two-factor authentication. Enter the current code.")
-class LoginRefusedException(message: String = "The server refused this user name or password.") : IllegalStateException(message)
+/** What a session shows when the server answered a password sign-in with HTTP 401. */
+const val LOGIN_REFUSED = "The server refused this user name or password."
+class LoginRefusedException(message: String = LOGIN_REFUSED) : IllegalStateException(message)
 
 internal fun validateIdentity(identity: String, kind: String) {
     if ('!' in identity) require(identity.matches(tokenIdPattern)) { "Use a token ID in user@realm!token form." }
@@ -50,8 +50,12 @@ internal class TicketStore(private val clock: () -> Instant = Instant::now) {
     private var closed = false
     @Volatile private var refused: LoginRefusedException? = null
 
-    /** Drop the cached ticket because the server refused it. A login already in flight carries on. */
-    fun clear() = synchronized(lock) { entries.clear() }
+    /**
+     * Drop [refused] because the server refused it, only if it is still the cached ticket. A late 401 for a ticket that another
+     * request has already replaced must not throw the fresh one away (and cost one more password POST). A login already in
+     * flight carries on.
+     */
+    fun clear(refused: PveTicket) = synchronized(lock) { entries.values.removeIf { it === refused } }
 
     /** The connection closed: drop the ticket, release callers waiting on a login, and refuse new logins. Never waits on the network. */
     fun close() {
@@ -110,36 +114,54 @@ internal class TicketStore(private val clock: () -> Instant = Instant::now) {
         try {
         val fields = linkedMapOf("username" to c.tokenId, "password" to password)
         if (challenge != null) fields["tfa-challenge"] = challenge
+        // PVE 8 and 9 declare `new-format` as "now ignored and assumed to be 1" (pve-access-control cfd8636b, 2023-06-05,
+        // "drop support for old login API"; same text on stable-bookworm and master), so it changes nothing in their reply.
+        // It states the flow this code speaks: a NeedTFA answer whose ticket is the challenge for a second POST here.
+        fields["new-format"] = "1"
         val body = fields.entries.joinToString("&") { "${formEncode(it.key)}=${formEncode(it.value)}" }.toByteArray(Charsets.UTF_8)
-        val http = serverOrigin(c.address).resolve("/api2/json/access/ticket").toURL().openConnection() as HttpsURLConnection
-        http.instanceFollowRedirects = false
-        http.connectTimeout = 10_000
-        http.readTimeout = 20_000
-        pinnedSslContext(c.fingerprint)?.let {
-            http.sslSocketFactory = it.socketFactory
-            http.setHostnameVerifier { _, session -> certificateMatches(session.peerCertificates[0] as X509Certificate, c.fingerprint) }
-        }
+        val http = openPinnedHttps(serverOrigin(c.address).resolve("/api2/json/access/ticket"), c.fingerprint, 10_000, 20_000)
         val data = try {
             http.requestMethod = "POST"
             http.doOutput = true
+            // Fixed length puts the POST in streaming mode, which the JDK never re-sends after a dropped connection: one
+            // sign-in, two-factor or renewal attempt is one POST of its password, code or ticket. A lost answer is an I/O failure.
+            http.setFixedLengthStreamingMode(body.size)
             http.setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
+            connectAboveTlsFloor(http)
             http.outputStream.use { it.write(body) }
             when (http.responseCode) {
-                200 -> try { Json.parseToJsonElement(http.inputStream.bufferedReader().use { it.readText() }).jsonObject["data"]!!.jsonObject }
+                200 -> try { serverJson(http.inputStream.use { readAnswer(it, ANSWER_LIMIT_TICKET) }).jsonObject["data"]!!.jsonObject }
+                    catch (e: AnswerRefusedException) { throw e }
                     catch (_: Exception) { error("The server returned an invalid login response.") }
-                401 -> throw LoginRefusedException(if (challenge == null) "The server refused this user name or password." else "The server refused the two-factor code.")
+                401 -> throw LoginRefusedException(if (challenge == null) LOGIN_REFUSED else "The server refused the two-factor code.")
                 else -> error("The server refused the login request (HTTP ${http.responseCode}).")
             }
         } finally { body.fill(0); http.disconnect() }
         val ticket = data["ticket"]?.jsonPrimitive?.contentOrNull ?: error("The server returned an invalid login response.")
-        if (data["NeedTFA"]?.jsonPrimitive?.content in listOf("1", "true")) {
+        // NeedTFA arrives as 1 from PVE; true and "1" are read the same. A success has no NeedTFA and may carry cap and clustername.
+        if ((data["NeedTFA"] as? JsonPrimitive)?.content in listOf("1", "true")) {
             if (challenge != null || otp.isNullOrBlank()) throw TwoFactorRequiredException()
-            val code = if (listOf("totp:", "recovery:", "webauthn:", "yubico:").any { otp.startsWith(it) }) otp
-                else (if ('-' in otp || otp.length > 8) "recovery:" else "totp:") + otp
-            return request(c, code, challenge = ticket)
+            return request(c, tfaResponse(otp), challenge = ticket)
         }
         val csrf = data["CSRFPreventionToken"]?.jsonPrimitive?.contentOrNull ?: error("The server returned an invalid login response.")
         return PveTicket(ticket, csrf, clock())
         } catch (t: Throwable) { trace.end(error=t); throw t } finally { trace.end() }
     }
+}
+
+private val tfaPrefixes = listOf("totp:", "recovery:", "webauthn:", "yubico:")
+private const val MODHEX = "cbdefghijklnrtuv"
+
+/**
+ * The second-factor answer with its kind. A typed prefix is kept. Otherwise six to eight digits are a TOTP code; 32 to 64
+ * ModHex characters are a Yubico OTP (a YubiKey types 44: a 12-character public ID and a 32-character token, and ModHex has no
+ * digits); anything else with a dash or longer than eight characters is a recovery key (Proxmox prints them as
+ * `xxxx-xxxx-xxxx-xxxx`); the rest is sent as TOTP and the server judges it.
+ */
+internal fun tfaResponse(otp: String): String = when {
+    tfaPrefixes.any { otp.startsWith(it) } -> otp
+    otp.length in 6..8 && otp.all { it in '0'..'9' } -> "totp:$otp"
+    otp.length in 32..64 && otp.all { it.lowercaseChar() in MODHEX } -> "yubico:$otp"
+    '-' in otp || otp.length > 8 -> "recovery:$otp"
+    else -> "totp:$otp"
 }

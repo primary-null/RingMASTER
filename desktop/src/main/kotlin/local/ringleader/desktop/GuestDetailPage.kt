@@ -147,8 +147,10 @@ internal var guestHeaderProbe: (() -> Unit)? = null
             SideEffect { if (tab != "Console" && arrival != guest.resource) arrival = guest.resource }
             ArrivalAction("Console", arrival) { tab = "Console" }
             WebUiAction(if (state.demo || state.kind == PDM_KIND || guest.scope.isNotEmpty()) null else PveWebUi.guest(state.address, guest.kind, guest.id))
+            GuestSshButton(state, guest)
             HelpTip("Refresh") { MiniAction("↻", enabled = !state.inspectionLoading, width = 30.dp) { workspace.inspectGuest() } }
         }
+        GuestSshNote(state, guest)
         if (serviceDialog && pins != null && connectionKey != null) PinServiceDialog(guest, report, state.demo, { serviceDialog = false }) { serviceName, url ->
             val error = pins.addService(connectionKey, guest, serviceName, url)
             if (error == null) serviceDialog = false
@@ -192,8 +194,8 @@ internal var guestHeaderProbe: (() -> Unit)? = null
                 if (runningGuest) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
                     if (guest.kind == "VM" && state.kind != PDM_KIND && !state.demo) ConsoleStillCard(state, workspace, guest, 300.dp, onOpenConsole = { tab = "Console" })
                     ArcGauge(cpuNow, "CPU", state.details?.cpus?.let { "$it vCPU" }, modifier = Modifier.opensLens { guestLens(guest, LiveMetric.Cpu) }, series = live, metric = { it.cpu })
-                    ArcGauge(if (runningGuest) memoryFraction(mem, cap) else null, "Memory", "${iec(mem?.toDouble())} / ${iec(cap?.toDouble())}", modifier = Modifier.opensLens { guestLens(guest, LiveMetric.Memory) }, series = live, metric = { memoryFraction(it.mem, it.memMax) })
-                    Sparkline(live, Modifier.opensLens { guestLens(guest, LiveMetric.Cpu) }.weight(1f).height(56.dp))
+                    ArcGauge(if (runningGuest) memoryFraction(mem, cap) else null, "Memory", "${iec(mem?.toDouble())} / ${iec(cap?.toDouble())}", modifier = Modifier.opensLens { guestLens(guest, LiveMetric.Memory) }, series = live, metric = { memoryFraction(it.mem, it.memMax) }, thresholds = MetricThresholds.Capacity)
+                    Sparkline(live, Modifier.opensLens { guestLens(guest, LiveMetric.Cpu) }.weight(1f).height(56.dp), scaleKind = AxisKind.Fraction, guides = listOf(MetricThresholds.Load.attention, MetricThresholds.Load.critical), peak = true, stale = state.stale)
                 }
                 HistoryGroup(state, workspace)
             }

@@ -89,7 +89,9 @@ private fun ipAddress(value: String, v6: Boolean): Boolean {
 }
 private fun MutableMap<FieldId, String>.address(cidr: String, gateway: String, v6: Boolean) {
     val f = if (v6) CreateFields.IP6 else CreateFields.IP4
-    if (cidr.isNotBlank() && (cidr.count { it == '/' } != 1 || !ipAddress(cidr.substringBefore('/'), v6) || (cidr.substringAfter('/').toIntOrNull() ?: -1) !in 0..(if (v6) 128 else 32))) this[f] = "Use an address with a network prefix."
+    // The prefix is ASCII digits only: toIntOrNull also reads a leading '+' or '-' and digits of other scripts.
+    if (cidr.isNotBlank() && (cidr.count { it == '/' } != 1 || !ipAddress(cidr.substringBefore('/'), v6) ||
+            (cidr.substringAfter('/').takeIf { p -> p.isNotEmpty() && p.all { c -> c in '0'..'9' } }?.toIntOrNull() ?: -1) !in 0..(if (v6) 128 else 32))) this[f] = "Use an address with a network prefix."
     if (gateway.isNotBlank() && (cidr.isBlank() || !ipAddress(gateway, v6))) this[if (v6) CreateFields.GW6 else CreateFields.GW4] = "Use a gateway of the same address family with a static address."
 }
 internal fun validateVmFields(d: VmDraft, c: CreateContext): Map<FieldId, String> = commonCreateErrors(d.node, d.vmid, d.name, d.tags, c).apply {

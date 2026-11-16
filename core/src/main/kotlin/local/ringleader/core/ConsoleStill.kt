@@ -9,7 +9,6 @@ import java.io.ByteArrayOutputStream
 import java.net.URI
 import java.net.URLEncoder
 import java.net.http.HttpClient
-import java.net.http.WebSocket
 import java.nio.ByteBuffer
 import java.time.Instant
 import java.time.Duration
@@ -39,6 +38,11 @@ class LiveConsoleStillGateway(private val client: PveClient = PveClient()) : Con
 /** An exact-length byte stream independent of WebSocket message boundaries. */
 internal interface RfbChannel : AutoCloseable {
     fun read(n: Int): ByteArray
+    /**
+     * Reads exactly [length] bytes into [dest] at [offset]. A channel that can fill the caller's buffer directly overrides
+     * this, so a big rectangle is read through one small reused buffer instead of one array the size of the rectangle.
+     */
+    fun readInto(dest: ByteArray, offset: Int, length: Int) { read(length).copyInto(dest, offset) }
     fun write(bytes: ByteArray)
 }
 
@@ -77,13 +81,15 @@ internal fun captureRfbFrame(channel: RfbChannel, password: String): RfbFrame {
     }
     channel.write(byteArrayOf(1)) // shared: preserve existing viewers
     val width = u16(); val height = u16()
-    check(width in 1..8192 && height in 1..8192) { "The console dimensions are invalid." }
+    check(width in 1..VNC_MAX_SIDE && height in 1..VNC_MAX_SIDE) { "The console dimensions are invalid." }
     channel.read(16); skip(i32())
     channel.write(byteArrayOf(0, 0, 0, 0, 32, 24, 0, 1, 0, -1, 0, -1, 0, -1, 16, 8, 0, 0, 0, 0))
     channel.write(byteArrayOf(2, 0, 0, 1, 0, 0, 0, 0))
     channel.write(ByteBuffer.allocate(10).put(3).put(0).putShort(0).putShort(0).putShort(width.toShort()).putShort(height.toShort()).array())
     val pixels = IntArray(width * height)
     val covered = BitSet(pixels.size)
+    // One row at a time through one buffer: the rectangle is the whole screen, and is never held whole.
+    val row = ByteArray(width * 4)
     while (covered.cardinality() < pixels.size) {
         when (u8()) {
             0 -> {
@@ -92,13 +98,13 @@ internal fun captureRfbFrame(channel: RfbChannel, password: String): RfbFrame {
                     val x = u16(); val y = u16(); val w = u16(); val h = u16(); val encoding = i32()
                     check(encoding == 0) { "Unsupported console rectangle encoding: $encoding." }
                     check(w > 0 && h > 0 && x + w <= width && y + h <= height) { "The console rectangle is invalid." }
-                    repeat(h) { row ->
-                        val bytes = channel.read(w * 4)
+                    repeat(h) { line ->
+                        channel.readInto(row, 0, w * 4)
                         repeat(w) { col ->
-                            val i = col * 4; val target = (y + row) * width + x + col
-                            pixels[target] = (255 shl 24) or ((bytes[i + 2].toInt() and 255) shl 16) or ((bytes[i + 1].toInt() and 255) shl 8) or (bytes[i].toInt() and 255)
+                            val i = col * 4; val target = (y + line) * width + x + col
+                            pixels[target] = (255 shl 24) or ((row[i + 2].toInt() and 255) shl 16) or ((row[i + 1].toInt() and 255) shl 8) or (row[i].toInt() and 255)
                         }
-                        covered.set((y + row) * width + x, (y + row) * width + x + w)
+                        covered.set((y + line) * width + x, (y + line) * width + x + w)
                     }
                 }
             }
@@ -131,40 +137,6 @@ internal fun frameStill(frame: RfbFrame): ConsoleStill {
     return ConsoleStill(image.width, image.height, output.toByteArray(), Instant.now(), blank)
 }
 
-private class WebSocketRfb(private val deadline: Long) : RfbChannel, WebSocket.Listener {
-    private val queue = LinkedBlockingQueue<ByteArray>(256)
-    @Volatile private var closed = false
-    private var pending = ByteArray(0)
-    private var offset = 0
-    lateinit var socket: WebSocket
-    private fun remaining() = (deadline - System.nanoTime()).coerceAtLeast(1)
-    override fun onOpen(webSocket: WebSocket) { socket = webSocket; if (closed) webSocket.abort() else webSocket.request(1) }
-    override fun onBinary(webSocket: WebSocket, data: ByteBuffer, last: Boolean): CompletionStage<*>? {
-        val bytes = ByteArray(data.remaining()); data.get(bytes)
-        if (bytes.isNotEmpty() && !queue.offer(bytes)) { close(); queue.clear(); queue.offer(ByteArray(0)) }
-        webSocket.request(1); return null
-    }
-    /** The console is binary; a text frame ends the capture at once instead of waiting for the timeout. */
-    override fun onText(webSocket: WebSocket, data: CharSequence, last: Boolean): CompletionStage<*>? { text = true; queue.clear(); queue.offer(ByteArray(0)); return null }
-    override fun onClose(webSocket: WebSocket, statusCode: Int, reason: String): CompletionStage<*>? { queue.offer(ByteArray(0)); return null }
-    override fun onError(webSocket: WebSocket, error: Throwable) { queue.offer(ByteArray(0)) }
-    @Volatile private var text = false
-    override fun read(n: Int): ByteArray {
-        val result = ByteArray(n); var written = 0
-        while (written < n) {
-            if (offset == pending.size) {
-                pending = queue.poll(remaining(), TimeUnit.NANOSECONDS) ?: error("The console capture timed out."); offset = 0
-                check(pending.isNotEmpty()) { if (text) VNC_TEXT_FRAME else "The console channel closed before a frame arrived." }
-            }
-            val count = minOf(n - written, pending.size - offset)
-            pending.copyInto(result, written, offset, offset + count); offset += count; written += count
-        }
-        return result
-    }
-    override fun write(bytes: ByteArray) { socket.sendBinary(ByteBuffer.wrap(bytes), true).get(remaining(), TimeUnit.NANOSECONDS) }
-    override fun close() { closed = true; if (::socket.isInitialized) socket.abort() }
-}
-
 internal fun stillFailure(e: Throwable): Throwable {
     var root: Throwable = e
     while (root is ExecutionException && root.cause != null) root = root.cause!!
@@ -176,12 +148,14 @@ internal fun stillFailure(e: Throwable): Throwable {
     return IllegalStateException("The screen could not be captured.")
 }
 
-internal fun captureConsoleStill(connection: Connection, base: String, proxy: (String) -> String): ConsoleStill {
+/** One frame within [seconds] in all: the ticket, the connection, the handshake and every pixel. */
+internal fun captureConsoleStill(connection: Connection, base: String, seconds: Long = 20, proxy: (String) -> String): ConsoleStill {
     val trace = Trace.begin(TraceSource.Console, "VNC still capture", mapOf("path" to base))
     try {
     val worker = Executors.newSingleThreadExecutor { runnable -> Thread(runnable, "console-still").apply { isDaemon = true } }
-    val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20)
-    val channel = WebSocketRfb(deadline)
+    val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(seconds)
+    // The same flow-controlled socket the live console reads through: the next websocket message is requested only while its queue has room.
+    val channel = VncSocket(timeoutMessage = "The console capture timed out.", lostMessage = "The console channel closed before a frame arrived.", deadlineSeconds = seconds)
     val future = worker.submit<ConsoleStill> {
         connection.withSecret { secret ->
             val data = Json.parseToJsonElement(Trace.call(TraceSource.Console, "POST $base/vncproxy") { proxy(secret) }).jsonObject["data"]!!.jsonObject
@@ -192,15 +166,17 @@ internal fun captureConsoleStill(connection: Connection, base: String, proxy: (S
             val origin = serverOrigin(connection.address)
             val uri = URI("wss://${origin.rawAuthority}$base/vncwebsocket?port=$port&vncticket=${URLEncoder.encode(ticket, Charsets.UTF_8)}")
             HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NEVER).connectTimeout(Duration.ofSeconds(20)).apply {
-                pinnedSslContext(connection.fingerprint)?.let { sslContext(it) }
+                sslContext(pinnedSslContext(connection.fingerprint) ?: platformSslContext())
+                sslParameters(tlsFloorParameters())
             }.build().use { client ->
-                client.newWebSocketBuilder().header(if (connection.passwordLogin) "Cookie" else "Authorization", if (connection.passwordLogin) connection.tickets.get(connection).cookie else authorizationHeader(DIRECT_PVE_KIND, connection.tokenId, secret))
+                val ws = client.newWebSocketBuilder().header(if (connection.passwordLogin) "Cookie" else "Authorization", if (connection.passwordLogin) connection.tickets.get(connection).cookie else authorizationHeader(DIRECT_PVE_KIND, connection.tokenId, secret))
                     .subprotocols("binary").buildAsync(uri, channel).get((deadline - System.nanoTime()).coerceAtLeast(1), TimeUnit.NANOSECONDS)
+                channel.attach(ws)
                 try { frameStill(captureRfbFrame(channel, password)) } finally { channel.close() }
             }
         }
     }
-    try { return future.get(20, TimeUnit.SECONDS) }
+    try { return future.get(seconds, TimeUnit.SECONDS) }
     catch (e: ExecutionException) { throw stillFailure(e) }
     catch (e: TimeoutException) { error("The console capture timed out.") }
     finally { future.cancel(true); channel.close(); worker.shutdownNow() }

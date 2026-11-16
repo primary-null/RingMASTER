@@ -30,19 +30,16 @@ internal fun fillTint(level: FillLevel?): Color = when(level) {
     else -> Tech.Green
 }
 
+/**
+ * A storage's recorded fill as a [RingGauge]: notches at the capacity thresholds (85 % and 95 %, the storage rules), the
+ * tone of its fill level, and for a shared pool the range the nodes disagree over as a wider amber arc.
+ */
 @Composable internal fun StorageRing(fraction: Double?, level: FillLevel?, size: Dp = 44.dp, range: ClosedFloatingPointRange<Double>? = null) {
-    val value by animateFloatAsState((fraction ?: 0.0).toFloat(),tween(if(LocalReduceMotion.current) 0 else 300))
     val label = fraction?.let { "${(it*100).roundToInt()}%" } ?: "—"
-    Box(Modifier.size(size).semantics { contentDescription="Recorded usage $label" },contentAlignment=Alignment.Center) {
-        Canvas(Modifier.fillMaxSize().padding(3.dp)) {
-            drawArc(Tech.Edge,-90f,360f,false,style=Stroke(4.dp.toPx()))
-            drawArc(fillTint(level),-90f,360f*value,false,style=Stroke(4.dp.toPx()))
-            range?.takeIf { it.endInclusive > it.start }?.let {
-                drawArc(Tech.Amber,-90f+360f*it.start.toFloat(),360f*(it.endInclusive-it.start).toFloat(),false,style=Stroke(7.dp.toPx()))
-            }
-        }
-        Text(label,fontFamily=Tech.Mono,fontSize=10.sp,lineHeight=14.sp,color=Tech.Ink)
-    }
+    val spread = range?.takeIf { it.endInclusive > it.start }
+    val amber = Tech.Amber
+    RingGauge(fraction, size = size, thresholds = MetricThresholds.Capacity, stroke = 4.dp, centre = label, tint = fillTint(level), description = "Recorded usage $label",
+        extra = spread?.let { r -> { inset, ring -> drawArc(amber, -90f + 360f * r.start.toFloat(), 360f * (r.endInclusive - r.start).toFloat(), false, Offset(inset, inset), ring, style = Stroke(7.dp.toPx())) } })
 }
 
 @Composable internal fun StorageCard(row: RecordedStorage, selected: Boolean, online: Boolean, group: SharedStorageGroup? = null, keyboardFocused: Boolean = false, onClick: () -> Unit) {
@@ -97,7 +94,8 @@ internal fun fillTint(level: FillLevel?): Color = when(level) {
 @Composable internal fun StorageRank(label: String, bytes: Long, maximum: Long, identity: Boolean = false, onClick: () -> Unit) {
     Column(Modifier.fillMaxWidth().clickable(onClick=onClick).padding(vertical=4.dp)) {
         Text("$label · ${storageSize(bytes)}",if(identity) Modifier.identity() else Modifier,color=Tech.Ink,fontFamily=Tech.Mono,fontSize=11.sp,lineHeight=15.sp)
-        UsageBar(if(maximum>0) (bytes.toDouble()/maximum).coerceIn(0.0,1.0) else 0.0,Modifier.fillMaxWidth())
+        // A ranking, not a judgement: one neutral colour, so the largest is not mistaken for a warning.
+        UsageBar(if(maximum>0) (bytes.toDouble()/maximum).coerceIn(0.0,1.0) else 0.0,Modifier.fillMaxWidth(),color=MetricColors.rank)
     }
 }
 

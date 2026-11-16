@@ -141,6 +141,16 @@ data class DiagnosticReport(
     }
 }
 
+/**
+ * Read timeout of the diagnostic `GET /version`. The GET carries no credentials, and pveproxy answers every unauthenticated
+ * request only after a deliberate 3-second delay (pve-http-server, src/PVE/APIServer/AnyEvent.pm: "always delay unauthorized
+ * calls by 3 seconds"). With 3000 ms a field bundle showed `SocketTimeoutException: Read timed out` against a healthy server;
+ * 6000 ms covers the delay and a slow link.
+ */
+internal const val DIAGNOSTIC_HTTP_READ_TIMEOUT_MS = 6_000
+/** The bundle keeps 500 characters of the answer; at most this many bytes are read. */
+private const val DIAGNOSTIC_BODY_BYTES = 2048
+
 suspend fun probeDiagnosticReachability(address: String, timeoutMs: Int = 3000): DiagnosticReachabilityInfo = withContext(Dispatchers.IO) {
     // The same host and port the connection uses: an origin without a port means 443.
     val target = routeTarget(address) ?: return@withContext DiagnosticReachabilityInfo(
@@ -212,7 +222,9 @@ suspend fun probeDiagnosticReachability(address: String, timeoutMs: Int = 3000):
             val url = URI("https", null, host, port, "/api2/json/version", null, null).toURL()
             val conn = (url.openConnection() as HttpURLConnection).apply {
                 connectTimeout = timeoutMs
-                readTimeout = timeoutMs
+                readTimeout = maxOf(timeoutMs, DIAGNOSTIC_HTTP_READ_TIMEOUT_MS)
+                // Trust-all and credential-free, so it never goes anywhere else: a redirect is recorded as its status.
+                instanceFollowRedirects = false
                 requestMethod = "GET"
                 setRequestProperty("Accept", "application/json")
                 if (this is HttpsURLConnection) {
@@ -222,7 +234,7 @@ suspend fun probeDiagnosticReachability(address: String, timeoutMs: Int = 3000):
             }
             httpStatus = conn.responseCode
             val stream = if (conn.responseCode in 200..299) conn.inputStream else conn.errorStream
-            val text = stream?.bufferedReader()?.use { it.readText() }
+            val text = stream?.use { it.readNBytes(DIAGNOSTIC_BODY_BYTES) }?.let { bytes -> String(bytes, Charsets.UTF_8) }
             if (text != null) {
                 httpBody = text.take(500)
             }

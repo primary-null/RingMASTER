@@ -146,7 +146,7 @@ class ConnectionRouteTest {
         val relayed = tsStatus("100.101.1.2", peer("pve", "100.70.1.5", relay = "fra"))
         assertEquals(PeerPath.Relayed("fra"), tailscalePeerPath(relayed, "100.70.1.5"))
         val idle = tsStatus("100.101.1.2", peer("pve", "100.70.1.5", relay = "fra", active = false))
-        assertEquals(PeerPath.NotReported, tailscalePeerPath(idle, "100.70.1.5"), "the home region is not a path while idle")
+        assertEquals(PeerPath.Idle, tailscalePeerPath(idle, "100.70.1.5"), "the home region is not a path while idle")
         val exit = tsStatus("100.101.1.2", peer("gw", "100.70.9.9", direct = "198.51.100.9:41641", exit = true))
         assertEquals(PeerPath.NotPeer, tailscalePeerPath(exit, "192.168.50.10"), "the exit node's path is not attached to a subnet address")
         val o = classify(OsRoute("192.168.50.10", RouteInterface("tailscale0", medium = RouteMedium.Tunnel), "100.101.1.2", null),

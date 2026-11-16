@@ -2,8 +2,12 @@ package local.ringleader.core.tools
 
 import java.time.Duration
 import java.time.Instant
+import local.ringleader.core.PeerPath
+import local.ringleader.core.TailscaleStatus
 import local.ringleader.core.VpnBackend
 import local.ringleader.core.VpnSnapshot
+import local.ringleader.core.peerPath
+import local.ringleader.core.peerPathLabel
 import local.ringleader.core.WireGuardPeer
 import local.ringleader.core.localVpnBackend
 import local.ringleader.core.vpnFailureMessage
@@ -85,10 +89,10 @@ class WireGuardToolPlugin(
         try {
             while (elapsed <= seconds) {
                 coroutineContext.ensureActive()
-                val snap = withContext(Dispatchers.IO) { backend.snapshot() }
+                // Tailscale peers need only Tailscale's status (no PowerShell), so samples stay two seconds apart.
+                val counters = if (tunnelId == "tailscale") tailscaleCounters(withContext(Dispatchers.IO) { backend.tailscaleStatus() }, address)
+                    else withContext(Dispatchers.IO) { backend.snapshot() }.let { snap -> snapshot = snap; peerCounters(snap, tunnelId, address) }
                 val sampleAt = nanoTime()
-                snapshot = snap
-                val counters = peerCounters(snap, tunnelId, address)
                 handshake = handshakeAge(counters.handshake, clock())
                 endpoint = counters.endpoint.orEmpty()
                 emit(ToolEvent.Line("handshake $handshake${if (endpoint.isBlank()) "" else " · $endpoint"}"))
@@ -142,22 +146,30 @@ internal fun peerOptions(snap: VpnSnapshot?): List<PeerChoice> {
             options += PeerChoice("wg:${iface.name}|$address", "${iface.name} → $address")
         }
     }
-    snap.tailscale?.peers?.forEach { peer ->
+    // Online peers first; offline ones stay choosable (they may come back during the run) but say so.
+    snap.tailscale?.peers?.sortedBy { !it.online }?.forEach { peer ->
         val address = peer.addresses.firstOrNull(::isHostToken) ?: return@forEach
-        options += PeerChoice("tailscale|$address", "${peer.hostName} → $address")
+        options += PeerChoice("tailscale|$address", "${peer.hostName} \u2192 $address" + if (peer.online) "" else " (offline)")
     }
     return options.distinctBy { it.value }
 }
 
 internal data class PeerCounters(val rx: Long?, val tx: Long?, val handshake: Long?, val endpoint: String?)
 
+/** Counters and path for one Tailscale address, from a status alone. The path text is the VPN page's label. */
+internal fun tailscaleCounters(status: TailscaleStatus?, address: String): PeerCounters {
+    val peer = status?.peers?.firstOrNull { address in it.addresses }
+    val chosen = peer ?: status?.self?.takeIf { address in it.addresses }
+    val path = peer?.let(::peerPath)?.let { p -> when (p) {
+        is PeerPath.Direct -> "direct ${p.endpoint}"
+        is PeerPath.PeerRelayed -> "peer relay ${p.relay}"
+        else -> peerPathLabel(p)
+    } }
+    return PeerCounters(chosen?.rxBytes, chosen?.txBytes, chosen?.lastHandshake?.epochSecond, path)
+}
+
 internal fun peerCounters(snap: VpnSnapshot, tunnelId: String, address: String): PeerCounters {
-    if (tunnelId == "tailscale") {
-        val peer = snap.tailscale?.peers?.firstOrNull { address in it.addresses }
-        val self = snap.tailscale?.self?.takeIf { address in it.addresses }
-        val chosen = peer ?: self
-        return PeerCounters(chosen?.rxBytes, chosen?.txBytes, chosen?.lastHandshake?.epochSecond, chosen?.direct ?: chosen?.relay)
-    }
+    if (tunnelId == "tailscale") return tailscaleCounters(snap.tailscale, address)
     val name = tunnelId.removePrefix("wg:")
     val iface = snap.wireguard.firstOrNull { it.name == name }
     val peer = iface?.peers?.firstOrNull { matchesAddress(it, address) }

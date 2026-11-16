@@ -1,0 +1,42 @@
+Pi-hole 1.0.0 (v6) · Ok · Unencrypted · full-power credential
+reading queries · Queries (24 h): 220 [neutral] required
+reading blocked · Blocked: 30 [neutral] required
+reading blockedPct · Blocked share: 13.6 % [neutral]
+reading cachedPct · From cache: 81.4 % [neutral]
+reading forwarded · Forwarded: 11 [neutral]
+reading qps · Queries per second: 3.90 [neutral]
+reading clients · Active clients: 2 [neutral]
+reading domains · Unique domains: 21 [neutral]
+reading gravity · Blocklist domains: 76,105 [good]
+reading gravityAge · Blocklist updated: 4 h 31 min ago [neutral]
+reading gravityOld · Blocklist age: 4 h 31 min [good]
+reading blocking · Blocking: enabled [good]
+reading timer · Blocking resumes in: no data [neutral] (Null: blocking/timer is empty (null).)
+reading core · Core: v6.6 [neutral]
+reading ftl · FTL: v6.9 [neutral]
+reading update · Core update: false [good]
+series history · Queries per 10 minutes [count]: 3 lines
+  Forwarded: 145 points 2026-11-15T17:15:00Z to 2026-11-16T17:15:00Z, sum 11, max 7, last 4
+  Cached: 145 points 2026-11-15T17:15:00Z to 2026-11-16T17:15:00Z, sum 179, max 85, last 83
+  Blocked: 145 points 2026-11-15T17:15:00Z to 2026-11-16T17:15:00Z, sum 30, max 30, last 30
+list topBlocked · Top blocked domains: 3 of 3
+  item 1: 10 bar 100 %
+  item 2: 10 bar 100 %
+  item 3: 10 bar 100 %
+list topClients · Busiest clients: 2 of 2
+  item 1: 184 bar 100 %
+  item 2: 36 bar 20 %
+list upstreams · Answered by: 3 of 3
+  item 1: 179 bar 100 %
+  item 2: 30 bar 17 %
+  item 3: 11 bar 6 %
+block 1 hero blockedPct
+block 2 tiles queries,qps,clients,cachedPct,gravity
+block 3 chart history stacked-bars
+block 4 list topBlocked
+block 5 list topClients
+block 6 breakdown upstreams
+block 7 notice "Blocking is off. It resumes in no data." hidden
+block 8 facts core,ftl,update,gravityAge
+pin: 13.6 % [good]
+ticker: Pi-hole 13.6 % [good] spark 24 points

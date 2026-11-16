@@ -1,10 +1,6 @@
 @file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 package local.ringleader.desktop
 
-import androidx.compose.foundation.Canvas
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -90,39 +86,25 @@ internal fun storageFilteredVolumes(volumes: List<StorageVolume>, type: String, 
     }
 }
 
+// What a volume is, never how full the storage is: the kit's categorical colours, not the green and red of a fill level.
 private fun storageContentTint(content: String): Color = when(content) {
-    "images" -> Tech.Green
-    "rootdir" -> Tech.Amber
-    "backup" -> if(Tech.Light) Color(0xff185ca6) else Color(0xff66b5ff)
-    "iso" -> if(Tech.Light) Color(0xff7540a0) else Color(0xffca99ff)
-    "vztmpl" -> if(Tech.Light) Color(0xff007379) else Color(0xff58c9cd)
+    "images" -> MetricColors.category(0)
+    "backup" -> MetricColors.category(1)
+    "rootdir" -> MetricColors.category(2)
+    "iso" -> MetricColors.category(3)
+    "vztmpl" -> MetricColors.category(4)
     else -> Tech.Ink
 }
 
 @Composable private fun StorageSpace(row: RecordedStorage, volumes: List<StorageVolume>, caption: String, onFilter: (String,Int?,String?)->Unit) {
     val data=storageBreakdown(volumes,row.diskBytes,row.maxDiskBytes)
     StorageBlock("What uses the space",Modifier.fillMaxWidth(),caption) {
-        Canvas(Modifier.fillMaxWidth().height(18.dp)) {
-            drawRect(Tech.Edge)
-            val scale=data.scale.coerceAtLeast(1).toDouble()
-            var x=0f
-            data.byContent.forEach { (type,bytes) ->
-                val width=(bytes/scale*size.width).toFloat()
-                drawRect(storageContentTint(type),Offset(x,0f),Size(width,size.height));x+=width
-            }
-            val other=((data.notListed ?: 0L)/scale*size.width).toFloat().coerceAtMost(size.width-x)
-            if(other>0) {
-                drawRect(Tech.Muted.copy(alpha=.35f),Offset(x,0f),Size(other,size.height))
-                var stripe=x
-                while(stripe<x+other) { drawLine(Tech.Muted,Offset(stripe,0f),Offset((stripe+5).coerceAtMost(x+other),size.height),1f);stripe+=8f }
-            }
-            row.maxDiskBytes?.let { total ->
-                if(data.listedBytes>total) {
-                    val marker=(total/scale*size.width).toFloat()
-                    drawLine(Tech.Ink,Offset(marker,0f),Offset(marker,size.height),2f,pathEffect=PathEffect.dashPathEffect(floatArrayOf(3f,2f)))
-                }
-            }
-        }
+        // One scale for every part (the larger of total and listed sizes), a gap between parts, "not listed" striped,
+        // and a dashed mark at the recorded total when the listed sizes run past it.
+        val segments=data.byContent.map { (type,bytes) -> BarSegment(volumeChipLabel(type),bytes.toDouble(),storageContentTint(type)) } +
+            listOfNotNull(data.notListed?.takeIf { it>0 }?.let { BarSegment("Not listed",it.toDouble(),Tech.Muted,hatched=true) })
+        StackedBar(segments,Modifier.fillMaxWidth(),total=data.scale.coerceAtLeast(1).toDouble(),height=18.dp,
+            marker=row.maxDiskBytes?.takeIf { data.listedBytes>it }?.toDouble())
         FlowRow(horizontalArrangement=Arrangement.spacedBy(6.dp),verticalArrangement=Arrangement.spacedBy(6.dp)) {
             data.byContent.forEach { (type,bytes) ->
                 HelpTip("${volumeChipLabel(type)}: $bytes listed bytes · ${volumes.count { it.content==type }} volumes") {

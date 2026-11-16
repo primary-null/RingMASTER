@@ -128,6 +128,25 @@ class SessionsTest {
         } finally { f.close() }
     }
 
+    @Test fun aSecretTypedForANewConnectionIsDroppedWhenAnotherSessionComesIntoView() = runTest {
+        val f = fixture()
+        try {
+            f.connect(first); runCurrent(); f.connect(second); runCurrent()
+            val (back, front) = f.state.open
+            // Typed on the desk for a third connection, then the person clicks the other session in the rail.
+            f.desk.setManualSecret("typed-and-left-behind")
+            val generation = f.desk.state.value.secretGeneration
+            f.sessions.show(back.id)
+            assertFalse(f.desk.hasManualSecret()); assertFalse(f.desk.state.value.manualSecretPresent)
+            assertTrue(f.desk.state.value.secretGeneration > generation)
+            // Showing the session already in view is not a switch and keeps what is being typed.
+            f.desk.setManualSecret("still-typing")
+            f.sessions.show(back.id)
+            assertTrue(f.desk.hasManualSecret())
+            assertTrue(back.workspace.state.value.connected); assertTrue(front.workspace.state.value.connected)
+        } finally { f.close() }
+    }
+
     @Test fun aBackgroundSessionCanBeDisconnectedWithoutTouchingTheOneInView() = runTest {
         val f = fixture()
         try {

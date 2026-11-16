@@ -1,0 +1,1 @@
+{"domains":[{"domain":"blocked.example.test","count":10},{"domain":"tracker.example.test","count":10},{"domain":"ads.example.test","count":10}],"total_queries":220,"blocked_queries":30,"took":2.5510787963867188e-05}

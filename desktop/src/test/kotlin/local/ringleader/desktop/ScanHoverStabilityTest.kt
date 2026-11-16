@@ -34,7 +34,7 @@ class ScanHoverStabilityTest {
     private val plan = NetworkPlan(listOf(ScanNetwork(ScanInterface("Ethernet", "192.0.2.2", 24), "192.0.2.0/24", null, (1..254).map { "192.0.2.$it" })))
 
     @Suppress("UNCHECKED_CAST")
-    private fun session(): ScanSession = ScanSession(CoroutineScope(Dispatchers.Unconfined)).also { s ->
+    private fun session(): ScanSession = quietSession(CoroutineScope(Dispatchers.Unconfined)).also { s ->
         s.javaClass.getDeclaredField("progress\$delegate").apply { isAccessible = true }.get(s).let { (it as MutableState<NetworkProgress?>).value = NetworkProgress(plan, 254, hits = hits, finished = true) }
     }
 

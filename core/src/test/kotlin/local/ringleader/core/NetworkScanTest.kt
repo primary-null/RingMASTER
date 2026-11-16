@@ -71,9 +71,12 @@ class NetworkScanTest {
     }
     @Test fun lanSweepProbesWebPortsAndTheTailnetOnlyProxmox() = runBlocking {
         assertEquals(listOf(8006, 8007, 8443, 80, 443, 3000, 8123), LAN_SCAN_PORTS)
-        val lan = mutableListOf<Int>()
-        NetworkScanner { _, port -> synchronized(lan) { lan += port }; emptyList() }.scan(ScanRules.plan(listOf(ScanInterface("Ethernet","10.0.0.9",30))), concurrency=1).toList()
-        assertEquals(LAN_SCAN_PORTS + LAN_SCAN_PORTS, lan)
+        // Nothing says which hosts are alive, so every address gets every port, once; the Proxmox ports of all addresses come first.
+        val lan = java.util.Collections.synchronizedList(mutableListOf<Int>())
+        NetworkScanner { _, port -> lan += port; emptyList() }.scan(ScanRules.plan(listOf(ScanInterface("Ethernet","10.0.0.9",30))), concurrency=1).toList()
+        assertEquals(14, lan.size)
+        assertTrue(lan.take(6).all { it in PROXMOX_PORTS } && lan.drop(6).none { it in PROXMOX_PORTS }, "the cheap pass first, then the rest: $lan")
+        assertEquals(LAN_SCAN_PORTS.toSet(), lan.toSet()); assertTrue(lan.groupingBy { it }.eachCount().values.all { it == 2 })
         assertEquals(LAN_CONNECT_TIMEOUT_MS, NetworkScanner().connectTimeoutMs)
         assertTrue(tailnetScanner().connectTimeoutMs > LAN_CONNECT_TIMEOUT_MS)
         assertEquals(TAILNET_CONNECT_TIMEOUT_MS, tailnetScanner().connectTimeoutMs)
@@ -127,8 +130,8 @@ class NetworkScanTest {
         assertEquals("10.50.1.0/24", s2.cidr)
         assertEquals(254, s2.addresses.size)
 
-        // Non-RFC1918 rejected
-        assertNull(ScanRules.planSubnet("8.8.8.8/24"))
+        // Not private space is swept only when typed, on the Proxmox ports only; the network is never taken from a plain scan.
+        assertEquals(PROXMOX_PORTS, ScanRules.planSubnet("8.8.8.8/24")!!.ports)
         assertNull(ScanRules.planSubnet("invalid"))
         // A prefix that is not a prefix is a typo, not a /24.
         assertNull(ScanRules.planSubnet("192.168.20.0/abc"))

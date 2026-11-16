@@ -1,6 +1,5 @@
 package local.ringleader.core
 
-import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
@@ -238,7 +237,7 @@ private fun arrayData(body: String, failure: String): JsonArray {
 
 private fun dataElement(body: String, failure: String): JsonElement {
     val root = try {
-        Json.parseToJsonElement(body) as? JsonObject
+        serverJson(body) as? JsonObject
     } catch (_: Exception) {
         null
     } ?: error(failure)

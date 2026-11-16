@@ -1,0 +1,88 @@
+{
+  "schema": 1,
+  "id": "homeassistant",
+  "templateVersion": "1.0.0",
+  "name": "Home Assistant",
+  "glyph": "home",
+  "tags": ["smarthome"],
+  "sources": [
+    "https://github.com/home-assistant/developers.home-assistant/blob/master/docs/api/rest.md",
+    "https://github.com/home-assistant/home-assistant.io/blob/current/source/_docs/authentication.markdown"
+  ],
+  "detect": {
+    "catalogue": ["haos-vm", "homeassistant"],
+    "helperScripts": ["haos-vm", "homeassistant"],
+    "ports": [{"port": 8123, "secure": false, "path": "/"}]
+  },
+  "variants": [
+    {
+      "id": "rest",
+      "label": "Home Assistant (REST API)",
+      "probe": {"path": "/api/", "accept": [200, 401], "expect": "eq(@probe/message, \"API running.\")"},
+      "auth": {
+        "scheme": "header-key", "header": "Authorization", "prefix": "Bearer ",
+        "fields": [{"id": "secret", "label": "Long-lived access token", "secret": true}],
+        "ask": "Home Assistant long-lived access token",
+        "power": "The token acts as its user: it reads every entity and can control devices; an administrator's token can also change configuration.",
+        "fullPower": false,
+        "readOnly": "Home Assistant has no read-only token; a user without administrator rights is the least access.",
+        "where": [
+          "Recommended: in Home Assistant go to Settings > People > Users, add a user for RingMASTER and leave Administrator off.",
+          "Sign in as that user, open your user profile (bottom left) and choose the Security tab.",
+          "Under Long-lived access tokens choose Create token, name it RingMASTER, and copy it now: it is shown once."
+        ],
+        "errors": {"401": "Home Assistant refused the token. It may have been deleted from the user's Security page."}
+      },
+      "params": [
+        {"id": "entities", "label": "Entities to show", "kind": "multi", "max": 8, "pattern": "^[a-z_]+\\.[a-z0-9_]+$",
+         "choices": {"request": "states", "items": "@states", "value": "/entity_id", "label": "coalesce(@item/attributes/friendly_name, @item/entity_id)"}},
+        {"id": "charted", "label": "Entities to chart (numbers only)", "kind": "multi", "max": 3, "pattern": "^[a-z_]+\\.[a-z0-9_]+$",
+         "choices": {"request": "states", "items": "filter(@states, \"/attributes/unit_of_measurement\", \"has\", 0)", "value": "/entity_id", "label": "coalesce(@item/attributes/friendly_name, @item/entity_id)"}}
+      ],
+      "requests": {
+        "config": {"path": "/api/config", "every": "6h", "minEvery": "5m", "maxBytes": 262144},
+        "states": {"path": "/api/states", "every": "60s", "minEvery": "30s"},
+        "history": {"path": "/api/history/period/{iso:now-24h}", "query": {"filter_entity_id": "{param:charted}", "minimal_response": "", "no_attributes": ""},
+                    "every": "10m", "minEvery": "5m", "optional": true}
+      },
+      "readings": [
+        {"id": "version", "label": "Version", "expr": "@config/version", "unit": "version", "required": true},
+        {"id": "state", "label": "Core", "expr": "@config/state", "unit": "state", "states": {"RUNNING": "good", "STARTING": "info", "NOT_RUNNING": "bad", "STOPPING": "warn", "FINAL_WRITE": "warn"}},
+        {"id": "location", "label": "Home", "expr": "@config/location_name", "unit": "text", "identity": true},
+        {"id": "entities", "label": "Entities", "expr": "count(@states)", "unit": "count", "required": true},
+        {"id": "unavailable", "label": "Unavailable", "expr": "count(filter(@states, \"/state\", \"eq\", \"unavailable\"))", "unit": "count", "levels": {"warnAbove": 0, "badAbove": 10}},
+        {"id": "unknown", "label": "Unknown state", "expr": "count(filter(@states, \"/state\", \"eq\", \"unknown\"))", "unit": "count"},
+        {"id": "updates", "label": "Updates", "expr": "count(filter(filter(@states, \"/entity_id\", \"prefix\", \"update.\"), \"/state\", \"eq\", \"on\"))", "unit": "count", "levels": {"warnAbove": 0}},
+        {"id": "lightsOn", "label": "Lights on", "expr": "count(filter(filter(@states, \"/entity_id\", \"prefix\", \"light.\"), \"/state\", \"eq\", \"on\"))", "unit": "count"},
+        {"id": "switchesOn", "label": "Switches on", "expr": "count(filter(filter(@states, \"/entity_id\", \"prefix\", \"switch.\"), \"/state\", \"eq\", \"on\"))", "unit": "count"},
+        {"id": "sensors", "label": "Sensors", "expr": "count(filter(@states, \"/entity_id\", \"prefix\", \"sensor.\"))", "unit": "count"},
+        {"id": "automations", "label": "Automations on", "expr": "count(filter(filter(@states, \"/entity_id\", \"prefix\", \"automation.\"), \"/state\", \"eq\", \"on\"))", "unit": "count"},
+        {"id": "peopleHome", "label": "People home", "expr": "count(filter(filter(@states, \"/entity_id\", \"prefix\", \"person.\"), \"/state\", \"eq\", \"home\"))", "unit": "count", "identity": true}
+      ],
+      "series": [
+        {"id": "charted", "label": "Last 24 hours", "unit": "number", "each": "@history", "name": "/0/entity_id", "time": "pick(@item, \"/last_changed\")", "value": "pick(@item, \"/state\")", "max": 3, "identity": true},
+        {"id": "unavailableOverTime", "label": "Unavailable over time", "unit": "count", "sampled": "unavailable", "keep": 288}
+      ],
+      "grids": [
+        {"id": "picked", "label": "Your entities", "items": "filter(@states, \"/entity_id\", \"in\", param(\"entities\"))",
+         "title": "coalesce(@item/attributes/friendly_name, @item/entity_id)", "state": "/state",
+         "states": {"unavailable": "bad", "unknown": "warn", "on": "good", "off": "info", "home": "good", "not_home": "info"}, "max": 8, "identity": true},
+        {"id": "broken", "label": "Unavailable entities", "items": "filter(@states, \"/state\", \"eq\", \"unavailable\")",
+         "title": "coalesce(@item/attributes/friendly_name, @item/entity_id)", "state": "/state", "states": {"unavailable": "bad"}, "max": 24, "identity": true}
+      ],
+      "panel": [
+        {"block": "hero", "reading": "entities", "sub": "unavailable", "state": "unavailable", "caption": "entities, unavailable ones counted beside"},
+        {"block": "tiles", "readings": ["lightsOn", "switchesOn", "automations", "updates", "sensors"], "sparks": {"lightsOn": "unavailableOverTime"}},
+        {"block": "grid", "grid": "picked"},
+        {"block": "chart", "series": "charted", "kind": "line", "height": 140},
+        {"block": "grid", "grid": "broken", "collapsedWhenEmpty": true, "open": "/config/entities"},
+        {"block": "facts", "readings": ["version", "state", "location", "unknown"]}
+      ],
+      "compact": {
+        "pin": {"reading": "unavailable", "zeroText": "all available"},
+        "ticker": {"label": "Home", "reading": "lightsOn", "state": "unavailable"}
+      },
+      "links": {"home": "/", "help": "https://www.home-assistant.io/docs/"}
+    }
+  ]
+}

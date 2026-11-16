@@ -88,10 +88,10 @@ class ToolsTest {
 
     @Test fun pingCommandsAreArgumentLists() {
         assertEquals(listOf("C:\\Windows\\System32\\ping.exe", "-n", "4", "-w", "1000", "127.0.0.1"), pingCommand("Windows 11", "C:\\Windows\\System32\\ping.exe", "127.0.0.1", 4, 1000))
-        assertEquals(listOf("/bin/ping", "-c", "4", "-W", "2", "127.0.0.1"), pingCommand("Linux", "/bin/ping", "127.0.0.1", 4, 1500))
+        assertEquals(listOf("/bin/ping", "-c", "4", "-W", "2", "--", "127.0.0.1"), pingCommand("Linux", "/bin/ping", "127.0.0.1", 4, 1500))
         assertEquals(listOf("C:\\Windows\\System32\\tracert.exe", "-d", "-w", "500", "-h", "5", "127.0.0.1"), traceCommand("Windows 11", { "C:\\Windows\\System32\\tracert.exe" }, "127.0.0.1", 500, 5))
         assertEquals(listOf("/usr/bin/traceroute", "-n", "-w", "1", "-m", "8", "10.0.0.1"), traceCommand("Linux", { if (it == "traceroute") "/usr/bin/traceroute" else null }, "10.0.0.1", 1000, 8))
-        assertEquals(listOf("/usr/bin/tracepath", "-n", "-m", "8", "10.0.0.1"), traceCommand("Linux", { if (it == "tracepath") "/usr/bin/tracepath" else null }, "10.0.0.1", 1000, 8))
+        assertEquals(listOf("/usr/bin/tracepath", "-n", "-m", "8", "--", "10.0.0.1"), traceCommand("Linux", { if (it == "tracepath") "/usr/bin/tracepath" else null }, "10.0.0.1", 1000, 8))
     }
 
     @Test fun parsesWindowsAndLinuxPing() {

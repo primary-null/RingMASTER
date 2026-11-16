@@ -28,6 +28,13 @@ import kotlinx.coroutines.withContext
 import local.ringleader.core.*
 
 fun main(args: Array<String>) {
+    // First, before anything resolves a name or connects: one proxy policy and the name-lookup hook (see NetworkDefaults).
+    // This is the only entry point: the window, the resident process and the browser-hosted mode all start here.
+    NetworkDefaults.install()
+    // Belt and braces for every mode (window, resident tray and scheduler, web): the JDK reads this once, before its first
+    // HTTP request, and then never re-sends a POST whose answer was lost. Mutations already use a one-shot socket and the
+    // login posts in streaming mode, which the JDK never re-sends either.
+    System.setProperty("sun.net.http.retryPost", "false")
     ConfigGuard().startup()
     val options = local.ringleader.desktop.web.parseWebArgs(args.toList())
     if (options != null) {
@@ -271,20 +278,38 @@ private var desktopShortcuts: ((KeyEvent) -> Boolean)? = null
     val nativeOpenId = residentAlerts?.openRequest?.collectAsState()?.value
     SideEffect { residentAlerts?.native?.setShowcase(Appearance.showcase) }
     var scannedSelection by remember { mutableStateOf<ScanHit?>(null) }
+    // When that result was picked. Its certificate stays on offer for five minutes from then, however often the Desk is rebuilt.
+    var scannedAt by remember { mutableStateOf<Long?>(null) }
+    // A picked result goes into the Connect form at the moment it is picked; what the person types after it is theirs and is never replaced.
+    remember(scannedAt) { scannedSelection?.let { applyScanPick(desk, it) } }
     val scanSession = remember { ScanSession(scope) }
     val bluetoothScanner = remember { localBluetoothScanner() }
     val vpnSession = remember { VpnSession(scope, local.ringleader.core.localVpnBackend(host.hostActions), host.hostActions) }
-    SideEffect { vpnSession.minimized = minimized }
+    SideEffect { vpnSession.minimized = minimized; TailnetSsh.session = vpnSession.takeUnless { host.web } }
+    // The tailnet's subnet routes join the Scan page's list of networks this computer can reach. Every offered route is
+    // listed; the scan's own source turns one on only when the OS really routes it through Tailscale, and says why not otherwise.
+    remember(scanSession, vpnSession) { scanSession.connect(local.ringleader.core.TailnetSubnetRoutes {
+        local.ringleader.core.tailnetSubnetRoutes(vpnSession.snapshot?.tailscale, vpnSession.localNetworks)
+            .filter { !it.own && it.routerOnline }.map { it.routerName to it.cidr } }) }
     // The heading's connection-route tag (ConnectionRouteTag.kt). Browser sessions never run host route reads for it.
     val routeObserver = remember { ConnectionRouteObserver(scope, if (host.web) null else localRouteProbe(),
-        VpnInventorySource({ vpnSession.snapshot }, vpnSession.backend?.takeUnless { host.web }?.let { backend -> { backend.snapshot() } })) }
+        VpnInventorySource({ vpnSession.snapshot }, vpnSession.backend?.takeUnless { host.web }?.let { backend -> { backend.snapshot() } },
+            // The Tailscale peer path changes within seconds (relay first, then direct): the tag reads it fresh.
+            freshTailscale = vpnSession.backend?.takeUnless { host.web }?.let { backend -> { backend.tailscaleStatus() } })) }
     DisposableEffect(routeObserver) { onDispose { routeObserver.close() } }
     LaunchedEffect(vpnSession.changes) { if (vpnSession.changes != 0) routeObserver.invalidate() }
     val routeState by routeObserver.state.collectAsState()
     // Read when a diagnostics export starts: every open session, with the route tag's observation where it is for that server.
     val diagnosticSessions = remember(sessions, routeObserver) { { sessions.state.value.open.mapNotNull { it.workspace.diagnostic() }.map { withRoute(it, routeObserver.state.value) } } }
     val toolsSession = remember { ToolsSession(scope) }
+    // The live ticker (LiveTicker.kt). Its state lives above the per-connection part of the window, so a pin and a dismissal survive switching.
+    val ticker = remember { LiveTickerState() }
+    val pageFocus = remember { PageFocus() }
+    val tickerActivity: () -> TickerActivity = remember { val reader = TickerReader(sessions, { desk.state.value.profiles }, { routeObserver.state.value }, scanSession, vpnSession, toolsSession); { reader.read() } }
+    val tickerFeed = remember { TickerFeed(tickerActivity) }
     var page by remember { mutableStateOf("Desk") }
+    // Opening Scan reads the VPN state once, so the tailnet's networks are in its list without a visit to the VPN page.
+    LaunchedEffect(page) { if (page == "Scan" && !host.web && !minimized) vpnSession.refresh(null) }
     var fleetRequest by remember { mutableStateOf<FleetRequest?>(null) }
     var scheduleRunRequest by remember { mutableStateOf<String?>(null) }
     val pins = remember { PinStore() }
@@ -373,7 +398,8 @@ private var desktopShortcuts: ((KeyEvent) -> Boolean)? = null
     LaunchedEffect(state.connectionEpoch) { if (!host.web) ConsoleHost.release() }
     LaunchedEffect(page) { if (page != "Desk") desk.leaveDesk() }
     val searchFocus=remember { androidx.compose.ui.focus.FocusRequester() }
-    CompositionLocalProvider(LocalSearchFocus provides searchFocus, LocalDiagnosticSessions provides diagnosticSessions) {
+    // Only the session in view can be a failed one: every other entry in the list is an open connection.
+    CompositionLocalProvider(LocalSearchFocus provides searchFocus, LocalDiagnosticSessions provides diagnosticSessions, LocalOtherSessionsOpen provides (sessionsState.open.size > 1)) {
     ProvideDeskClock(animations = !reduceMotion && focused && !minimized, tickSeconds = !minimized) {
     // Task moments (spark, breathing dot, glow, nudge) fire from real changes in this state, never from a refresh.
     ProvideMotionBook(state) {
@@ -493,7 +519,7 @@ private var desktopShortcuts: ((KeyEvent) -> Boolean)? = null
     val routeContext = when { state.demo -> RouteContext.Demo; host.web -> RouteContext.Browser
         state.connected && state.address.isNotBlank() -> RouteContext.Server(session.id, state.connectionEpoch, state.address); else -> RouteContext.None }
     LaunchedEffect(routeContext, page, minimized, consoleImmersive) { routeObserver.update(routeContext, page in sessionPages && !minimized && !consoleImmersive) }
-    CompositionLocalProvider(LocalAlerts provides alerts) {
+    CompositionLocalProvider(LocalAlerts provides alerts, LocalPageFocus provides pageFocus, LocalTickerActivity provides tickerActivity) {
     Row(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         val updateState by DesktopUpdates.checker.state.collectAsState()
         if (!consoleImmersive) NavigationRail(state,page,platform,workspace,railToggle, updateAvailable = !host.web && updateState is UpdateState.Available, onSettings = { settingsOpen = true }, onAbout = { settingsSection = SettingsSection.About; settingsOpen = true }, pins = pins, connectionKey = connectionKey, onPin = ::openPin,
@@ -523,9 +549,9 @@ private var desktopShortcuts: ((KeyEvent) -> Boolean)? = null
                 when (targetPage) {
                     "Fleet" -> ChartLensHost(state, workspace) { InventoryScreen(state, workspace, activeProfile?.let { "${it.displayName} · ${it.origin}" }, search, { search = it }, filter, { filter = it }, { page = "Desk" }, disconnectInView, pins, connectionKey, fleetRequest) { fleetRequest = null } }
                     "Activity" -> ActivityScreen(state, workspace, activeProfile?.let { "${it.displayName} · ${it.origin}" }, { page = "Desk" }, disconnectInView)
-                    "Scan" -> ScanScreen(scanSession, deskState.profiles.map { it.origin }) { scannedSelection = it; desk.discardSecrets(); page = "Desk" }
+                    "Scan" -> ScanScreen(scanSession, deskState.profiles.map { it.origin }, known = scanKnownOf(deskState.profiles, sessionsState.open)) { scannedSelection = it; scannedAt = System.nanoTime(); desk.discardSecrets(); page = "Desk" }
                     "Bluetooth" -> BluetoothScreen(bluetoothScanner)
-                    "VPN" -> VpnScreen(vpnSession, if (state.connected) state.address else null, deskState.profiles.map { it.origin }) { scannedSelection = it; desk.discardSecrets(); page = "Desk" }
+                    "VPN" -> VpnScreen(vpnSession, if (state.connected) state.address else null, deskState.profiles.map { it.origin }) { scannedSelection = it; scannedAt = System.nanoTime(); desk.discardSecrets(); page = "Desk" }
                     "Tools" -> ToolsScreen(toolsSession)
                     "Under the Hood" -> UnderTheHoodScreen(state)
                     "Storage" -> StoragePage(state, workspace,profileLabel=activeProfile?.displayName ?: "Manual connection")
@@ -536,12 +562,16 @@ private var desktopShortcuts: ((KeyEvent) -> Boolean)? = null
                             onNotifications = if (alerts.notices != null) ({ noticesOpen = true }) else null)
                     }
                     else -> DeskScreen(state, deskState, desk, scannedSelection, onScan = { page = "Scan" }, sessions = sessionsState.open, activeSession = session.id, sessionNotice = sessionsState.notice,
-                        onShowSession = sessions::show, onDisconnectSession = sessions::disconnect) { page = "Fleet" }
+                        onShowSession = sessions::show, onDisconnectSession = sessions::disconnect, scannedAt = scannedAt, onScannedEnded = { scannedSelection = null; scannedAt = null }) { page = "Fleet" }
                 }
                 }
                 CreateGuestHost(state, workspace, activeProfile?.displayName ?: "Manual connection",
                     onOpenGuest = { guest -> fleetRequest = FleetRequest(guest.resource, "Summary", System.nanoTime()); page = "Fleet" },
                     onViewLog = { page = "Activity" })
+                // The live ticker: a small tray over the page area, kept off consoles, dialogs and Under the Hood itself (LiveTicker.kt).
+                LiveTickerHost(page, ticker, tickerFeed,
+                    remember(session.id) { TickerNav({ page = it }, { resource, console -> fleetRequest = FleetRequest(resource, if (console) "Console" else "Summary", System.nanoTime()); page = "Fleet" }, pageFocus) },
+                    blocked = tickerBlocked(host.web, host.traceView, minimized, consoleImmersive, page, modals?.open == true, state.creation != null, noticesOpen))
                 // New notifications as a short stack in the corner. Not over a full-screen console, not while the center is open.
                 alerts?.notices?.let { notices ->
                     val toastsOff = alerts.prefs?.let { !it.enabled || it.inAppToasts == false } == true
@@ -567,6 +597,8 @@ internal fun sessionLabel(state: WorkspaceState, profile: ConnectionProfile?): S
     state.demo -> "Demonstration"
     profile != null -> profile.displayName
     state.address.isNotBlank() -> state.address.removePrefix("https://")
+    // A sign-in the server refused closed the session; the heading still names the server it was for.
+    state.failedAddress.isNotBlank() -> state.failedAddress.removePrefix("https://")
     else -> "New connection"
 }
 

@@ -1,0 +1,32 @@
+Home Assistant 1.0.0 (rest) · Ok · Unencrypted
+reading version · Version: 2026.11.1 [neutral] required
+reading state · Core: RUNNING [good]
+reading location · Home: hidden [neutral]
+reading entities · Entities: 125 [neutral] required
+reading unavailable · Unavailable: 0 [good]
+reading unknown · Unknown state: 12 [neutral]
+reading updates · Updates: 5 [warn]
+reading lightsOn · Lights on: 5 [neutral]
+reading switchesOn · Switches on: 1 [neutral]
+reading sensors · Sensors: 23 [neutral]
+reading automations · Automations on: 0 [neutral]
+reading peopleHome · People home: hidden [neutral]
+series charted · Last 24 hours [number]: 2 lines
+  line 1: 1 points 2026-11-16T12:48:19.115Z to 2026-11-16T12:48:19.115Z, sum 15.6, max 15.6, last 15.6
+  line 2: 1 points 2026-11-16T12:48:19.117Z to 2026-11-16T12:48:19.117Z, sum 100, max 100, last 100
+series unavailableOverTime · Unavailable over time [count]: 1 line
+  Unavailable over time: no points
+grid picked · Your entities: 4 of 4
+  item 1: unknown [warn]
+  item 2: off [info]
+  item 3: on [good]
+  item 4: 15.6 [neutral]
+grid broken · Unavailable entities: 0 of 0
+block 1 hero entities
+block 2 tiles lightsOn,switchesOn,automations,updates,sensors
+block 3 grid picked
+block 4 chart charted line
+block 5 grid broken hidden
+block 6 facts version,state,location,unknown
+pin: all available [good]
+ticker: Home 5 [good]

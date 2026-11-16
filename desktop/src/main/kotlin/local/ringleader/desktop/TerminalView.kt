@@ -15,6 +15,7 @@ import androidx.compose.ui.text.*
 import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.*
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -85,7 +86,16 @@ private fun terminalColor(c: TerminalColor?, default: Color): Color {
         model.buffer.lock(); try { return (lo.second..hi.second).joinToString("\n") { y -> val line=model.buffer.getLine(y).text.padEnd(cols); line.substring(if(y==lo.second) lo.first.coerceIn(0,line.length) else 0,if(y==hi.second) (hi.first+1).coerceIn(0,line.length) else line.length).trimEnd() } } finally { model.buffer.unlock() }
     }
     fun copy() { clipboard.setText(AnnotatedString(selected())) }
-    fun paste() { clipboard.getText()?.text?.let { session?.input(model.paste(it)) } }
+    // A paste the session would not take (over its size limit, or another still going) is explained in the status line for a while.
+    var pasteNotice by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(pasteNotice) { if (pasteNotice != null) { delay(8000); pasteNotice = null } }
+    // A paste the server stopped taking ends with a sentence of its own, shown the same way (the session pokes the screen when it happens).
+    LaunchedEffect(tick, session) { session?.takePasteNote()?.let { pasteNotice = it } }
+    fun paste() {
+        val text = clipboard.getText()?.text ?: return
+        val live = session ?: return
+        pasteNotice = live.paste(text, model.bracketedPaste)
+    }
     // Held while a host shortcut's key is down, so a key repeat does not switch guests again. Not snapshot state.
     val swallowed = remember { object { var key: Key? = null } }
     // A node terminal has no host shortcut, so it never grows an immersive control.
@@ -94,10 +104,17 @@ private fun terminalColor(c: TerminalColor?, default: Color): Color {
     val edgeResting = remember { mutableStateOf(false) }
     LaunchedEffect(immersiveNow) { if (!immersiveNow) edgeResting.value = false }
     val toolbar: @Composable () -> Unit = {
+        // Reading tick makes this look again when the session ends with no output to wake it (the session pokes the model).
+        val ended = tick >= 0 && session?.reason != null
+        // A big paste leaves in frames, one at a time; the status says how far it is, and it can be stopped.
+        val pasteLeft = if (tick < 0) 0 else session?.pasteLeft ?: 0
+        val pastePercent = if (pasteLeft > 0) 100 - (100L * pasteLeft / (session?.pasteTotal ?: 1).coerceAtLeast(1)).toInt() else 0
         Row(Modifier.fillMaxWidth().height(32.dp),verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(6.dp)) {
-            Text(if (tick < 0) "" else session?.reason ?: if(session?.ready==true) "Connected $cols×$rows" else initialStatus,Modifier.weight(1f),color=Tech.Muted,fontFamily=Tech.Mono,fontSize=11.sp,maxLines=1)
-            MiniAction("Copy") { copy() }; MiniAction("Paste",enabled=session?.ready==true) { paste() }
-            MiniAction("Reconnect",onClick=reconnect)
+            // An ended session reads as the VNC console shows a lost connection: the sentence in amber, Reconnect within reach.
+            Text(if (tick < 0) "" else session?.reason ?: pasteNotice ?: if(pasteLeft>0) "Pasting $pastePercent %" else if(session?.ready==true) "Connected $cols×$rows" else initialStatus,Modifier.weight(1f),color=if(ended || pasteNotice!=null) Tech.Amber else Tech.Muted,fontFamily=Tech.Mono,fontSize=11.sp,maxLines=1,overflow=TextOverflow.Ellipsis)
+            if (pasteLeft > 0) MiniAction("Stop paste",primary=true) { session?.stopPaste() }
+            MiniAction("Copy") { copy() }; MiniAction("Paste",enabled=session?.ready==true && pasteLeft==0) { paste() }
+            MiniAction("Reconnect",primary=ended,onClick=reconnect)
             MiniAction("−",enabled=font>9) { font-- }; Text("$font",color=Tech.Muted,fontSize=11.sp); MiniAction("+",enabled=font<28) { font++ }
             if (immersiveNow) {
                 if (onGuests != null) MiniAction("Guests ▾") { onGuests() }

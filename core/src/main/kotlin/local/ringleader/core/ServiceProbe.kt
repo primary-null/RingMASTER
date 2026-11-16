@@ -1,6 +1,5 @@
 package local.ringleader.core
 
-import java.net.InetSocketAddress
 import java.net.Socket
 import java.net.URI
 import java.security.KeyStore
@@ -30,7 +29,8 @@ import kotlinx.coroutines.withContext
 import local.ringleader.core.tools.PortOutcome
 import local.ringleader.core.tools.connectPort
 
-enum class PortState { Open, Closed, NoAnswer }
+/** What a port answered. [NameNotFound] and [NameTimedOut] mean the host name never became an address, so nothing was asked of the guest. */
+enum class PortState { Open, Closed, NoAnswer, NameNotFound, NameTimedOut }
 
 /**
  * What one port of a guest answered. [secure] is true for TLS, false for plain HTTP, null when the port is not open or
@@ -91,10 +91,11 @@ class ServiceProbe(
                         while (true) {
                             ensureActive()
                             val (host, port) = lock.withLock { pairs.getOrNull(next++) } ?: break
-                            val found = when (withContext(Dispatchers.IO) { connectPort(host, port, connectTimeoutMs) }) {
+                            val found = when (val outcome = withContext(Dispatchers.IO) { connectPort(host, port, connectTimeoutMs) }) {
                                 is PortOutcome.Open -> hint(port).let { look(host, port, it?.secure, it?.path ?: "/") }
                                 PortOutcome.Closed -> ServiceAnswer(host, port, PortState.Closed)
                                 PortOutcome.Filtered -> ServiceAnswer(host, port, PortState.NoAnswer)
+                                is PortOutcome.NameNotFound -> ServiceAnswer(host, port, nameState(outcome))
                             }
                             lock.withLock {
                                 answers += found
@@ -117,6 +118,7 @@ class ServiceProbe(
             is PortOutcome.Open -> look(target.host, target.port, target.secure, target.path)
             PortOutcome.Closed -> ServiceAnswer(target.host, target.port, PortState.Closed)
             PortOutcome.Filtered -> ServiceAnswer(target.host, target.port, PortState.NoAnswer)
+            is PortOutcome.NameNotFound -> ServiceAnswer(target.host, target.port, nameState(outcome))
         }
         return describeTest(url, answer)
     }
@@ -236,14 +238,20 @@ class ServiceProbe(
         return Reply.Http(status, header("Server"), header("Location"), text.substringAfter("\r\n\r\n", ""))
     }
 
-    /** Opens a socket, runs [block] on it, and closes it as soon as the caller is cancelled, even mid-read. */
+    /**
+     * Connects (every address of the name, one deadline for the lookup and the connection), runs [block] on the socket, and closes it as
+     * soon as the caller is cancelled, even mid-connect or mid-read.
+     */
     private suspend fun <T> withSocket(host: String, port: Int, refused: (PortState) -> T, failed: T, block: (Socket) -> T): T = withContext(Dispatchers.IO) {
-        val raw = Socket()
-        val closer = launch(start = CoroutineStart.UNDISPATCHED) { try { awaitCancellation() } finally { runCatching { raw.close() } } }
+        val cancel = ConnectCancel()
+        val closer = launch(start = CoroutineStart.UNDISPATCHED) { try { awaitCancellation() } finally { cancel.cancel() } }
         try {
             ensureActive()
-            try {
-                raw.connect(InetSocketAddress(host, port), connectTimeoutMs.coerceAtLeast(1000))
+            val raw = try {
+                connectAny(host, port, connectTimeoutMs.coerceAtLeast(1000), cancel)
+            } catch (e: java.net.UnknownHostException) {
+                currentCoroutineContext().ensureActive()
+                return@withContext refused(if (NameLookup.isLookupTimeout(e, host)) PortState.NameTimedOut else PortState.NameNotFound)
             } catch (_: java.net.SocketTimeoutException) {
                 return@withContext refused(PortState.NoAnswer)
             } catch (_: java.net.ConnectException) {
@@ -257,7 +265,7 @@ class ServiceProbe(
                 currentCoroutineContext().ensureActive()
                 failed
             }
-        } finally { closer.cancel(); runCatching { raw.close() } }
+        } finally { closer.cancel(); cancel.cancel() }
     }
 
     private fun baseTrust(): X509ExtendedTrustManager = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm()).let { factory ->
@@ -267,6 +275,8 @@ class ServiceProbe(
 
     private companion object { const val MAX_READ = 32 * 1024 }
 }
+
+private fun nameState(outcome: PortOutcome.NameNotFound): PortState = if (outcome.timedOut) PortState.NameTimedOut else PortState.NameNotFound
 
 /** Open ports first (web pages before others), then in the order asked. */
 private fun sortedAnswers(answers: List<ServiceAnswer>, hosts: List<String>, ports: List<Int>): List<ServiceAnswer> =
@@ -329,6 +339,9 @@ fun describeTest(url: String, answer: ServiceAnswer): ServiceTest {
     when (answer.state) {
         PortState.Closed -> return ServiceTest(TestLevel.Bad, "Port $port is closed.")
         PortState.NoAnswer -> return ServiceTest(TestLevel.Bad, "No answer on port $port. The guest may be off, or a firewall drops it.")
+        // The host name never became an address, so no guest and no firewall was asked. These lines never name the host.
+        PortState.NameNotFound -> return ServiceTest(TestLevel.Bad, "That name is not known. Check the spelling, or use the guest's IP address.")
+        PortState.NameTimedOut -> return ServiceTest(TestLevel.Bad, "Looking up that name took too long. Check the DNS server, or use the guest's IP address.")
         PortState.Open -> Unit
     }
     val secure = answer.secure ?: return ServiceTest(TestLevel.Bad, "Port $port is open, but it is not a web page.")
