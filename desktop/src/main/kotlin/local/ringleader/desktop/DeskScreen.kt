@@ -78,10 +78,14 @@ import kotlin.math.cos
 import kotlin.math.sin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.yield
+import local.ringleader.core.CERTIFICATE_ERROR
 import local.ringleader.core.ConnectionProfile
+import local.ringleader.core.certificateOrigin
 import local.ringleader.core.DEFAULT_PASSWORD_USER
 import local.ringleader.core.DIRECT_PVE_KIND
 import local.ringleader.core.DeskState
+import local.ringleader.core.ManualForm
+import local.ringleader.core.ManualTrust
 import local.ringleader.core.VaultStatus
 import local.ringleader.core.completeLoginUser
 import local.ringleader.core.passwordUserAfterSwitch
@@ -116,6 +120,8 @@ private val ConnectPanelWidth = 520.dp
     // Anything open counts, in view or not: the Connect button then adds a connection.
     val anyOpen = inViewOpen || sessions.any { it.id != activeSession }
     val connectedProfiles = sessions.mapNotNull { it.profileId }.toSet() + listOfNotNull(deskState.connectedProfileId)
+    // The session in view was refused on the server's certificate: the saved connection's panel then reads that certificate.
+    val certificateRefused = workspaceState.address.takeIf { workspaceState.error == CERTIFICATE_ERROR && it.isNotBlank() }
     Box(Modifier.fillMaxSize()) {
         Column(
             Modifier.fillMaxSize().verticalScroll(scroll).padding(end = 12.dp),
@@ -138,13 +144,13 @@ private val ConnectPanelWidth = 520.dp
                     DeskMessages(deskState, workspaceState, sessionNotice)
                     if (split) {
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.Top) {
-                            SavedConnections(Modifier.weight(1f), deskState, desk, onScan, onOpenWorkspace, anyOpen, connectedProfiles, showQuickStart = scanned == null)
+                            SavedConnections(Modifier.weight(1f), deskState, desk, onScan, onOpenWorkspace, anyOpen, connectedProfiles, showQuickStart = scanned == null, certificateRefused = certificateRefused)
                             ManualConnection(Modifier.width(ConnectPanelWidth), anyOpen, deskState, desk, scanned, motionPreferences, onOpenWorkspace)
                         }
                     } else {
-                        if (scanned == null) SavedConnections(Modifier.fillMaxWidth(), deskState, desk, onScan, onOpenWorkspace, anyOpen, connectedProfiles, showQuickStart = scanned == null)
+                        if (scanned == null) SavedConnections(Modifier.fillMaxWidth(), deskState, desk, onScan, onOpenWorkspace, anyOpen, connectedProfiles, showQuickStart = scanned == null, certificateRefused = certificateRefused)
                         ManualConnection(Modifier.widthIn(max = ConnectPanelWidth).fillMaxWidth(), anyOpen, deskState, desk, scanned, motionPreferences, onOpenWorkspace)
-                        if (scanned != null) SavedConnections(Modifier.fillMaxWidth(), deskState, desk, onScan, onOpenWorkspace, anyOpen, connectedProfiles, showQuickStart = scanned == null)
+                        if (scanned != null) SavedConnections(Modifier.fillMaxWidth(), deskState, desk, onScan, onOpenWorkspace, anyOpen, connectedProfiles, showQuickStart = scanned == null, certificateRefused = certificateRefused)
                     }
                 }
             }
@@ -198,7 +204,7 @@ private val ConnectPanelWidth = 520.dp
     }
 }
 
-@Composable private fun SavedConnections(modifier: Modifier, deskState: DeskState, desk: ProfileDesk, onScan: () -> Unit, onOpenWorkspace: () -> Unit, connected: Boolean = false, connectedProfiles: Set<String> = emptySet(), showQuickStart: Boolean = true) {
+@Composable private fun SavedConnections(modifier: Modifier, deskState: DeskState, desk: ProfileDesk, onScan: () -> Unit, onOpenWorkspace: () -> Unit, connected: Boolean = false, connectedProfiles: Set<String> = emptySet(), showQuickStart: Boolean = true, certificateRefused: String? = null) {
     Column(modifier, verticalArrangement = Arrangement.spacedBy(Tech.Space8)) {
         SectionLabel("Saved connections", suffix = deskState.profiles.size.takeIf { it > 0 }?.toString())
         if (deskState.profiles.isNotEmpty()) {
@@ -228,7 +234,7 @@ private val ConnectPanelWidth = 520.dp
         val pending = deskState.profiles.find { it.id == deskState.pendingDeleteId }
         if (pending != null) DeleteConfirmation(pending, pending.id == deskState.connectedProfileId, desk)
         if (deskState.editing) ProfileEditor(deskState, desk)
-        else if (deskState.selectedId != null && pending == null) ProfileConnect(deskState, desk, onOpenWorkspace)
+        else if (deskState.selectedId != null && pending == null) ProfileConnect(deskState, desk, certificateRefused, onOpenWorkspace)
         if (showQuickStart && deskState.profiles.isEmpty() && !deskState.editing && !connected) QuickStart(onScan)
     }
 }
@@ -370,7 +376,7 @@ private val ConnectPanelWidth = 520.dp
     }
 }
 
-@Composable private fun ProfileConnect(deskState: DeskState, desk: ProfileDesk, onOpenWorkspace: () -> Unit) {
+@Composable private fun ProfileConnect(deskState: DeskState, desk: ProfileDesk, certificateRefused: String?, onOpenWorkspace: () -> Unit) {
     val profile = deskState.profiles.find { it.id == deskState.selectedId } ?: return
     val secretFocus = remember { FocusRequester() }
     DisposableEffect(profile.id) {
@@ -390,12 +396,50 @@ private val ConnectPanelWidth = 520.dp
         val web = LocalAppHost.current.web
         val remembered = !web && profile.id in deskState.remembered
         val scope = rememberCoroutineScope()
-        val submit = {
-            when {
-                deskState.profileSecretPresent -> { if (desk.connectSelected(otp = otp.ifBlank { null })) onOpenWorkspace() }
-                remembered && vaultReady && !deskState.vaultBusy -> { scope.launch { if (desk.connectRemembered(otp.ifBlank { null })) onOpenWorkspace() } }
+        // A profile without its own certificate pin trusts what the Connect form trusts: the certificate approved for this
+        // address and port. With none yet, the certificate is read first and trust stays an explicit click, as there.
+        val pinless = profile.sha256Pin == null
+        var seen by remember(profile.id, profile.origin) { mutableStateOf<String?>(null) }
+        var checking by remember(profile.id) { mutableStateOf(false) }
+        var checkError by remember(profile.id, profile.origin) { mutableStateOf<String?>(null) }
+        var trustRevision by remember(profile.id) { mutableStateOf(0) }
+        var replacementChecked by remember(profile.id, seen) { mutableStateOf(false) }
+        val trust = remember(profile.id, profile.origin, pinless, seen, deskState.profiles, deskState.saveBlocked, trustRevision) {
+            if (pinless) desk.manualTrust(profile.origin, seen) else ManualTrust()
+        }
+        val canConnect = deskState.profileSecretPresent || (remembered && vaultReady && !deskState.vaultBusy)
+        val shownServer = if (Appearance.showcase) "this server" else profile.origin
+        val checkCertificate = {
+            if (!checking) scope.launch {
+                checking = true
+                checkError = null
+                val origin = profile.origin
+                val fingerprint = try { probeTlsFingerprint(origin) } finally { checking = false }
+                if (fingerprint != null) { seen = fingerprint; trustRevision++ }
+                else checkError = "No certificate could be read from $shownServer. Check that this computer can reach it."
             }
         }
+        val connect: (Boolean, Boolean) -> Unit = { approve, normalTls ->
+            val observed = if (pinless && !normalTls) seen else null
+            val approval = if (approve) trust else null
+            when {
+                deskState.profileSecretPresent -> { if (desk.connectSelected(otp = otp.ifBlank { null }, observed = observed, approval = approval)) onOpenWorkspace() }
+                remembered && vaultReady && !deskState.vaultBusy -> { scope.launch { if (desk.connectRemembered(otp.ifBlank { null }, observed, approval)) onOpenWorkspace() } }
+            }
+            trustRevision++
+        }
+        // Enter connects as it always did, and never approves new or changed trust: once a certificate has been read and
+        // needs approval, only Trust and connect goes on. A server with a certificate this computer trusts needs no check.
+        val submit = {
+            when {
+                !canConnect -> Unit
+                pinless && (trust.needsApproval || trust.conflict) -> Unit
+                else -> connect(false, false)
+            }
+        }
+        // TLS refused this server's certificate on the last try: read it now, so the way forward is on screen.
+        val refusedHere = pinless && certificateRefused != null && runCatching { certificateOrigin(certificateRefused) == certificateOrigin(profile.origin) }.getOrDefault(false)
+        LaunchedEffect(profile.id, refusedHere) { if (refusedHere && seen == null && trust.known.isEmpty()) checkCertificate() }
         val explanation = when {
             remembered && password -> "The password is remembered on this computer. Leave the field empty to use it, or type a new one."
             remembered -> "The token secret is remembered on this computer. Leave the field empty to use it, or type a new one."
@@ -407,8 +451,33 @@ private val ConnectPanelWidth = 520.dp
         if (password) CompactDeskField(otp, { otp = it.filter { c -> !c.isWhitespace() }.take(64) }, "Two-factor code · only if the account uses one", onSubmit = submit)
         if (!web) RememberRow(deskState, desk, profile.id, remembered)
         if (deskState.vaultBusy) Text("Reading the remembered secret…", color = Tech.Muted, fontSize = 12.sp)
+        if (pinless) {
+            if (checking) Text("Checking server certificate…", color = Tech.Muted, fontSize = 12.sp)
+            checkError?.let { Text(it, color = Tech.Red, fontSize = 12.sp) }
+            trust.error?.let { Text(it, color = Tech.Red, fontSize = 12.sp) }
+            trust.known.forEach { known ->
+                Text("Known SHA-256: ${if (Appearance.showcase) "Hidden" else known}", fontFamily = Tech.Mono, fontSize = 11.sp, color = Tech.Muted)
+            }
+            if (trust.known.isNotEmpty()) Text(if (trust.savedPin) "Trusted through another saved connection to this server." else "Approved certificate for this server address and port.", color = Tech.Muted, fontSize = 11.sp)
+            seen?.let { fingerprint ->
+                Text("${if (trust.changed) "Certificate changed" else "Server certificate"} \u00b7 $shownServer", color = Tech.Amber, fontSize = 12.sp)
+                Text("Observed SHA-256: ${if (Appearance.showcase) "Hidden" else fingerprint}", fontFamily = Tech.Mono, fontSize = 11.sp, color = Tech.Amber)
+                if (trust.needsApproval) Text("Compare with the server's fingerprint before trusting. Approval is remembered for this address and port, even if sign-in fails. No password is saved.", color = Tech.Muted, fontSize = 12.sp)
+            }
+            if (trust.conflict) Text("Saved pins conflict. Review saved connections and remembered trust before connecting.", color = Tech.Red, fontSize = 12.sp)
+            if (trust.changed && trust.canApprove) TechCheck(replacementChecked, { replacementChecked = it }, "Replace the known certificate with this one")
+            if (refusedHere && trust.known.isEmpty()) Text("The last connection was refused on the server's certificate. A self-signed server needs its certificate approved once.", color = Tech.Amber, fontSize = 12.sp)
+            else if (seen == null && trust.known.isEmpty() && trust.error == null) Text("No certificate is approved for this server yet. A self-signed server, such as a new Proxmox VE install, needs its certificate checked and approved once.", color = Tech.Muted, fontSize = 12.sp)
+            if (seen == null && !checking) MiniAction(if (trust.known.isEmpty()) "Check server certificate" else "Re-check server certificate") { checkCertificate() }
+        }
         FlowRow(horizontalArrangement = Arrangement.spacedBy(Tech.Space12), verticalArrangement = Arrangement.spacedBy(Tech.Space8)) {
-            TechAction("Connect", active = true, enabled = deskState.profileSecretPresent || (remembered && vaultReady && !deskState.vaultBusy), onClick = submit)
+            if (pinless && trust.needsApproval) {
+                TechAction(if (trust.changed) "Replace trust and connect" else "Trust and connect", active = true,
+                    enabled = canConnect && trust.canApprove && (!trust.changed || replacementChecked)) { connect(true, false) }
+                if (trust.known.isEmpty() && trust.error == null) TechAction("Connect with normal TLS", enabled = canConnect) { connect(false, true) }
+            } else {
+                TechAction("Connect", active = true, enabled = canConnect && !(pinless && trust.conflict), onClick = submit)
+            }
             TechAction("Clear secret", onClick = desk::discardSecrets)
         }
     }
@@ -441,15 +510,18 @@ private fun rememberHelp(vaultName: String): String = when {
 }
 
 @Composable private fun ManualConnection(modifier: Modifier, anyOpen: Boolean, deskState: DeskState, desk: ProfileDesk, scanned: ScanHit?, motion: MotionPreferences, onOpenWorkspace: () -> Unit) {
-    var address by remember(scanned) { mutableStateOf(scanned?.origin.orEmpty()) }
-    var tokenId by remember { mutableStateOf("") }
+    // A scan result fills the form; otherwise it opens with what was typed last (never a secret), so that a refused sign-in
+    // or a look at another page does not empty the server address.
+    var address by remember(scanned) { mutableStateOf(scanned?.origin ?: desk.manualForm.address) }
+    var tokenId by remember { mutableStateOf(desk.manualForm.tokenId) }
     // The first start keeps API token. Password mode fills the usual user; the choice itself is the only thing remembered.
     var passwordChoice by remember { mutableStateOf(motion.option(DESK_PASSWORD_MODE, false)) }
-    var user by remember { mutableStateOf(if (passwordChoice) DEFAULT_PASSWORD_USER else "") }
+    var user by remember { mutableStateOf(desk.manualForm.user.ifBlank { if (passwordChoice) DEFAULT_PASSWORD_USER else "" }) }
     var otp by remember(deskState.secretGeneration) { mutableStateOf("") }
     var fingerprint by remember(scanned) { mutableStateOf("") }
-    var kind by remember(scanned) { mutableStateOf(if (scanned?.kind == ScanKind.PDM) PDM_KIND else DIRECT_PVE_KIND) }
+    var kind by remember(scanned) { mutableStateOf(if (scanned != null) (if (scanned.kind == ScanKind.PDM) PDM_KIND else DIRECT_PVE_KIND) else desk.manualForm.kind) }
     val passwordMode = passwordChoice && kind == DIRECT_PVE_KIND
+    androidx.compose.runtime.SideEffect { desk.manualForm = ManualForm(address, tokenId, user, kind) }
     // An edit permanently invalidates this scan offer, even if the address is later restored.
     val scanOffer = remember(scanned) { ScannedPinOffer(scanned?.origin.orEmpty(), kind, scanned?.fingerprint) }
     var manualOffer by remember(scanned) { mutableStateOf<ScannedPinOffer?>(null) }

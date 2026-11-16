@@ -2774,8 +2774,11 @@ class Workspace(
     override fun close() { mutationLeases.unregister(foregroundView); disconnect() }
 }
 
+/** What a session shows when TLS refused the server's certificate. The desk recognises it and offers the certificate check. */
+const val CERTIFICATE_ERROR = "The server certificate is untrusted, expired, or does not match the supplied fingerprint."
+
 fun readableError(error: Exception): String = when (error) {
-    is SSLException -> "The server certificate is untrusted, expired, or does not match the supplied fingerprint."
+    is SSLException -> CERTIFICATE_ERROR
     is IOException -> "The server could not be reached. Check the network and try again."
     is IllegalArgumentException -> "The server response or connection settings were invalid."
     is IllegalStateException -> error.message ?: "The request could not be completed."

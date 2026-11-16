@@ -152,4 +152,53 @@ class LoginTrustTest {
         second.load();Files.delete(file)
         assertFailsWith<IllegalStateException> {second.save(emptyList())}
     }
+
+    private fun saveProfile(desk: ProfileDesk, pin: String = "") {
+        desk.beginCreate(); desk.updateDraft("Lab", origin, "root@pam", pin); assertTrue(desk.saveDraft(passwordLogin = true))
+    }
+    /**
+     * A saved profile with no certificate pin of its own could never reach a self-signed server: it ignored the certificate
+     * approved for its address and port, and its panel had no way to approve one. Found with a real password sign-in.
+     */
+    @Test fun savedProfileWithoutItsOwnPinCanBeApprovedAndThenUsesThatCertificate() = runTest {
+        val (desk, ws, root) = fixture()
+        val pins = mutableListOf<String>()
+        desk.router = { connection, _ -> pins += connection!!.fingerprint }
+        try {
+            saveProfile(desk)
+            // Nothing known and nothing read from the server: normal TLS decides, as before.
+            desk.setProfileSecret("secret"); assertTrue(desk.connectSelected()); assertEquals(listOf(""), pins)
+            // A certificate read from the server is never trusted by an ordinary connect, and the typed secret stays.
+            desk.setProfileSecret("secret")
+            assertFalse(desk.connectSelected(observed = a)); assertTrue(desk.hasProfileSecret()); assertEquals(1, pins.size)
+            assertEquals("Review the server certificate and use Trust and connect explicitly.", desk.state.value.formError)
+            // Explicit approval connects with it and remembers it for this address and port.
+            val review = desk.manualTrust(origin, a)
+            assertTrue(review.needsApproval && review.canApprove)
+            assertTrue(desk.connectSelected(observed = a, approval = review)); assertEquals(a, pins.last())
+            assertEquals(a, CertificateTrustStore(root.resolve("certificates.json")).load().single().pin)
+            // From then on the profile connects with it, with or without a fresh read of the same certificate.
+            desk.setProfileSecret("secret"); assertTrue(desk.connectSelected()); assertEquals(a, pins.last())
+            desk.setProfileSecret("secret"); assertTrue(desk.connectSelected(observed = a)); assertEquals(a, pins.last())
+            // A different certificate is refused, also with the old approval, until it is explicitly replaced.
+            desk.setProfileSecret("secret")
+            assertFalse(desk.connectSelected(observed = b)); assertFalse(desk.connectSelected(observed = b, approval = review))
+            val changed = desk.manualTrust(origin, b)
+            assertTrue(desk.connectSelected(observed = b, approval = changed)); assertEquals(b, pins.last())
+            assertEquals(b, desk.manualTrust(origin).known.single())
+        } finally { desk.close(); ws.close() }
+    }
+    @Test fun certificateApprovedInTheConnectFormServesASavedProfileAndAPinnedProfileKeepsItsOwn() = runTest {
+        val (desk, ws, root) = fixture()
+        val pins = mutableListOf<String>()
+        desk.router = { connection, _ -> pins += connection!!.fingerprint }
+        try {
+            CertificateTrustStore(root.resolve("certificates.json")).save(listOf(ApprovedCertificate(origin, a)))
+            saveProfile(desk)
+            desk.setProfileSecret("secret"); assertTrue(desk.connectSelected()); assertEquals(a, pins.last())
+            // A profile with its own pin uses that pin whatever was read or approved elsewhere.
+            desk.beginEdit(); desk.updateDraft("Lab", origin, "root@pam", b); assertTrue(desk.saveDraft(passwordLogin = true))
+            desk.setProfileSecret("secret"); assertTrue(desk.connectSelected(observed = a)); assertEquals(b, pins.last())
+        } finally { desk.close(); ws.close() }
+    }
 }

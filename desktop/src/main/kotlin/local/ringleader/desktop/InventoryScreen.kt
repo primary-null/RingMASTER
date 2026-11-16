@@ -341,7 +341,7 @@ internal fun guestHasPage(state: WorkspaceState, guest: Guest): Boolean = state.
             remote.scope to guests.filter { it.scope == remote.scope }.groupBy { it.node }.entries.sortedBy { it.key }
                 .map { (node, members) -> node to steadyOrder.order("remote:${remote.scope}:$node", sort, descending, members, history) }
         }
-        if (guests.isEmpty() && (overview.remotes.isEmpty() || narrowed)) Text(if (total == 0) "No guests are visible to this token." else "No guests match these filters.", color = Tech.Muted)
+        if (guests.isEmpty() && (overview.remotes.isEmpty() || narrowed)) Text(if (total == 0) "No guests are visible to this sign-in." else "No guests match these filters.", color = Tech.Muted)
         LazyColumn(Modifier.weight(1f).fillMaxWidth().border(1.dp, Tech.Edge.copy(alpha = .7f), Tech.Plate)) {
             if (overview.remotes.isEmpty()) {
                 // The reveal stagger counts rows from the top of the list, across node groups.

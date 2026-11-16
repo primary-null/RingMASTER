@@ -51,6 +51,12 @@ fun authChoiceMismatch(passwordLogin: Boolean, identity: String, kind: String): 
     }
 }
 
+/**
+ * What the Connect form last held, apart from secrets: kept while the app runs, so leaving the desk or a refused sign-in
+ * does not empty the server address the person just typed.
+ */
+data class ManualForm(val address: String = "", val tokenId: String = "", val user: String = "", val kind: String = DIRECT_PVE_KIND)
+
 /** The usual Proxmox VE user when Password is chosen and the field is blank. */
 const val DEFAULT_PASSWORD_USER = "root@pam"
 
@@ -306,6 +312,9 @@ class ProfileDesk(
         return true
     }
 
+    /** The Connect form's own memory of its non-secret fields. See [ManualForm]. */
+    var manualForm = ManualForm()
+
     fun setProfileSecret(value: String) = setSecret(profile = true, value = value)
 
     fun setManualSecret(value: String) = setSecret(profile = false, value = value)
@@ -323,7 +332,44 @@ class ProfileDesk(
 
     fun leaveDesk() = discardSecrets()
 
-    fun connectSelected(otp: String? = null): Boolean {
+    /**
+     * The certificate pin a saved profile connects with. A profile that carries its own pin uses it. A profile without
+     * one trusts what the Connect form trusts: the certificate approved for its address and port, or the one approved
+     * right now through [approval]. With nothing known and nothing observed the pin is null and normal TLS applies.
+     * Until 0.25.9 a profile without a pin ignored approved certificates and could not be approved from its own panel,
+     * so it never reached a self-signed server.
+     */
+    private fun profilePin(profile: ConnectionProfile, observed: String?, approval: ManualTrust?): String? {
+        profile.sha256Pin?.let { return it }
+        val trust = manualTrust(profile.origin, observed)
+        if (trust.error != null) {
+            // Remembered certificates cannot be read: nothing can be approved, and normal TLS still decides.
+            check(approval == null && observed == null) { trust.error }
+            return null
+        }
+        return if (approval != null) {
+            check(approval == trust && trust.canApprove) { "Certificate approval changed. Check the server certificate again." }
+            trust.observed!!
+        } else {
+            check(!trust.conflict) { "Saved certificate pins conflict. Review the saved connections before connecting." }
+            val known = trust.known.singleOrNull()
+            check(trust.observed == null || trust.observed == known) { "Review the server certificate and use Trust and connect explicitly." }
+            known
+        }
+    }
+
+    /** Remember an explicit approval for a profile without its own pin. Approval survives authentication failure. */
+    private fun recordApproval(profile: ConnectionProfile, approval: ManualTrust?, pin: String?) {
+        if (approval == null || pin == null || profile.sha256Pin != null) return
+        val origin = certificateOrigin(profile.origin)
+        certificateStore.save(certificateStore.certificates().filterNot { it.origin == origin } + ApprovedCertificate(origin, pin))
+    }
+
+    /**
+     * [observed] is the certificate just read from the server and [approval] the explicit Trust and connect on it; both
+     * only matter for a profile that has no certificate pin of its own.
+     */
+    fun connectSelected(otp: String? = null, observed: String? = null, approval: ManualTrust? = null): Boolean {
         onWorkspace(workspace.state.value)
         val id = mutableState.value.selectedId ?: return false
         val profile = mutableState.value.profiles.find { it.id == id } ?: return false
@@ -334,7 +380,9 @@ class ProfileDesk(
         val rememberCopy = if (shouldRemember) chars.copyOf() else null
         var handed = false
         return try {
-            val connection = Connection(profile.origin, profile.tokenId, chars.concatToString(), profile.sha256Pin.orEmpty(), profile.kind, otp)
+            val pin = profilePin(profile, observed, approval)
+            val connection = Connection(profile.origin, profile.tokenId, chars.concatToString(), pin.orEmpty(), profile.kind, otp)
+            try { recordApproval(profile, approval, pin) } catch (e: RuntimeException) { connection.close(); throw e }
             publishSecretClear(connectedProfileId = profile.id, notice = null, connect = connection)
             rememberCopy?.let { watchForSuccess(PendingRemember(profile, it, workspace, workspace.state.value.connectionEpoch)) }
             handed = true
@@ -356,7 +404,7 @@ class ProfileDesk(
      * [dispatcher], then [Workspace.connect] runs here, as a typed connect does. Returns false when nothing was opened.
      * A remembered secret is never copied into the secret field.
      */
-    suspend fun connectRemembered(otp: String? = null): Boolean {
+    suspend fun connectRemembered(otp: String? = null, observed: String? = null, approval: ManualTrust? = null): Boolean {
         val now = mutableState.value
         val id = now.selectedId ?: return false
         if (id !in now.remembered || now.vaultStatus !is VaultStatus.Available || now.vaultBusy) return false
@@ -385,7 +433,9 @@ class ProfileDesk(
             val after = mutableState.value
             val current = after.profiles.find { it.id == profile.id }
             if (after.selectedId != profile.id || current == null || !current.definesSameConnection(profile) || profile.id !in after.remembered) return false
-            val connection = Connection(profile.origin, profile.tokenId, secret.concatToString(), profile.sha256Pin.orEmpty(), profile.kind, otp)
+            val pin = profilePin(profile, observed, approval)
+            val connection = Connection(profile.origin, profile.tokenId, secret.concatToString(), pin.orEmpty(), profile.kind, otp)
+            try { recordApproval(profile, approval, pin) } catch (e: RuntimeException) { connection.close(); throw e }
             publishSecretClear(connectedProfileId = profile.id, notice = null, connect = connection)
             true
         } catch (e: IllegalArgumentException) {

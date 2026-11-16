@@ -148,7 +148,7 @@ private fun statusColor(outcome: TaskOutcome) = when (outcome) {
                     item {
                     Column(verticalArrangement = Arrangement.spacedBy(Tech.Space8)) {
                     SectionLabel("Recent tasks", suffix = if (state.demo) "${tasks.size} · SAMPLE" else tasks.size.toString())
-                    if (tasks.isEmpty()) Text(if (state.demo) "No sample tasks." else "No recent tasks are visible to this token.", color = Tech.Muted)
+                    if (tasks.isEmpty()) Text(if (state.demo) "No sample tasks." else "No recent tasks are visible to this sign-in.", color = Tech.Muted)
                     else Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         val warned = tasks.count { it.outcome == TaskOutcome.Succeeded && taskHasWarnings(it) }
                         listOf(TaskOutcome.Running to "RUNNING", TaskOutcome.Succeeded to "OK", TaskOutcome.Unsuccessful to "FAILED", TaskOutcome.Unknown to "UNKNOWN").forEach { (outcome, label) ->
