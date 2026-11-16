@@ -388,13 +388,20 @@ class VpnScreenScenesTest {
         scope.cancel()
     }
 
-    @Test fun linuxWithoutOperatorRightsShowsTheCommandInsteadOfAButton() = scenes("routes-linux-sudo",
-        { VpnSession(it, FakeVpn(routed(), platform = "Linux", accept = notAccepted.copy(operator = "", operatorKnown = true)), hostActions = true, readLocalNetworks = noLocal) },
-        prepare = { settle(it) }) {
-        val t = texts()
-        assertTrue("sudo tailscale set --accept-routes=true" in t, "$t")
-        assertTrue(t.any { it.contains("only root or Tailscale's operator may change this") })
-        assertFalse(t.any { it.equals("Use these networks on this computer", true) }, "no button that would be refused")
+    /** The rule reads the account name; the release builds run as root, where the button is right, so the test names an ordinary account. */
+    @Test fun linuxWithoutOperatorRightsShowsTheCommandInsteadOfAButton() {
+        val before = System.getProperty("user.name")
+        System.setProperty("user.name", "scene-user")
+        try {
+            scenes("routes-linux-sudo",
+                { VpnSession(it, FakeVpn(routed(), platform = "Linux", accept = notAccepted.copy(operator = "", operatorKnown = true)), hostActions = true, readLocalNetworks = noLocal) },
+                prepare = { settle(it) }) {
+                val t = texts()
+                assertTrue("sudo tailscale set --accept-routes=true" in t, "$t")
+                assertTrue(t.any { it.contains("only root or Tailscale's operator may change this") })
+                assertFalse(t.any { it.equals("Use these networks on this computer", true) }, "no button that would be refused")
+            }
+        } finally { if (before == null) System.clearProperty("user.name") else System.setProperty("user.name", before) }
     }
 
     @Test fun routesAcceptedSearchThroughTheRouter() {
