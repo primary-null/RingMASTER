@@ -252,7 +252,7 @@ class ReadmeClipsTest {
                 repeat(90) { step() }
                 shot(1200.0, keep = true)
                 // Glide onto the inspector's CPU chart, then along it.
-                val start = Offset(1275f, 575f); val end = Offset(1545f, 575f)
+                val start = Offset(1275f, 600f); val end = Offset(1545f, 600f)
                 for (n in 1..24) { move(rest + (start - rest) * ease(n / 24f)); shot() }
                 for (n in 1..90) { move(start + (end - start) * (n / 90f)); shot() }
                 repeat(20) { shot() }

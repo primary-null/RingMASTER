@@ -12,7 +12,7 @@ Releases are built by GitHub Actions from a version tag. The update feed is sign
 | `fedora-45-x86_64-rpm` | `ringmaster-<version>-fedora-45-x86_64.rpm` | a Fedora 45 container |
 | `arch-x86_64-pkg` | `ringmaster-<version>-arch-x86_64.pkg.tar.zst` | an Arch Linux container |
 
-Plus `SHA256SUMS`, `ringmaster-update.json` and `ringmaster-update.json.sig`.
+Plus `SHA256SUMS`, `ringmaster-update.json` and `ringmaster-update.json.sig`, and the RingMASTER Engine bundles `ringmaster-engine-<engine version>-linux-x86_64.tar.gz` and `-linux-aarch64.tar.gz` (built by the workflow's engine job from `native/ringmaster-engine`, packed into every package, and offered to guests with internet; they are not part of the update feed).
 
 Linux packages are built on their own distribution because jpackage writes the build system's package names into Depends/Requires (Debian `libjpeg62-turbo`, Ubuntu `libjpeg-turbo8`, Fedora `libglvnd-glx`). Arch wraps the app image with a PKGBUILD. Debian and Ubuntu use `amd64` in the file name; Fedora and Arch use `x86_64`. The packages are not code-signed or GPG-signed. Integrity comes from `SHA256SUMS`, the build attestations and the signed update feed. Each Linux desktop entry is named RingMASTER, ends its Categories line with a semicolon, and sets StartupWMClass to `local-ringleader-desktop-MainKt`.
 

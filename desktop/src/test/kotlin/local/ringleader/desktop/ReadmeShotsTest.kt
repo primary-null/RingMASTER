@@ -31,7 +31,7 @@ import kotlin.math.sin
 /**
  * Opt-in: renders the README pictures from the app's own screens with invented sample data.
  * Set RINGMASTER_README_SHOTS to an output folder. Never connects to a server; every name and address is made up.
- * Writes fleet, guest-summary, activity, chart-lens, settings, network-tools, sign-in, console and under-the-hood PNGs,
+ * Writes fleet, guest-summary, activity, radios, chart-lens, settings, network-tools, sign-in, console and under-the-hood PNGs,
  * plus scan-clip/NNN.png frames (15 per second) for the animated scan.
  */
 class ReadmeShotsTest {
@@ -153,7 +153,7 @@ class ReadmeShotsTest {
         }
         val state = base.copy(selected = workbench, history = FleetHistory(perGuest, perNode, series(40, .19, 30.4, 96)),
             overview = base.overview!!.copy(nodes = 3, guests = guests, members = members),
-            inspection = inspection.copy(resource = workbench.resource, node = workbench.node), tasks = tasks,
+            inspection = inspection.copy(resource = workbench.resource, node = workbench.node), tasks = tasks, tasksUpdatedAt = now,
             chartHistory = InspectionSection(history), chartHistoryLoading = false)
         // The fleet picture inspects a container: its inspector row (no Console button) fits the 1600 px window.
         val fleetState = state.copy(selected = guests[6])
@@ -202,7 +202,7 @@ class ReadmeShotsTest {
                                     val selected = now.selected
                                     Text("WORKSPACE / ${page.uppercase()}${if (page == "Fleet" && selected != null) " / ${selected.kind} ${selected.id}" else ""}",
                                         fontFamily = FontFamily.Monospace, fontSize = 10.sp, letterSpacing = 1.5.sp, color = Tech.Muted)
-                                    Text(when (page) { "Fleet" -> selected?.name ?: "Fleet overview"; "Activity" -> "Recent activity"; "Scan" -> "Network scan"; "Tools" -> "Network tools"; "Under the Hood" -> "Under the Hood"; else -> "Connection desk" },
+                                    Text(when (page) { "Fleet" -> selected?.name ?: "Fleet overview"; "Activity" -> "Recent activity"; "Scan" -> "Network scan"; "Radios" -> "Bluetooth and Wi-Fi"; "Tools" -> "Network tools"; "Under the Hood" -> "Under the Hood"; else -> "Connection desk" },
                                         Modifier.weight(1f), fontSize = Tech.Title, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 }
                                 HorizontalDivider(color = Tech.Edge)
@@ -234,6 +234,13 @@ class ReadmeShotsTest {
             still("fleet", 1600, 1000, "Fleet", fleetState) { InventoryScreen(fleetState, workspace, null, "", {}, "All", {}, {}, {}, pins, "demo") }
             still("guest-summary", 1600, 1000, "Fleet", state) { GuestDetailPage(state, workspace, {}, { _, _ -> }, initialTab = "Summary", pins = pins, connectionKey = "demo") }
             still("activity", 1600, 800, "Activity", state) { ActivityScreen(state, workspace, null, {}, {}) }
+
+            // The Radios map: this computer and two nodes, their adapters, and the guests that hold them. Invented adapters.
+            run {
+                val radios = RadiosHub(FixedRadiosFeed(demoRadiosBoard(now)), FixedWifiFeed(demoWifiPanel(at = now)), BoardGuestRadios())
+                RadiosPageMemory.view = RadiosView.Map
+                still("radios", 1600, 1000, "Radios", state) { RadiosScreen(radios, null) }
+            }
 
             // The chart lens, opened on one guest's live CPU the way a click on its sparkline opens it, with the pointer resting on the chart.
             run {

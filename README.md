@@ -4,7 +4,7 @@ A desktop app for **Proxmox VE** and **Proxmox Datacenter Manager**, for **Windo
 
 <p align="center"><img src="design/icon/final/ringmaster-icon.svg" width="160" height="160" alt="The RingMASTER emblem: a ringmaster raising a top hat inside a ring"></p>
 
-Watch every node and guest with live charts, open their consoles, and start, stop or snapshot them, without opening the Proxmox web interface. RingMASTER asks you to confirm each change, and it tells you an action worked only after the task on the server has finished.
+Watch every node and guest with live charts, open their consoles, start, stop or snapshot them, and see every Bluetooth and Wi-Fi adapter across your fleet, without opening the Proxmox web interface. RingMASTER asks you to confirm each change, and it tells you an action worked only after the task on the server has finished.
 
 ![Fleet overview with live sparklines for every guest and the inspector open on a container](docs/images/fleet.png)
 
@@ -100,9 +100,11 @@ gh attestation verify RingMASTER-<version>.msi --repo primary-null/RingMASTER
 - Guests grouped by node (or by PDM remote, then node), with search and filters, and live CPU, memory, network and disk with sparklines. The view refreshes every 5 s, 10 s, 30 s or 2 min, pauses while the window is minimised, and backs off after errors.
 - History charts for nodes and guests, from an hour to a year, with drag to zoom, a shared crosshair and CSV export.
 - Hover any live chart or gauge to read its value and time. Click it to open it large over the page, with live samples and, for nodes and guests, server history from an hour to a year. Esc or a click outside closes it.
-- Guest pages: summary, hardware, snapshots (create with RAM, roll back, delete), backups, Bluetooth, console and actions.
+- Guest pages: summary, hardware, snapshots (create with RAM, roll back, delete), backups, radios, console and actions.
+- New VM and New container: a guided form with the node's own storages, bridges, ISO images and templates, and one confirmation that lists what will be created.
 - Power actions: start, shut down, reboot, stop, reset, suspend and resume. The confirmation names the server, node, guest and action.
-- Node tools: services, the system log with follow, and available package updates (read-only). A storage page with usage and contents.
+- Node tools: services, the system log with follow, and available package updates (read-only).
+- Storage: usage and contents of every storage, and, each with its own confirmation, upload an ISO image or template, download one from a URL or the template list, remove a volume, and edit a backup's notes or protection.
 - Permissions: what the signed-in account may do, feature by feature, and which privilege each feature needs.
 - Pins: keep a guest, one of its tabs, or a web page it serves in the sidebar, with a live dot for the guest's state.
 - Tags mark templates, HA, locks, protected backups, unplugged network cards, firewalls and shared storage.
@@ -124,15 +126,34 @@ gh attestation verify RingMASTER-<version>.msi --repo primary-null/RingMASTER
 
 ![Recent activity listing sample tasks with status, start time in UTC and duration](docs/images/activity.png)
 
+**Radios: Bluetooth and Wi-Fi**
+- One map of every Bluetooth and Wi-Fi adapter: this computer's, each node's (USB and PCI), and which guest each one is given to, with how sure that match is. Lines are solid to a running guest and dashed to a stopped one.
+- Four states, each drawn in its own icon, colour and word: Active, Ready, Inactive (kept for a stopped guest) and Disabled (turned off by a radio switch). They change live as guests start and stop.
+- A Radios strip on Fleet, a Radios tab on each guest, and a radios section on each node.
+- Wi-Fi: the networks this computer sees, with channels and signal over time, or the networks a VM sees through its own adapter. Bluetooth: a live scan on this computer or inside a VM.
+- Network names and Bluetooth and Wi-Fi addresses stay hidden until you choose Show names, and never go into diagnostics. Saved Wi-Fi passwords are never read. Nothing here changes anything on a server, and a command runs inside a guest only when you click for it.
+- On Windows, Wi-Fi scans need Location turned on (Settings > Privacy & security > Location). On Linux they use NetworkManager or `iw`. Listing a node's USB adapters needs an account that may list USB devices (in Proxmox VE, `Sys.Modify` on `/`).
+
+![The Radios map: this computer and two nodes with their Bluetooth and Wi-Fi adapters, lines to the guests that hold them](docs/images/radios.png)
+
+**RingMASTER Engine (optional, for Linux guests)**
+- Where the QEMU guest agent cannot answer (a container, or an account without guest-agent rights), a guest's Radios tab offers to set up the RingMASTER Engine: a small program that runs inside the guest and answers RingMASTER over TLS on port 8696.
+- It only reads which radios the guest has, and scans when you ask. It has no shell, runs nothing it is sent, never reads a saved Wi-Fi password, and runs as its own account without root. It answers only local networks and tailnets.
+- Install it with one click through the guest agent where that is allowed, by pasting one command that fetches it from RingMASTER over a one-time link, or, for a guest with internet, from this release page, checked by its SHA-256. You pair it by comparing the certificate fingerprint the installer prints and typing its one-time pairing token. Settings > RingMASTER Engine lists the pairings and removes them.
+- The Engine is built for Linux on x86_64 and aarch64 by this repository's release workflow and ships inside each RingMASTER package. Remove it from a guest with `sudo sh /usr/local/lib/ringmaster-engine/uninstall.sh`.
+
 **Network and devices**
 - A scan of your private networks that finds Proxmox VE, Backup Server and Datacenter Manager, Pi-hole, AdGuard Home, Home Assistant and other web services. It sends no credentials, and it shows each certificate for you to compare rather than trusting it.
 - Network tools: ping, traceroute, port check, DNS, HTTP/TLS, iPerf3 and WireGuard, plus [your own tools](docs/plugins/README.md) described in small JSON files.
 - VPN: Tailscale and WireGuard status, up and down, exit node, and WireGuard import.
-- Bluetooth: a live scan on this computer (Windows, or BlueZ on Linux) and inside a VM through the guest agent.
 
 ![A network scan sweeping a /24: Proxmox servers and other services appear as the sweep reaches their addresses](docs/images/scan.gif)
 
 ![Network tools after a ping, with the latency chart and the ping output](docs/images/network-tools.png)
+
+**Schedules and alerts**
+- Schedules: start or shut down a guest once, daily, on weekdays or on chosen days. They run while RingMASTER is running, also when its window is closed to the notification area; a run missed by more than 15 minutes is recorded as Missed.
+- Watcher: keep an eye on chosen nodes and guests across your saved connections, with notifications when one changes state or stays under heavy load, and when a task fails.
 
 **The app**
 - A theme-aware notification-area menu with shortcuts to Fleet, Activity, Notifications, Schedules, other pages and tools, Settings, update checks and About. It shows the running version and schedule status; shortcuts bring the app forward.
@@ -151,7 +172,7 @@ gh attestation verify RingMASTER-<version>.msi --repo primary-null/RingMASTER
 
 ![Under the Hood showing a stream of synthetic API calls, latency bands and the slowest requests](docs/images/under-the-hood.png)
 
-**Not yet:** guest editing, creating or restoring backups, node actions, storage changes, firewall, SDN, notifications, the scheduler, a file manager, and installing updates in place.
+**Not yet:** guest editing, creating or restoring backups, node actions, firewall, SDN, attaching radios to guests, pairing and connecting Bluetooth devices, a file manager, and installing updates in place.
 
 ## Privacy and network use
 
