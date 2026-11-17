@@ -104,8 +104,6 @@ internal fun routeTagView(state: RouteTagState, showcase: Boolean, now: Instant,
     fun hide(value: String) = if (showcase) ROUTE_HIDDEN else value
     return when (state) {
         RouteTagState.Hidden -> null
-        RouteTagState.Demo -> RouteTagView("DEMO · NO ROUTE", "DEMO", RouteTone.Quiet, RouteGlyph.None,
-            listOf("Server" to "Demonstration data"), listOf("There is no server connection, so there is no route to show."))
         RouteTagState.Browser -> RouteTagView("ROUTE NOT SHOWN", "N/A", RouteTone.Quiet, RouteGlyph.Unknown,
             listOf("Scope" to "RingMASTER host to server"),
             listOf("In browser mode the RingMASTER host makes this connection, not your browser. Its route is not inspected from browser sessions."))

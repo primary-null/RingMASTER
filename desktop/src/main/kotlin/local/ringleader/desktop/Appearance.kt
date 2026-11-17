@@ -367,7 +367,7 @@ internal object SystemTheme {
  * Showcase blur for identifying text (guest, node and host names, IDs, addresses, token IDs, device names) so the
  * app can be shown or recorded safely. The radius follows the text size: the element's height stands in for its font
  * size (one line is about 1.35 x the font), capped so a multi-line block is not smeared. Hovering peeks at 40 %; hovering
- * while holding Alt reveals the value fully (deliberate, so a resting pointer never exposes anything during a demo).
+ * while holding Alt reveals the value fully (deliberate, so a resting pointer never exposes anything while presenting).
  * Screen readers hear "Hidden" until it is revealed.
  */
 fun Modifier.identity(): Modifier = composed {

@@ -1,0 +1,4 @@
+RINGMASTER-RADIO 1 wifi 2bfdf45c7ac0dfe9
+2bfdf45c7ac0dfe9	tools
+2bfdf45c7ac0dfe9	uid	1000
+2bfdf45c7ac0dfe9	done

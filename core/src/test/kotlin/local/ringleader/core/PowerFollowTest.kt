@@ -49,7 +49,7 @@ class PowerRefusalTest {
             GuestSnapshot("halfway", "baseline", 2, null, false, false, snapstate = "prepare"),
             GuestSnapshot("current", "halfway", null, null, false, true),
         )
-        val inspection = demoInspection(stopped, "hour").copy(snapshots = InspectionSection(snapshots))
+        val inspection = sampleInspection(stopped, "hour").copy(snapshots = InspectionSection(snapshots))
         val state = ready(stopped).copy(inspection = inspection)
         assertEquals("Snapshot halfway is not complete (prepare). Nothing was sent.",
             powerRefusal(confirmation(stopped, PowerAction.SnapshotRollback, SnapshotRequest("halfway")), state))
@@ -67,7 +67,7 @@ class PowerRefusalTest {
     }
 
     @Test fun unresolvedRefusalNamesTheGuestAndAction() {
-        val accepted = PowerSubmission("local-1", remote, "node-a", 100, "VM", "alpha", PowerAction.Shutdown, PowerPhase.Accepted, "x", false, true)
+        val accepted = PowerSubmission("local-1", remote, "node-a", 100, "VM", "alpha", PowerAction.Shutdown, PowerPhase.Accepted, "x", checkable = true)
         val other = Guest(remote, 101, "beta", "node-b", "Container", "stopped")
         val state = WorkspaceState(connected = true, address = remote, overview = Overview(1, listOf(guest, other)), selected = other, connectionEpoch = 3, submissions = listOf(accepted))
         val refusal = powerRefusal(confirmation(other, PowerAction.Start), state)!!
@@ -137,7 +137,7 @@ class PowerFollowWorkspaceTest {
             calls++
             return Overview(1, listOf(Guest(connection.remoteKey, 100, "alpha", "node-a", "VM", status), Guest(connection.remoteKey, 101, "beta", "node-b", "Container", "stopped")))
         }
-        override suspend fun details(connection: Connection, guest: Guest) = demoDetails(guest)
+        override suspend fun details(connection: Connection, guest: Guest) = sampleDetails(guest)
     }
 
     private class Power(var upid: String) : PowerGateway {
@@ -342,7 +342,7 @@ class PowerFollowWorkspaceTest {
     @Test fun lockedGuestCaptureShowsTheReasonInsteadOfNothing() = runTest {
         val inventory = object : InventoryGateway {
             override suspend fun overview(connection: Connection) = Overview(1, listOf(Guest(connection.remoteKey, 100, "alpha", "node-a", "VM", "running", lock = "snapshot")))
-            override suspend fun details(connection: Connection, guest: Guest) = demoDetails(guest)
+            override suspend fun details(connection: Connection, guest: Guest) = sampleDetails(guest)
         }
         val power = Power(upid)
         val workspace = Workspace(this, inventory, LiveTaskGateway(), power)

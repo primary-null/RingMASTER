@@ -139,7 +139,7 @@ class LivePowerGateway(private val client: PveClient = PveClient()) : PowerGatew
 
 data class WorkspaceState(
     val inspection: GuestInspection? = null, val inspectionLoading: Boolean = false,
-    val connected: Boolean = false, val demo: Boolean = false, val address: String = "",
+    val connected: Boolean = false, val address: String = "",
     val overview: Overview? = null, val loading: Boolean = false, val updatedAt: Instant? = null,
     val error: String? = null, val stale: Boolean = false, val selected: Guest? = null,
     /** Why the inventory read failed, when it is one of the [NetworkFailure] causes; [error] is its sentence. Null otherwise. */
@@ -153,7 +153,7 @@ data class WorkspaceState(
     val failedAddress: String = "",
     /**
      * The user or API token ID this connection signs in with, kept after a refusal closed it, so the failure card can
-     * say what was sent. Shown on screen only; never in a diagnostics bundle. Blank for the demo and when nothing is open.
+     * say what was sent. Shown on screen only; never in a diagnostics bundle. Blank when nothing is open.
      */
     val account: String = "",
     val details: GuestDetails? = null, val detailsLoading: Boolean = false,
@@ -199,7 +199,7 @@ data class WorkspaceState(
     val watchIdentity: WatchScope? = null,
     /**
      * For a connection without a certificate pin: which store accepted the server's certificate on the last successful
-     * read ([PlatformTrust]). Null for a pinned connection, the demo, and before the first read.
+     * read ([PlatformTrust]). Null for a pinned connection and before the first read.
      */
     val tlsTrust: TrustSource? = null,
 ) {
@@ -243,7 +243,6 @@ class Workspace(
     private val nodeStatusGateway: NodeStatusGateway = LiveNodeStatusGateway(),
     private val inspectionGateway: GuestInspectionGateway = LiveGuestInspectionGateway(),
     private val clock: () -> Instant = { Instant.now() },
-    private val demoSeed: Long = LIVE_DEMO_SEED,
     private val spiceGateway: SpiceGateway = LiveSpiceGateway(),
     private val guestBluetoothGateway: GuestBluetoothGateway = LiveGuestBluetoothGateway(),
     private val consoleStillGateway: ConsoleStillGateway = LiveConsoleStillGateway(),
@@ -257,6 +256,8 @@ class Workspace(
     private val storageActionGateway: StorageActionGateway = LiveStorageActionGateway(),
     /** Which store accepted the last normal-TLS handshake with an origin. Tests replace it. */
     private val trustSource: (String) -> TrustSource? = { PlatformTrust.shared.sourceFor(it) },
+    private val fleetRadioSource: FleetRadioSource = LiveFleetRadioSource(),
+    private val guestRadioGateway: GuestRadioGateway = LiveGuestRadioGateway(),
 ) : AutoCloseable {
     private val mutableState = MutableStateFlow(WorkspaceState())
     val state = mutableState.asStateFlow()
@@ -278,14 +279,14 @@ class Workspace(
         { key -> if (mutableState.value.storageSelection == key) refreshStorageContent() })
     fun captureStorage(node: String, storage: String, request: StorageRequest, profileLabel: String, browser: Boolean = false): StorageConfirmation? {
         if (browser && request is StorageRequest.Upload) { mutableState.update { it.copy(storageActions = it.storageActions.copy(notice = "Browser mode cannot upload a local file.")) }; return null }
-        return storageActionWorkbench.capture(StorageKey(if (mutableState.value.demo) DEMO_REMOTE_KEY else connection?.remoteKey.orEmpty(), node, storage), request, profileLabel)
+        return storageActionWorkbench.capture(StorageKey(connection?.remoteKey.orEmpty(), node, storage), request, profileLabel)
     }
     fun submitStorage(confirmation: StorageConfirmation): Boolean = storageActionWorkbench.submit(confirmation)
     fun loadStorageCatalogue(node: String, storage: String) = storageActionRead(node, storage)
     fun queryStorageUrlMetadata(node: String, storage: String, url: String, verifyCertificates: Boolean = true) = storageActionRead(node, storage, url, verifyCertificates)
     fun readStorageAttributes(node: String, storage: String, volid: String) = storageActionRead(node, storage, volid = volid)
     private fun storageActionRead(node: String, storage: String, url: String? = null, verify: Boolean = true, volid: String? = null) =
-        storageActionWorkbench.read(StorageKey(if (mutableState.value.demo) DEMO_REMOTE_KEY else connection?.remoteKey.orEmpty(), node, storage), url, verify, volid)
+        storageActionWorkbench.read(StorageKey(connection?.remoteKey.orEmpty(), node, storage), url, verify, volid)
     fun cancelStorageUpload(localId: String) = storageActionWorkbench.cancelUpload(localId)
     fun acknowledgeStorageResult(localId: String) = storageActionWorkbench.acknowledge(localId)
     fun openStorageTaskLog(localId: String): Boolean { val task = storageActionWorkbench.task(localId) ?: return false; openTaskLog(task); return true }
@@ -360,8 +361,6 @@ class Workspace(
     private var taskLogToken = 0L
     private var netCounters: Map<ResourceId, NetCounters> = emptyMap()
     private var historyReadings: Map<Any, Any?> = emptyMap()
-    private var demoRandom = Random(demoSeed)
-    private var demoCursor: Overview = demoOverview
 
     /**
      * False while another open session is the one in view. Under the Hood has one live-loop readout, and only the
@@ -372,7 +371,7 @@ class Workspace(
             val arrived = value && !field
             field = value
             if (arrived) mutableState.value.let { now ->
-                Trace.liveLoop.value = TraceLiveLoop(state = when { !now.connected && !now.demo -> "idle"; !now.live -> "paused"; else -> "waiting" }, intervalMs = now.liveIntervalSeconds * 1000L)
+                Trace.liveLoop.value = TraceLiveLoop(state = when { !now.connected -> "idle"; !now.live -> "paused"; else -> "waiting" }, intervalMs = now.liveIntervalSeconds * 1000L)
             }
         }
     private inline fun traceLoop(next: (TraceLiveLoop) -> TraceLiveLoop) { if (inView) Trace.liveLoop.value = next(Trace.liveLoop.value) }
@@ -403,35 +402,20 @@ class Workspace(
         Trace.emit(TraceSource.App, "disconnect", "Disconnected")
     }
 
-    fun exploreDemo() {
-        closeSession()
-        lastFailure = null
-        resetDemoMotion()
-        val now = clock()
-        mutableState.value = WorkspaceState(
-            demo = true, overview = demoOverview, updatedAt = now,
-            tasks = demoTasks, tasksUpdatedAt = now, connectionEpoch = ++epochCounter,
-            live = true, liveIntervalSeconds = LIVE_INTERVAL_DEFAULT,
-        )
-        recordHistory(demoOverview, now)
-        startLiveLoop()
-        if (tasksLive) startTaskLoop()
-    }
-
     /**
      * Turn the quiet inventory loop on or off. The interval is clamped to 2..120 seconds.
      * Omitting the interval keeps the current one, so a minimize pause can call `setLive(false)` and later `setLive(true)`.
      */
     fun setLive(enabled: Boolean, intervalSeconds: Int = mutableState.value.liveIntervalSeconds) {
         val clamped = clampLiveInterval(intervalSeconds)
-        if (!mutableState.value.connected && !mutableState.value.demo) return
+        if (!mutableState.value.connected) return
         mutableState.update { it.copy(live = enabled, liveIntervalSeconds = clamped, liveBackoffSeconds = null) }
         startLiveLoop()
     }
 
     /** [setLive] on, with a jittered first wait, so sessions restored together (window un-minimised) do not poll in the same second. */
     internal fun resumeLive() {
-        if (!mutableState.value.connected && !mutableState.value.demo) return
+        if (!mutableState.value.connected) return
         mutableState.update { it.copy(live = true, liveBackoffSeconds = null) }
         startLiveLoop(stagger = true)
     }
@@ -445,17 +429,6 @@ class Workspace(
     }
 
     fun refresh(force: Boolean = false) {
-        if (mutableState.value.demo) {
-            dropNodeRead()
-            resetDemoMotion()
-            val readAt = clock()
-            mutableState.update { it.copy(overview = demoOverview, updatedAt = readAt, stale = false, error = null, loading = false, nodeStatusLoading = false, liveBackoffSeconds = null) }
-            recordHistory(demoOverview, readAt)
-            retireKeptConsoles(demoOverview)
-            reconcile(DEMO_REMOTE_KEY, demoOverview.guests)
-            holdMember(DEMO_REMOTE_KEY)
-            return
-        }
         val current = connection ?: return
         if (inventoryJob?.isActive == true || liveTick?.isActive == true) {
             if (force) {
@@ -511,10 +484,6 @@ class Workspace(
                 return
             }
         }
-        if (mutableState.value.demo) {
-            mutableState.update { it.copy(tasks = demoTasks, tasksLoading = false, tasksStale = false, tasksError = null, tasksUpdatedAt = Instant.now()) }
-            return
-        }
         val current = connection ?: return
         if (current.kind == PDM_KIND) {
             mutableState.update { it.copy(tasks = null, tasksLoading = false, tasksStale = false, tasksError = null, tasksUpdatedAt = null) }
@@ -547,7 +516,7 @@ class Workspace(
         val state = mutableState.value
         val submission = state.submissions.singleOrNull { it.localId == localId && it.action == PowerAction.Create } ?: return false
         val current = connection ?: return false
-        if (!state.connected || state.demo || current.kind != DIRECT_PVE_KIND || submission.remote != current.remoteKey) return false
+        if (!state.connected || current.kind != DIRECT_PVE_KIND || submission.remote != current.remoteKey) return false
         val upid = submittedUpids[localId] ?: return false
         val parsed = parseServerUpid(upid) ?: return false
         if (parsed.node != submission.node || parsed.subjectId != submission.vmid.toString()) return false
@@ -556,7 +525,7 @@ class Workspace(
         return true
     }
 
-    /** Open one task log. A PDM connection is refused before any node path is built. Demo samples never leave this computer. */
+    /** Open one task log. A PDM connection is refused before any node path is built. */
     fun openTaskLog(task: ClusterTask) {
         taskLogJob?.cancel()
         taskLogMoreJob?.cancel()
@@ -564,18 +533,6 @@ class Workspace(
         val snapshot = mutableState.value
         if (snapshot.kind == PDM_KIND || connection?.kind == PDM_KIND) {
             mutableState.update { it.copy(taskLog = TaskLogState(task, error = TASK_LOG_DIRECT_ONLY, loading = false, following = false)) }
-            return
-        }
-        if (snapshot.demo || task.remote == DEMO_REMOTE_KEY) {
-            if (!snapshot.demo || task.remote != DEMO_REMOTE_KEY) {
-                mutableState.update { it.copy(taskLog = TaskLogState(task, error = "The connection changed.", loading = false, following = false)) }
-                return
-            }
-            val session = generation
-            val epoch = snapshot.connectionEpoch
-            val fixture = demoTaskLog(task)
-            mutableState.update { it.copy(taskLog = fixture) }
-            if (fixture.status?.running == true) startDemoTaskLog(token, session, epoch, task)
             return
         }
         val current = connection
@@ -638,7 +595,7 @@ class Workspace(
     fun loadMoreTaskLog() {
         val snapshot = mutableState.value
         val log = snapshot.taskLog ?: return
-        if (log.loading || snapshot.demo || !taskLogHasMore(log.lines, log.total)) return
+        if (log.loading || !taskLogHasMore(log.lines, log.total)) return
         val current = connection ?: return
         if (current.kind != DIRECT_PVE_KIND || log.task.remote != current.remoteKey) return
         if (taskLogMoreJob?.isActive == true) return
@@ -662,33 +619,6 @@ class Workspace(
             catch (e: GuestPermissionException) { failLog(token, session, epoch, task, TASK_LOG_AUDIT_DENIED) }
             // One failed Load more keeps the lines and any running follow; the button can be used again.
             catch (e: Exception) { retryLog(token, session, epoch, task, readableError(e)) }
-        }
-    }
-
-    private fun startDemoTaskLog(token: Long, session: Long, epoch: Long, task: ClusterTask) {
-        val tail = demoTaskLogTail(task)
-        if (tail.isEmpty()) return
-        taskLogJob = scope.launch {
-            var index = 0
-            while (isActive && index < tail.size) {
-                delay(TASK_LOG_POLL_MS)
-                if (!logCurrent(token, session, epoch, task)) return@launch
-                val line = tail[index++]
-                val finished = index == tail.size
-                mutableState.update { state ->
-                    if (taskLogToken != token || generation != session || state.connectionEpoch != epoch) return@update state
-                    val log = state.taskLog ?: return@update state
-                    if (log.task.identity != task.identity) return@update state
-                    val lines = mergeTaskLogLines(log.lines, listOf(line))
-                    state.copy(taskLog = log.copy(
-                        lines = lines,
-                        total = lines.lastOrNull()?.n ?: lines.size,
-                        status = if (finished) demoTaskLogFinished(task) else log.status,
-                        loading = false,
-                        error = null,
-                    ))
-                }
-            }
         }
     }
 
@@ -743,9 +673,7 @@ class Workspace(
         } ?: return null
         val label = profileLabel.replace(Regex("\\s+"), " ").trim().take(160)
         if (label.isEmpty() || label.any { it.isISOControl() }) return null
-        val confirmation = if (current.demo) {
-            PowerConfirmation(current.connectionEpoch, DEMO_REMOTE_KEY, "Demonstration", label, listed.resource, listed.node, listed.name, listed.kind, action, listed.status, listed.template)
-        } else if (current.connected && current.address.isNotBlank()) {
+        val confirmation = if (current.connected && current.address.isNotBlank()) {
             PowerConfirmation(current.connectionEpoch, current.address, current.address, label, listed.resource, listed.node, listed.name, listed.kind, action, listed.status, listed.template)
         } else return null
         val bound = confirmation.copy(snapshot = snapshot)
@@ -782,17 +710,13 @@ class Workspace(
             mutableState.update { it.copy(powerNotice = refusal) }
             return false
         }
-        if (!mutableState.value.demo && connection?.let { mutationLeases.scheduledHolds(GuestKey(it.remoteKey, confirmation.kind, confirmation.resource.vmid)) } == true) {
+        if (connection?.let { mutationLeases.scheduledHolds(GuestKey(it.remoteKey, confirmation.kind, confirmation.resource.vmid)) } == true) {
             mutableState.update { it.copy(powerNotice = MutationLeases.SCHEDULED_REFUSAL) }
             return false
         }
         if (!usedConfirmations.add(confirmation.confirmationId)) {
             mutableState.update { it.copy(powerNotice = "This confirmation was already used. Nothing else was sent.") }
             return false
-        }
-        if (mutableState.value.demo) {
-            rememberSubmission(simulatedSubmission(confirmation), confirmation.epoch, null)
-            return true
         }
         val current = connection ?: run {
             mutableState.update { it.copy(powerNotice = "The connection changed. Nothing was sent.") }
@@ -817,7 +741,7 @@ class Workspace(
                 val submission = PowerSubmission(
                     newLocalId(), confirmation.remote, confirmation.node, confirmation.resource.vmid, confirmation.kind,
                     confirmation.name, confirmation.action, PowerPhase.Accepted,
-                    "The server accepted this action. It is not finished.", false, true,
+                    "The server accepted this action. It is not finished.", checkable = true,
                 )
                 rememberSubmission(submission, confirmation.epoch, upid)
             } catch (e: CancellationException) {
@@ -846,9 +770,9 @@ class Workspace(
      * Accepted tasks are also followed automatically; this reads once more on demand.
      */
     fun checkPower(localId: String) {
-        if (mutableState.value.demo || statusJob?.isActive == true) return
+        if (statusJob?.isActive == true) return
         val item = mutableState.value.submissions.find { it.localId == localId } ?: return
-        if (!item.checkable || item.checking || item.simulated) return
+        if (!item.checkable || item.checking) return
         val upid = submittedUpids[localId] ?: return
         val current = connection ?: return
         if (current.kind != DIRECT_PVE_KIND) return
@@ -889,7 +813,7 @@ class Workspace(
 
     /**
      * Open the create wizard's session for [kind] on [node] and start its reads (next ID, pools, bridges, and for a VM
-     * the CPU models and flags); in demo mode the session is [demoCreateSession]. Returns false, with nothing read, when
+     * the CPU models and flags). Returns false, with nothing read, when
      * [createAvailability] says no or [node] is not online. Opening again replaces the previous session.
      */
     private var createJob: Job? = null
@@ -906,14 +830,12 @@ class Workspace(
         if (!createAvailability(state, kind).available || state.overview?.members?.none { it.name == node && it.status == "online" } != false) return false
         closeCreateSession()
         val serial = ++createSerial
-        mutableState.update { it.copy(creation = if (it.demo) demoCreateSession(kind, node, it.connectionEpoch, clock()).copy(generation = serial) else CreateSession(kind, node, it.connectionEpoch, serial, identityIsRootPam = connection?.let { c -> c.passwordLogin && c.tokenId == "root@pam" } == true)) }
-        if (!state.demo) {
-            val content = if (kind == NewGuestKind.Vm) "iso" else "vztmpl"
-            storageChoices(state.overview.storage, node, content).firstOrNull()?.let { readForCreate(CreateRead.Volumes(it.id, content)) }
-            readForCreate(CreateRead.NextId); readForCreate(CreateRead.Pools); readForCreate(CreateRead.Bridges)
-            if (kind == NewGuestKind.Vm) { readForCreate(CreateRead.CpuModels(null)); readForCreate(CreateRead.CpuFlags(null, "kvm")) }
-            if (state.permissions.updatedAt?.let { java.time.Duration.between(it, clock()).seconds < 60 } != true) loadPermissions()
-        }
+        mutableState.update { it.copy(creation = CreateSession(kind, node, it.connectionEpoch, serial, identityIsRootPam = connection?.let { c -> c.passwordLogin && c.tokenId == "root@pam" } == true)) }
+        val content = if (kind == NewGuestKind.Vm) "iso" else "vztmpl"
+        storageChoices(state.overview.storage, node, content).firstOrNull()?.let { readForCreate(CreateRead.Volumes(it.id, content)) }
+        readForCreate(CreateRead.NextId); readForCreate(CreateRead.Pools); readForCreate(CreateRead.Bridges)
+        if (kind == NewGuestKind.Vm) { readForCreate(CreateRead.CpuModels(null)); readForCreate(CreateRead.CpuFlags(null, "kvm")) }
+        if (state.permissions.updatedAt?.let { java.time.Duration.between(it, clock()).seconds < 60 } != true) loadPermissions()
         return true
     }
     fun changeCreateNode(node: String) {
@@ -932,18 +854,12 @@ class Workspace(
         val c = mutableState.value.creation ?: return false
         if (c.epoch != epoch || c.generation != generation || c.node != node || content !in listOf("iso", "vztmpl")) return false
         val key = storage to content
-        if (c.sample) {
-            val rows = mutableState.value.storageContent.value?.takeIf { it.key.node == node && it.key.storage == storage }?.volumes ?: return false
-            mutableState.update { it.copy(creation = c.copy(volumes = c.volumes + (key to ReadSection.loaded(rows.filter { it.content == content }, clock(), sample = true)))) }
-        } else {
-            mutableState.update { it.copy(creation = c.copy(volumes = c.volumes + (key to ReadSection()))) }
-            readForCreate(CreateRead.Volumes(storage, content))
-        }
+        mutableState.update { it.copy(creation = c.copy(volumes = c.volumes + (key to ReadSection()))) }
+        readForCreate(CreateRead.Volumes(storage, content))
         return true
     }
     fun readForCreate(read: CreateRead) {
         val c = mutableState.value.creation ?: return
-        if (c.sample) return
         val conn = connection ?: return
         if (read is CreateRead.Volumes) {
             val section = c.volumes[read.storage to read.content]
@@ -995,8 +911,8 @@ class Workspace(
         val st = mutableState.value
         val c = st.creation ?: return null
         if (c.node != request.node || c.kind != request.kind) return null
-        val confirmation = CreateConfirmation(st.connectionEpoch, if (st.demo) DEMO_REMOTE_KEY else st.address,
-            if (st.demo) "Demonstration" else st.address, profileLabel, request.copy(params = request.params.toList()), secrets)
+        val confirmation = CreateConfirmation(st.connectionEpoch, st.address,
+            st.address, profileLabel, request.copy(params = request.params.toList()), secrets)
         val refusal = createRefusal(confirmation, st)
         if (refusal != null) { mutableState.update { it.copy(powerNotice = refusal) }; return null }
         capturedCreates[confirmation.confirmationId] = c.generation
@@ -1012,9 +928,8 @@ class Workspace(
         fun submission(phase: PowerPhase, detail: String, upid: String? = null) {
             if (mutableState.value.connectionEpoch == confirmation.epoch && createInFlight === confirmation) powerBusy = false
             if (upid != null) submittedUpids[id] = upid
-            mutableState.update { if (it.connectionEpoch == confirmation.epoch) it.copy(powerBusy = if (createInFlight === confirmation || st.demo) false else it.powerBusy, submissions = listOf(PowerSubmission(id, confirmation.remote, r.node, r.vmid, r.kind.guestKind, r.name, PowerAction.Create, phase, detail, st.demo, upid != null)) + it.submissions) else it }
+            mutableState.update { if (it.connectionEpoch == confirmation.epoch) it.copy(powerBusy = if (createInFlight === confirmation) false else it.powerBusy, submissions = listOf(PowerSubmission(id, confirmation.remote, r.node, r.vmid, r.kind.guestKind, r.name, PowerAction.Create, phase, detail, upid != null)) + it.submissions) else it }
         }
-        if (st.demo) { secrets.close(); submission(PowerPhase.Simulated, "Simulated. Nothing was sent."); result(CreateResult.Simulated(r.kind, r.node, r.vmid)); return true }
         val conn = connection ?: run { secrets.close(); return false }
         powerBusy = true
         createInFlight = confirmation; createSecretsInFlight = secrets
@@ -1165,7 +1080,7 @@ class Workspace(
             }
         }
         if (stored && upid != null && submission.phase == PowerPhase.Accepted && submission.checkable) followPower(submission.localId, submission.node, upid, epoch)
-        // A snapshot outcome that is already final (simulated in demo, or refused) refreshes the open guest page now.
+        // A snapshot outcome that is already final (refused) refreshes the open guest page now.
         if (stored) snapshotInspectionRefresh(submission)
     }
 
@@ -1273,9 +1188,9 @@ class Workspace(
     private fun recordLostResults() {
         val current = connection ?: return
         val state = mutableState.value
-        if (state.demo || !state.connected) return
+        if (!state.connected) return
         val now = clock()
-        state.submissions.filter { !it.simulated && (it.phase == PowerPhase.Accepted || it.phase == PowerPhase.Unknown) }.forEach {
+        state.submissions.filter { it.phase == PowerPhase.Accepted || it.phase == PowerPhase.Unknown }.forEach {
             lostResults.add(LostPowerResult(newLocalId(), current.address, it.node, it.vmid, it.kind, it.name, it.action, it.phase == PowerPhase.Accepted, now))
         }
         createInFlight?.let { c -> lostResults.add(LostPowerResult(newLocalId(), current.address, c.request.node, c.request.vmid, c.request.kind.guestKind, c.request.name, PowerAction.Create, false, now)) }
@@ -1288,7 +1203,7 @@ class Workspace(
     private fun rememberOutcome(confirmation: PowerConfirmation, phase: PowerPhase, detail: String, checkable: Boolean) {
         val submission = PowerSubmission(
             newLocalId(), confirmation.remote, confirmation.node, confirmation.resource.vmid, confirmation.kind,
-            confirmation.name, confirmation.action, phase, detail, false, checkable,
+            confirmation.name, confirmation.action, phase, detail, checkable = checkable,
         )
         rememberSubmission(submission, confirmation.epoch, null)
     }
@@ -1344,7 +1259,7 @@ class Workspace(
         val remote = currentRemote() ?: run { clearSelection(); return }
         require(guest.remote == remote) { "This guest belongs to a different connection." }
         val currentConnection = connection
-        if (!mutableState.value.demo && (currentConnection?.kind == PDM_KIND || guest.scope.isNotEmpty())) {
+        if ((currentConnection?.kind == PDM_KIND || guest.scope.isNotEmpty())) {
             require(currentConnection != null && currentConnection.kind == PDM_KIND && guest.scope.isNotEmpty()) {
                 "This guest belongs to a different connection."
             }
@@ -1365,11 +1280,6 @@ class Workspace(
         val session = generation
         val resource = guest.resource
         mutableState.update { it.copy(selected = guest, details = null, detailsLoading = true, detailsError = null, detailsUpdatedAt = null) }
-        if (mutableState.value.demo) {
-            mutableState.update { it.copy(details = demoDetails(guest), detailsLoading = false, detailsUpdatedAt = Instant.now()) }
-            refreshInspectionIfGuestMoved(previous, guest)
-            return
-        }
         val current = connection ?: run { clearSelection(); return }
         refreshInspectionIfGuestMoved(previous, guest)
         detailJob = scope.launch {
@@ -1394,7 +1304,6 @@ class Workspace(
      */
     suspend fun spiceTicket(guest: Guest): SpiceTicket {
         val state = mutableState.value
-        check(!state.demo) { SPICE_DEMO }
         val current = connection ?: error("Connect to a server first.")
         require(current.kind != PDM_KIND && guest.scope.isEmpty()) { DIRECT_GUEST_REFUSAL }
         val remote = currentRemote() ?: error("Connect to a server first.")
@@ -1404,10 +1313,49 @@ class Workspace(
         catch (e: SessionExpiredException) { if (generation == session) expire(); throw e }
     }
 
-    /** One Bluetooth scan inside a guest of the current direct-PVE inventory, through the guest agent. Demo returns sample data. */
+    /**
+     * The Bluetooth and Wi-Fi adapters of the current server's nodes and the guests that hold them. Reading only.
+     * Guest configs are reused for a few minutes unless [force] is set. A PDM connection answers with a reason instead.
+     */
+    suspend fun fleetRadios(force: Boolean = false): FleetRadios {
+        val state = mutableState.value
+        val overview = state.overview ?: error("Connect to a server first.")
+        val current = connection ?: error("Connect to a server first.")
+        val session = generation
+        try { return withContext(Dispatchers.IO) { fleetRadioSource.read(current, overview, force) } }
+        catch (e: SessionExpiredException) { if (generation == session) expire(); throw e }
+    }
+
+    /** The guest of the current inventory that [guest] names, with the connection to reach it; the same checks as the Bluetooth scan. */
+    private fun currentGuest(guest: Guest): Pair<Connection, Guest> {
+        val current = connection ?: error("Connect to a server first.")
+        val remote = currentRemote() ?: error("Connect to a server first.")
+        val live = mutableState.value.overview?.guests?.let { findCurrentGuest(remote, guest, it) } ?: error("This guest is no longer in the inventory. Sync and try again.")
+        return current to live
+    }
+
+    /**
+     * The Bluetooth controllers and Wi-Fi interfaces a VM itself sees, read through the guest agent after the user asked.
+     * [hardware] is the VM's loaded configuration; without it, or for a guest that cannot be asked, the gateway refuses
+     * before anything is sent.
+     */
+    suspend fun guestRadioProbe(guest: Guest, hardware: HardwareSummary?): GuestRadioProbe =
+        onGuest(guest) { c, g -> guestRadioGateway.probe(c, g, hardware) }
+
+    /** One Wi-Fi scan inside a VM, through the guest agent or a paired Engine, after the user asked. */
+    suspend fun guestWifiScan(guest: Guest, hardware: HardwareSummary?): WifiScan =
+        onGuest(guest) { c, g -> guestRadioGateway.wifiScan(c, g, hardware) }
+
+    /** [call] with this session's connection and the inventory's copy of [guest]; an expired session ends as every call's does. */
+    suspend fun <T> onGuest(guest: Guest, call: suspend (Connection, Guest) -> T): T {
+        val (current, live) = currentGuest(guest)
+        val session = generation
+        try { return call(current, live) } catch (e: SessionExpiredException) { if (generation == session) expire(); throw e }
+    }
+
+    /** One Bluetooth scan inside a guest of the current direct-PVE inventory, through the guest agent. */
     suspend fun guestBluetoothScan(guest: Guest, seconds: Int = BT_SCAN_SECONDS_DEFAULT): BtScan {
         val state = mutableState.value
-        if (state.demo) return demoGuestBluetoothScan(guest)
         val current = connection ?: error("Connect to a server first.")
         require(current.kind != PDM_KIND && guest.scope.isEmpty()) { DIRECT_GUEST_REFUSAL }
         val remote = currentRemote() ?: error("Connect to a server first.")
@@ -1419,11 +1367,11 @@ class Workspace(
 
     /**
      * Captures one read-only console frame for a running VM and keeps it as the guest's last known image. A blank
-     * frame (a sleeping or black screen) does not replace an earlier useful one. Demo and PDM do nothing.
+     * frame (a sleeping or black screen) does not replace an earlier useful one. PDM does nothing.
      */
     fun captureConsoleStill(guest: Guest) {
         val state = mutableState.value
-        if (state.demo || guest.kind != "VM" || guest.status != "running" || guest.template || guest.resource in state.consoleStillBusy) return
+        if (guest.kind != "VM" || guest.status != "running" || guest.template || guest.resource in state.consoleStillBusy) return
         val current = connection ?: return
         if (current.kind == PDM_KIND || guest.scope.isNotEmpty()) return
         val remote = currentRemote() ?: return
@@ -1462,11 +1410,11 @@ class Workspace(
     /**
      * Keeps the last frame of a live in-app console as the guest's last known screen, so the console switcher shows where
      * you left it. Memory only, like captured stills. Same rules: a blank frame never replaces a useful still; at most
-     * [CONSOLE_STILL_LIMIT]. Demo, PDM and a stopped guest do nothing; a frame from an older connection is dropped.
+     * [CONSOLE_STILL_LIMIT]. PDM and a stopped guest do nothing; a frame from an older connection is dropped.
      */
     fun keepConsoleFrame(guest: Guest, width: Int, height: Int, argb: IntArray) {
         val state = mutableState.value
-        if (state.demo || guest.kind != "VM" || guest.status != "running") return
+        if (guest.kind != "VM" || guest.status != "running") return
         if (width <= 0 || height <= 0 || argb.size < width * height) return
         if (connection?.kind == PDM_KIND || guest.scope.isNotEmpty()) return
         // The view reuses its buffer; this copy is the one the encode reads after the caller has moved on.
@@ -1491,7 +1439,6 @@ class Workspace(
      */
     suspend fun openTerminal(target: TerminalTarget): TerminalSession {
         val state = mutableState.value
-        check(!state.demo) { "Terminals need a live connection." }
         val current = connection ?: error("Connect to a server first.")
         require(current.kind != PDM_KIND) { DIRECT_GUEST_REFUSAL }
         target.base()
@@ -1520,7 +1467,6 @@ class Workspace(
             return null
         }
         val state = mutableState.value
-        if (state.demo) return drop()
         val current = connection ?: return drop()
         if (current.kind == PDM_KIND || guest.scope.isNotEmpty()) return drop()
         if (guest.kind != "VM") return drop()
@@ -1544,7 +1490,6 @@ class Workspace(
 
     suspend fun openConsole(guest: Guest): VncSession {
         val state = mutableState.value
-        check(!state.demo) { SPICE_DEMO }
         val current = connection ?: error("Connect to a server first.")
         require(current.kind != PDM_KIND && guest.scope.isEmpty()) { DIRECT_GUEST_REFUSAL }
         require(guest.kind == "VM") { VNC_NOT_VM }
@@ -1573,11 +1518,11 @@ class Workspace(
     /**
      * Reads [node]'s network configuration into [WorkspaceState.nodeNetwork]. A pending `/etc/network/interfaces.new`
      * is kept beside the rows, not shown as the live network. The same node's last rows stay on screen while a refresh runs.
-     * Demo mode shows sample interfaces. An offline or unknown node is not requested.
+     * An offline or unknown node is not requested.
      */
     fun loadNodeNetwork(node: String) {
         val state = mutableState.value
-        if (!state.connected && !state.demo) return
+        if (!state.connected) return
         val expected = ++networkGeneration
         val session = generation
         networkJob?.cancel()
@@ -1590,13 +1535,7 @@ class Workspace(
                 nodeNetworkNode = node,
             )
         }
-        val refusal = if (state.demo) {
-            if (pveNodeNameOrNull(node) == null) NODE_TOOLS_NODE_UNKNOWN else null
-        } else nodeToolsRefusal(state, node)
-        if (state.demo && refusal == null) {
-            mutableState.update { it.copy(nodeNetwork = InspectionSection(demoNodeNetwork), nodeNetworkPending = null, nodeNetworkLoading = false, nodeNetworkNode = node) }
-            return
-        }
+        val refusal = nodeToolsRefusal(state, node)
         if (refusal != null) {
             mutableState.update { it.copy(nodeNetwork = InspectionSection(error = refusal), nodeNetworkPending = null, nodeNetworkLoading = false, nodeNetworkNode = node) }
             return
@@ -1633,11 +1572,6 @@ class Workspace(
         val session = generation
         historyJob?.cancel()
         val key = listOf(node?.let { "node" to it } ?: guest?.resource, timeframe, cf)
-        if(state.demo) {
-            val points = if(node != null) demoNodeHistory(timeframe,cf) else guest?.let { demoInspection(it,timeframe).history.value.orEmpty().map { p -> p.copy(values=p.values.mapValues { (k,v) -> if(cf == "MAX" && k !in listOf("maxmem","maxcpu")) v?.times(1.25) else v }) } }.orEmpty()
-            historyShown = key
-            mutableState.update { it.copy(chartHistory=InspectionSection(points), chartHistoryLoading=false) }; return
-        }
         val current = connection
         val refusal = when {
             current == null -> HISTORY_NOT_CONNECTED
@@ -1671,19 +1605,12 @@ class Workspace(
     /**
      * One RRD read for the chart lens. Unlike [inspectHistory] it leaves [WorkspaceState.chartHistory] alone, so the page
      * behind the lens keeps its own charts. The same refusals apply (not connected, PDM or a PDM guest, a stale inventory);
-     * the demo returns demo history. Exactly one of [guest] and [node] is given. Call it on the UI dispatcher.
+     * exactly one of [guest] and [node] is given. Call it on the UI dispatcher.
      */
     suspend fun readHistory(guest: Guest?, node: String?, timeframe: String, cf: String): InspectionSection<List<HistoryPoint>> {
         historySuffix(timeframe, cf)
         if (node == null && guest == null) return InspectionSection(error = HISTORY_NOTHING_SELECTED)
         val state = mutableState.value
-        if (state.demo) {
-            val points = if (node != null) demoNodeHistory(timeframe, cf)
-            else demoInspection(requireNotNull(guest), timeframe).history.value.orEmpty().map { point ->
-                point.copy(values = point.values.mapValues { (key, value) -> if (cf == "MAX" && key !in listOf("maxmem", "maxcpu")) value?.times(1.25) else value })
-            }
-            return InspectionSection(points)
-        }
         val current = connection
         val refusal = when {
             current == null -> HISTORY_NOT_CONNECTED
@@ -1719,7 +1646,6 @@ class Workspace(
         val expected = ++inspectionGeneration
         val session = generation
         val epoch = state.connectionEpoch
-        if (state.demo) { mutableState.update { it.copy(inspection = demoInspection(guest,timeframe), inspectionLoading = false) }; return }
         val current = connection ?: return
         val recorded = state.overview?.storage.orEmpty().filter { storage ->
             storage.node == guest.node && storage.remote == guest.remote &&
@@ -1760,7 +1686,7 @@ class Workspace(
     /** A snapshot task is finished only at a terminal phase. Accepted and unknown do not refresh the page. */
     private fun snapshotInspectionRefresh(submission: PowerSubmission) {
         if (submission.action !in listOf(PowerAction.SnapshotCreate, PowerAction.SnapshotRollback, PowerAction.SnapshotDelete)) return
-        if (submission.phase != PowerPhase.Succeeded && submission.phase != PowerPhase.Unsuccessful && submission.phase != PowerPhase.Simulated) return
+        if (submission.phase != PowerPhase.Succeeded && submission.phase != PowerPhase.Unsuccessful) return
         val guest = mutableState.value.selected ?: return
         if (submission.remote != guest.remote || submission.vmid != guest.id || submission.kind != guest.kind) return
         inspectGuest()
@@ -1806,7 +1732,7 @@ class Workspace(
         }
         val state = mutableState.value
         val overview = state.overview
-        val blocked = state.demo || state.stale || state.kind != DIRECT_PVE_KIND || overview?.indexStale == true || overview?.indexError != null || member.status != "online"
+        val blocked = state.stale || state.kind != DIRECT_PVE_KIND || overview?.indexStale == true || overview?.indexError != null || member.status != "online"
         if (!blocked) {
             mutableState.update { it.copy(nodeStatusLoading = false, nodeStatusNote = null, nodeStatus = it.nodeStatus?.takeIf { status -> status.node == member.name }) }
             if (pendingNodeSelection == member.name) {
@@ -1816,15 +1742,14 @@ class Workspace(
             return
         }
         pendingNodeSelection = null
-        val sample = state.demo || member.remote == DEMO_REMOTE_KEY
         mutableState.update {
-            val keep = if (sample || member.status != "online") null else it.nodeStatus?.takeIf { status -> status.node == member.name }
+            val keep = if (member.status != "online") null else it.nodeStatus?.takeIf { status -> status.node == member.name }
             it.copy(
                 nodeStatus = keep,
                 nodeStatusLoading = false,
                 nodeStatusError = if (keep == null) null else it.nodeStatusError,
                 nodeStatusStale = keep != null,
-                nodeStatusNote = if (keep != null) null else if (sample) LIVE_STATUS_SAMPLE else LIVE_STATUS_NOT_REQUESTED,
+                nodeStatusNote = if (keep != null) null else LIVE_STATUS_NOT_REQUESTED,
             )
         }
     }
@@ -1877,7 +1802,7 @@ class Workspace(
         mutableState.update {
             if (it.connectionEpoch != epoch || it.selectedNode != name) it
             else {
-                val drop = refusal == LIVE_STATUS_SAMPLE || it.overview?.members?.singleOrNull { member -> member.name == name }?.status != "online"
+                val drop = it.overview?.members?.singleOrNull { member -> member.name == name }?.status != "online"
                 it.copy(
                     nodeStatus = if (drop) null else it.nodeStatus?.takeIf { status -> status.node == name },
                     nodeStatusLoading = false,
@@ -1908,7 +1833,6 @@ class Workspace(
     }
 
     private fun currentRemote(): String? = when {
-        mutableState.value.demo -> DEMO_REMOTE_KEY
         else -> connection?.remoteKey
     }
 
@@ -1938,20 +1862,14 @@ class Workspace(
         liveLoop?.cancel(); liveTick?.cancel(); taskLoop?.cancel(); taskTick?.cancel(); taskLogJob?.cancel(); taskLogMoreJob?.cancel()
         netCounters = emptyMap()
         historyReadings = emptyMap()
-        resetDemoMotion()
         cancelReadViews()
         connection?.close(); connection = null
         traceLoop { TraceLiveLoop() }
     }
 
-    private fun resetDemoMotion() {
-        demoRandom = Random(demoSeed)
-        demoCursor = demoOverview
-    }
-
     private fun liveCurrent(session: Long, epoch: Long): Boolean {
         val state = mutableState.value
-        return generation == session && state.connectionEpoch == epoch && state.live && (state.connected || state.demo) && !state.certificateHold
+        return generation == session && state.connectionEpoch == epoch && state.live && state.connected && !state.certificateHold
     }
 
     /**
@@ -1978,7 +1896,7 @@ class Workspace(
         liveLoop?.cancel()
         liveTick?.cancel()
         val state = mutableState.value
-        if (!state.live || (!state.connected && !state.demo) || state.certificateHold) { traceLoop { TraceLiveLoop(state = if (state.connected || state.demo) "paused" else "idle") }; return }
+        if (!state.live || (!state.connected) || state.certificateHold) { traceLoop { TraceLiveLoop(state = if (state.connected) "paused" else "idle") }; return }
         val session = generation
         val epoch = state.connectionEpoch
         liveLoop = scope.launch {
@@ -2002,7 +1920,7 @@ class Workspace(
                 }
                 if (waited && mutableState.value.updatedAt != readBefore) continue
                 traceLoop { it.copy(state = "refreshing", nextTickAt = null) }
-                Trace.emit(TraceSource.LiveLoop, "tick", if (mutableState.value.demo) "Refresh tick · sample data" else "Refresh tick")
+                Trace.emit(TraceSource.LiveLoop, "tick", "Refresh tick")
                 val tick = launch { quietTick(session, epoch) }
                 liveTick = tick
                 tick.join()
@@ -2018,14 +1936,14 @@ class Workspace(
         if (!tasksLive) return
         val state = mutableState.value
         if (state.certificateHold) return
-        if (!state.connected && !state.demo) return
+        if (!state.connected) return
         val session = generation
         val epoch = state.connectionEpoch
         taskLoop = scope.launch {
             while (isActive && tasksLive && generation == session && mutableState.value.connectionEpoch == epoch && !mutableState.value.certificateHold) {
                 delay(LIVE_TASK_INTERVAL_SECONDS * 1000L)
                 if (!isActive || !tasksLive || generation != session || mutableState.value.connectionEpoch != epoch) break
-                if (mutableState.value.overview == null && !mutableState.value.demo) continue
+                if (mutableState.value.overview == null) continue
                 if (taskJob?.isActive == true || taskTick?.isActive == true || inventoryJob?.isActive == true) continue
                 Trace.emit(TraceSource.Task, "poll", "Poll cluster tasks")
                 val tick = launch { quietTasks(session, epoch) }
@@ -2042,10 +1960,6 @@ class Workspace(
     private suspend fun quietTick(session: Long, epoch: Long) {
         try {
             if (!liveCurrent(session, epoch)) return
-            if (mutableState.value.demo) {
-                demoQuietTick(session, epoch)
-                return
-            }
             val current = connection ?: return
             if (current.kind == PDM_KIND) pdmQuietTick(current, session, epoch) else directQuietTick(current, session, epoch)
         } catch (e: CancellationException) {
@@ -2059,23 +1973,6 @@ class Workspace(
         } catch (e: Exception) {
             if (generation == session && mutableState.value.connectionEpoch == epoch) markLiveFailure(e)
         }
-    }
-
-    private fun demoQuietTick(session: Long, epoch: Long) {
-        if (!liveCurrent(session, epoch)) return
-        val readAt = clock()
-        demoCursor = stepDemoOverview(demoCursor, demoRandom)
-        val overview = demoCursor
-        publishTick(DEMO_REMOTE_KEY, overview, readAt)
-        val selected = mutableState.value.selected
-        if (selected != null) {
-            mutableState.update { state ->
-                val guest = state.selected ?: return@update state
-                if (state.connectionEpoch != epoch || guest.resource != selected.resource) state
-                else state.copy(details = demoLiveDetails(guest), detailsError = null, detailsUpdatedAt = readAt)
-            }
-        }
-        quietHoldMember(DEMO_REMOTE_KEY)
     }
 
     /**
@@ -2174,7 +2071,7 @@ class Workspace(
     /** A failed read keeps the last details and shows the error on them; it does not touch the fleet. A lost login still ends the session. */
     private suspend fun quietGuestDetails(current: Connection, session: Long, epoch: Long, readAt: Instant) {
         val guest = mutableState.value.selected ?: return
-        if (guest.remote != current.remoteKey && !mutableState.value.demo) return
+        if (guest.remote != current.remoteKey) return
         if (current.kind == PDM_KIND || guest.scope.isNotEmpty()) {
             if (!liveCurrent(session, epoch)) return
             mutableState.update { state ->
@@ -2241,13 +2138,6 @@ class Workspace(
     private suspend fun quietTasks(session: Long, epoch: Long) {
         try {
             if (generation != session || mutableState.value.connectionEpoch != epoch) return
-            if (mutableState.value.demo) {
-                mutableState.update {
-                    if (it.connectionEpoch != epoch) it
-                    else it.copy(tasks = demoTasks, tasksStale = false, tasksError = null, tasksUpdatedAt = clock())
-                }
-                return
-            }
             val current = connection ?: return
             if (current.kind == PDM_KIND) return
             if (taskJob?.isActive == true) return
@@ -2284,7 +2174,7 @@ class Workspace(
 
     // ---- Read-only views (0.21.4) ----------------------------------------------------------------------------------------
     // Permissions, node services, system log, package updates and storage contents. Every one is a GET on a direct connection.
-    // Demo returns labelled sample data and contacts no server. A result is applied only while the session, the connection epoch
+    // A result is applied only while the session, the connection epoch
     // and that view's own generation still match, so a late reply never lands on another node or storage. HTTP 403 shows
     // "not permitted" in the view and keeps the session; HTTP 401 ends it; a failed refresh keeps the last data, marked stale.
 
@@ -2304,7 +2194,6 @@ class Workspace(
     private var syslogFailures = 0
     private var lastSyslogDurationMs = 0L
     private var syslogSawSlow = false
-    private var demoSyslogTotal = DEMO_SYSLOG_START_TOTAL
     private var storageGeneration = 0L
     private var storageJob: Job? = null
 
@@ -2315,7 +2204,7 @@ class Workspace(
         storageActionWorkbench.cancel()
         storageSendOwner = null
         syslogJob?.cancel(); syslogMoreJob?.cancel(); syslogLoop?.cancel()
-        syslogFollowing = true; syslogCatchUp = false; syslogFailures = 0; lastSyslogDurationMs = 0; syslogSawSlow = false; demoSyslogTotal = DEMO_SYSLOG_START_TOTAL
+        syslogFollowing = true; syslogCatchUp = false; syslogFailures = 0; lastSyslogDurationMs = 0; syslogSawSlow = false
     }
 
     private fun readCurrent(session: Long, epoch: Long) = generation == session && mutableState.value.connectionEpoch == epoch
@@ -2348,13 +2237,9 @@ class Workspace(
     /** Read the signed-in identity's privileges (`GET /access/permissions`). A second call while one runs is ignored. */
     fun loadPermissions() {
         val state = mutableState.value
-        if (!state.connected && !state.demo) return
+        if (!state.connected) return
         if (permissionsJob?.isActive == true) return
         val expected = ++permissionsGeneration
-        if (state.demo) {
-            mutableState.update { it.copy(permissions = ReadSection.loaded(PermissionsView(demoPermissions, PermissionIdentity.Sample), clock(), sample = true)) }
-            return
-        }
         val current = connection ?: return
         if (state.kind == PDM_KIND || current.kind != DIRECT_PVE_KIND) {
             mutableState.update { it.copy(permissions = ReadSection<PermissionsView>().failed(PERMISSIONS_DIRECT_ONLY)) }
@@ -2371,16 +2256,10 @@ class Workspace(
     /** Services of one recorded, online node (`GET /nodes/{node}/services`). */
     fun loadNodeServices(node: String) {
         val state = mutableState.value
-        if (!state.connected && !state.demo) return
+        if (!state.connected) return
         servicesJob?.cancel()
         val expected = ++servicesGeneration
         val previous = state.nodeServices.takeIf { it.value?.node == node } ?: ReadSection()
-        if (state.demo) {
-            val refusal = if (pveNodeNameOrNull(node) == null) NODE_TOOLS_NODE_UNKNOWN else null
-            mutableState.update { it.copy(nodeServices = if (refusal != null) ReadSection<NodeServicesView>().failed(refusal)
-                else ReadSection.loaded(NodeServicesView(node, demoNodeServices), clock(), sample = true)) }
-            return
-        }
         val refusal = nodeToolsRefusal(state, node)
         if (refusal != null) {
             mutableState.update { it.copy(nodeServices = ReadSection<NodeServicesView>().failed(refusal)) }
@@ -2397,16 +2276,10 @@ class Workspace(
     /** The node's cached package update list (`GET /nodes/{node}/apt/update`). The POST that refreshes the lists is never sent. */
     fun loadNodeUpdates(node: String) {
         val state = mutableState.value
-        if (!state.connected && !state.demo) return
+        if (!state.connected) return
         updatesJob?.cancel()
         val expected = ++updatesGeneration
         val previous = state.nodeUpdates.takeIf { it.value?.node == node } ?: ReadSection()
-        if (state.demo) {
-            val refusal = if (pveNodeNameOrNull(node) == null) NODE_TOOLS_NODE_UNKNOWN else null
-            mutableState.update { it.copy(nodeUpdates = if (refusal != null) ReadSection<NodeUpdatesView>().failed(refusal)
-                else ReadSection.loaded(NodeUpdatesView(node, demoPackageUpdates), clock(), sample = true)) }
-            return
-        }
         val refusal = nodeToolsRefusal(state, node)
         if (refusal != null) {
             mutableState.update { it.copy(nodeUpdates = ReadSection<NodeUpdatesView>().failed(refusal)) }
@@ -2427,11 +2300,11 @@ class Workspace(
     fun selectStorage(node: String, storage: String, content: String? = null) {
         storageActionWorkbench.selectionChanged()
         val state = mutableState.value
-        if (!state.connected && !state.demo) return
+        if (!state.connected) return
         val remote = currentRemote() ?: return
         storageJob?.cancel()
         val expected = ++storageGeneration
-        if (!state.demo && (state.kind == PDM_KIND || connection?.kind != DIRECT_PVE_KIND)) {
+        if ((state.kind == PDM_KIND || connection?.kind != DIRECT_PVE_KIND)) {
             mutableState.update { it.copy(storageSelection = null, storageContent = ReadSection<StorageContentView>().failed(STORAGE_CONTENT_DIRECT_ONLY)) }
             return
         }
@@ -2446,11 +2319,6 @@ class Workspace(
         }
         val key = StorageKey(remote, node, storage)
         val previous = state.storageContent.takeIf { section -> section.value.let { it != null && it.key == key && it.filter == content } } ?: ReadSection()
-        if (state.demo) {
-            val rows = (storageActionWorkbench.demoVolumes(key) ?: demoStorageContent(recorded)).filter { content == null || it.content == content }
-            mutableState.update { it.copy(storageSelection = key, storageContent = ReadSection.loaded(StorageContentView(key, content, rows), clock(), sample = true)) }
-            return
-        }
         val current = connection ?: return
         val member = state.overview.members.singleOrNull { it.remote == remote && it.name == node }
         val refusal = when {
@@ -2485,7 +2353,7 @@ class Workspace(
 
     /**
      * Read the storage configuration (`GET /storage`, allowlisted fields only) into [StorageViewState.config]. It activates
-     * nothing. Demo gives sample rows; PDM is refused. A call while one runs is ignored.
+     * nothing. PDM is refused. A call while one runs is ignored.
      */
     fun loadStorageConfig() = storageWorkbench.loadConfig()
 
@@ -2535,7 +2403,7 @@ class Workspace(
      */
     fun openNodeSyslog(node: String, service: String? = null) {
         val state = mutableState.value
-        if (!state.connected && !state.demo) return
+        if (!state.connected) return
         syslogJob?.cancel(); syslogMoreJob?.cancel(); syslogLoop?.cancel()
         val expected = ++syslogGeneration
         syslogSawSlow = false
@@ -2545,13 +2413,6 @@ class Workspace(
             return
         }
         val previous = state.nodeSyslog.takeIf { section -> section.value.let { it != null && it.node == node && it.service == unit } } ?: ReadSection()
-        if (state.demo) {
-            val page = demoSyslogPage(node, syslogTailStart(demoSyslogTotal), SYSLOG_PAGE, demoSyslogTotal)
-            mutableState.update { it.copy(nodeSyslog = ReadSection.loaded(SyslogView(node, unit, page.lines, page.total, syslogFollowing), clock(), sample = true)) }
-            syslogCatchUp = false
-            restartSyslogFollow()
-            return
-        }
         val refusal = nodeToolsRefusal(state, node)
         if (refusal != null) {
             mutableState.update { it.copy(nodeSyslog = ReadSection<SyslogView>().failed(refusal)) }
@@ -2626,15 +2487,6 @@ class Workspace(
         val expected = syslogGeneration
         val session = generation
         val epoch = state.connectionEpoch
-        if (state.demo) {
-            val older = applySyslogEarlier(view.lines, demoSyslogPage(view.node, start, limit, demoSyslogTotal)) ?: return
-            mutableState.update { s ->
-                val section = s.nodeSyslog
-                val held = section.value ?: return@update s
-                s.copy(nodeSyslog = section.copy(value = held.copy(lines = older, following = false)))
-            }
-            return
-        }
         val current = connection ?: return
         syslogMoreJob = scope.launch {
             try {
@@ -2674,7 +2526,7 @@ class Workspace(
         syslogLoop = null
         val state = mutableState.value
         val view = state.nodeSyslog.value ?: return
-        if (!syslogVisible || !syslogFollowing || (!state.connected && !state.demo)) return
+        if (!syslogVisible || !syslogFollowing || (!state.connected)) return
         val session = generation
         val epoch = state.connectionEpoch
         val expected = syslogGeneration
@@ -2725,18 +2577,6 @@ class Workspace(
     private suspend fun pollSyslogLocked(node: String, service: String?, session: Long, epoch: Long, expected: Long) {
         try {
             if (!syslogCurrent(session, epoch, expected)) return
-            if (mutableState.value.demo) {
-                demoSyslogTotal += 2
-                syslogFailures = 0
-                mutableState.update { s ->
-                    val section = s.nodeSyslog
-                    val held = section.value?.takeIf { it.node == node && it.service == service } ?: return@update s
-                    val last = held.lines.lastOrNull()?.n ?: 0
-                    val fresh = demoSyslogPage(node, last, demoSyslogTotal - last, demoSyslogTotal).lines
-                    s.copy(nodeSyslog = ReadSection.loaded(held.copy(lines = appendSyslog(held.lines, fresh), total = demoSyslogTotal, notice = null), clock(), sample = true))
-                }
-                return
-            }
             val current = connection ?: return
             nodeToolsRefusal(mutableState.value, node)?.let { stopSyslogFollow(it, false); return }
             syslogSawSlow = false
@@ -2756,7 +2596,7 @@ class Workspace(
                         mutableState.update { s ->
                             val section = s.nodeSyslog
                             val now = section.value?.takeIf { it.node == node && it.service == service } ?: return@update s
-                            s.copy(nodeSyslog = ReadSection.loaded(now.copy(total = result.total, notice = null), clock(), section.sample))
+                            s.copy(nodeSyslog = ReadSection.loaded(now.copy(total = result.total, notice = null), clock()))
                         }
                         if (syslogSawSlow) pauseSyslogFollow(NODE_SYSLOG_FOLLOW_PAUSED) else syslogFailures = 0
                         return
@@ -2765,7 +2605,7 @@ class Workspace(
                         mutableState.update { s ->
                             val section = s.nodeSyslog
                             val now = section.value?.takeIf { it.node == node && it.service == service } ?: return@update s
-                            s.copy(nodeSyslog = ReadSection.loaded(now.copy(lines = appendSyslog(now.lines, result.lines), total = result.total, notice = null), clock(), section.sample))
+                            s.copy(nodeSyslog = ReadSection.loaded(now.copy(lines = appendSyslog(now.lines, result.lines), total = result.total, notice = null), clock()))
                         }
                         if (syslogSawSlow) { pauseSyslogFollow(NODE_SYSLOG_FOLLOW_PAUSED); return }
                         if (!result.more) { syslogFailures = 0; return }
@@ -2794,7 +2634,7 @@ class Workspace(
         mutableState.update { s ->
             val section = s.nodeSyslog
             val held = section.value?.takeIf { it.node == node && it.service == service } ?: return@update s
-            s.copy(nodeSyslog = ReadSection.loaded(held.copy(lines = page.lines, total = page.total, notice = notice), clock(), section.sample))
+            s.copy(nodeSyslog = ReadSection.loaded(held.copy(lines = page.lines, total = page.total, notice = notice), clock()))
         }
     }
 
@@ -2816,16 +2656,9 @@ class Workspace(
     /** This session for a diagnostics bundle: server, kind and sign-in type. Never a user name, token name or secret. */
     fun diagnostic(): DiagnosticSessionInfo? {
         val now = mutableState.value
-        if (now.demo) return DiagnosticSessionInfo("", "Demo", connected = false, overviewLoaded = now.overview != null)
         // A connection whose first read failed has signed in to nothing: it is reported as not connected, with its reason.
         return connection?.let { DiagnosticSessionInfo(it.address, authLabel(it), sessionOpen(now), now.overview != null, now.error, kind = it.kind, pin = it.fingerprint.ifEmpty { null }) }
             ?: lastFailure
     }
     override fun close() { mutationLeases.unregister(foregroundView); disconnect() }
 }
-
-
-fun demoDetails(guest: Guest) = GuestDetails(guest, guest.status, 4, if (guest.status == "running") 0.12 else 0.0,
-    if (guest.status == "running") 2L * 1024 * 1024 * 1024 else 0, 8L * 1024 * 1024 * 1024,
-    if (guest.kind == "Container") 3L * 1024 * 1024 * 1024 else null, 64L * 1024 * 1024 * 1024,
-    if (guest.status == "running") 86400 else 0, 10L * 1024 * 1024, 4L * 1024 * 1024)

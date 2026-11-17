@@ -49,5 +49,5 @@ internal object RouteTagSamples {
     val all = listOf("direct" to direct, "wifi" to wifi, "wireguard" to wireguard, "tailscale" to tailscale, "tailscale-relayed" to tailscaleRelayed,
         "tailscale-peer-relay" to tailscalePeerRelay, "tailscale-idle" to tailscaleIdle, "tailscale-subnet-router" to tailscaleSubnetRouter, "tailscale-offline" to tailscaleOffline, "tailscale-userspace" to tailscaleUserspace,
         "unknown" to unknown, "failed" to failed, "proxy" to proxy, "checking" to checking, "refreshing" to refreshing, "long-names" to longNames,
-        "demo" to RouteTagState.Demo, "browser" to RouteTagState.Browser)
+        "browser" to RouteTagState.Browser)
 }

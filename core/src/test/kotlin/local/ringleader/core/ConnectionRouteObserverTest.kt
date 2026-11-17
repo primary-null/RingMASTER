@@ -50,7 +50,6 @@ class ConnectionRouteObserverTest {
         assertSame(observed, observed.forContext(a))
         assertEquals(b.session, assertIs<RouteTagState.Checking>(observed.forContext(b)).key.session)
         assertEquals(RouteTagState.Hidden, observed.forContext(RouteContext.None))
-        assertEquals(RouteTagState.Demo, observed.forContext(RouteContext.Demo))
         assertEquals(RouteTagState.Browser, observed.forContext(RouteContext.Browser))
         h.close()
     }
@@ -198,10 +197,8 @@ class ConnectionRouteObserverTest {
         h.close()
     }
 
-    @Test fun demoBrowserAndNoConnectionNeverReadTheHost() = runTest {
+    @Test fun browserAndNoConnectionNeverReadTheHost() = runTest {
         val h = Harness(this)
-        h.observer.update(RouteContext.Demo, true); h.advance(200_000)
-        assertEquals(RouteTagState.Demo, h.state)
         h.observer.update(RouteContext.Browser, true); h.advance(200_000)
         assertEquals(RouteTagState.Browser, h.state)
         h.observer.update(RouteContext.None, true); h.advance(200_000)
@@ -209,10 +206,10 @@ class ConnectionRouteObserverTest {
         h.observer.update(RouteContext.Server(3, 1, "not a url"), true); h.advance(200_000)
         assertEquals(RouteTagState.Hidden, h.state)
         assertEquals(0, h.observer.reads); assertTrue(h.probed.isEmpty()); assertEquals(0, h.snapshots)
-        // Leaving a connection for the demo hides the connection's answer at once.
+        // Leaving a connection for browser mode hides the connection's answer at once.
         h.observer.update(a, true); h.run(); assertEquals(RouteKind.Direct, h.state.kind())
-        h.observer.update(RouteContext.Demo, true)
-        assertEquals(RouteTagState.Demo, h.state)
+        h.observer.update(RouteContext.Browser, true)
+        assertEquals(RouteTagState.Browser, h.state)
         h.close()
     }
 

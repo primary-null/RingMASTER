@@ -125,7 +125,6 @@ object SpiceViewer {
 
 /** Why the console button is off, or null when a SPICE console can be requested. */
 fun spiceRefusal(state: WorkspaceState, guest: Guest): String? = when {
-    state.demo -> SPICE_DEMO
     state.kind == PDM_KIND || guest.scope.isNotEmpty() -> "Consoles need a direct Proxmox VE connection."
     guest.kind != "VM" -> SPICE_NOT_VM
     guest.template || guest.status != "running" -> SPICE_NOT_RUNNING

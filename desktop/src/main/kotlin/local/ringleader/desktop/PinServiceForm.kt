@@ -69,7 +69,7 @@ internal fun pinnedHost(url: String?): String? = url?.let { runCatching { java.n
  * The Pin a service form, for a new pin and for Edit address. Suggestions come from the catalogue (the guest's notes,
  * name and tags), from addresses written in the notes, and, after Find services, from what the guest's ports answered.
  * A suggestion fills the fields; the typed address always wins and nothing is saved before [onSave]. [canProbe] is false
- * in browser mode and in the demo: Find services and Test are then not offered. A Soft dialog: a click outside is
+ * in browser mode: Find services and Test are then not offered. A Soft dialog: a click outside is
  * ignored, Escape cancels. Addresses are concealed in showcase mode.
  */
 @Composable internal fun ServicePinForm(
@@ -252,8 +252,8 @@ internal fun sourceTag(source: HintSource): String = when (source) {
     val hosts = report?.addresses?.value.orEmpty().mapNotNull(::reportedHost).distinct().ifEmpty { listOfNotNull(pinnedHost(pin.serviceUrl)) }
     val hints = GuestHints(guest?.name ?: pin.guestName, guest?.tags.orEmpty(), report?.hardware?.value?.fields?.get("description"))
     val web = LocalAppHost.current.web
-    ServicePinForm(hints, hosts, canProbe = !state.demo && !web, onDismiss = onDismiss, initialName = pin.serviceName.orEmpty(),
+    ServicePinForm(hints, hosts, canProbe = !web, onDismiss = onDismiss, initialName = pin.serviceName.orEmpty(),
         initialAddress = pin.serviceUrl.orEmpty(), editing = true,
-        probeUnavailable = if (state.demo) "Find services and Test are not offered with sample data." else "Find services and Test need the desktop app.",
+        probeUnavailable = "Find services and Test need the desktop app.",
         onSave = { n, u -> store.updateService(connectionKey, pin.id, n, u).also { if (it == null) onDismiss() } })
 }

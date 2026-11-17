@@ -9,8 +9,8 @@ class GuestCreateWorkspaceTest {
     private val remote = "https://example.test:8006"
     private open class Inventory : InventoryGateway {
         var created = false
-        override suspend fun overview(connection: Connection) = demoOverview.copy(guests = if (created) listOf(Guest(connection.remoteKey, 140, "fixture", "node-a", "Container", "stopped")) else emptyList(), members = demoOverview.members.map { it.copy(remote = connection.remoteKey, name = if (it.name.endsWith('a')) "node-a" else "node-b") }, storage = demoOverview.storage.map { it.copy(remote = connection.remoteKey, node = if (it.node.endsWith('a')) "node-a" else "node-b") })
-        override suspend fun details(connection: Connection, guest: Guest) = demoDetails(guest)
+        override suspend fun overview(connection: Connection) = sampleOverview().copy(guests = if (created) listOf(Guest(connection.remoteKey, 140, "fixture", "node-a", "Container", "stopped")) else emptyList(), members = sampleOverview().members.map { it.copy(remote = connection.remoteKey, name = if (it.name.endsWith('a')) "node-a" else "node-b") }, storage = sampleOverview().storage.map { it.copy(remote = connection.remoteKey, node = if (it.node.endsWith('a')) "node-a" else "node-b") })
+        override suspend fun details(connection: Connection, guest: Guest) = sampleDetails(guest)
     }
     private fun TestScope.ready(fake: FakeCreateGuestGateway, inv: Inventory = Inventory(), power: PowerGateway = LivePowerGateway(), logs: TaskLogGateway = object : TaskLogGateway {
         override suspend fun status(connection: Connection, node: String, upid: String): TaskLogStatus = error("Unexpected task log read")
@@ -64,12 +64,6 @@ class GuestCreateWorkspaceTest {
         w.changeCreateNode("node-b"); runCurrent(); w.closeCreateSession()
         waiting.release(FakeRead.loads(listOf(PoolChoice("late")))); runCurrent()
         assertNull(w.state.value.creation); w.disconnect(); w.close()
-    }
-    @Test fun demoUsesNoGateway() = runTest {
-        val fake = FakeCreateGuestGateway(); val w = Workspace(this, createGateway = fake)
-        w.exploreDemo(); assertTrue(w.openCreateSession(NewGuestKind.Container, "demo-node-a"))
-        val s = secret(); val c = assertNotNull(w.captureCreate(request().copy(node = "demo-node-a"), "Demo", s.state)); assertTrue(w.submitCreate(c, s))
-        assertIs<CreateResult.Simulated>(w.state.value.creation!!.result); assertTrue(fake.calls.isEmpty()); assertTrue(s.password!!.closed); w.close()
     }
     @Test fun disconnectDuringSendWipesAndRecordsLostResult() = runTest {
         val waiting = FakeCreate.Waits(); val fake = FakeCreateGuestGateway().apply { create = waiting }; val w = ready(fake)

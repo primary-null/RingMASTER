@@ -47,7 +47,7 @@ class TickerReaderTest {
         assertEquals(s, seen.inView)
     }
 
-    @Test fun anIdleSessionHoldsNothingAndADemoIsADemo() {
+    @Test fun anIdleSessionHoldsNothing() {
         val root = Files.createTempDirectory("ticker-reader-idle")
         try {
             runBlocking {
@@ -57,9 +57,6 @@ class TickerReaderTest {
                     val reader = TickerReader(sessions, { emptyList() }, { RouteTagState.Hidden }, ScanSession(scope), VpnSession(scope, null), ToolsSession(scope))
                     assertTrue(reader.read().sessions.isEmpty(), "the empty session on the Desk is not a connection")
                     assertNull(reader.read().inView)
-                    sessions.state.value.active.workspace.exploreDemo()
-                    val demo = reader.read().sessions.single()
-                    assertEquals(TickerSessionPhase.Demo, demo.phase); assertNull(demo.pinned, "a demo has no certificate")
                 } finally { sessions.close(); scope.cancel() }
             }
         } finally { root.toFile().deleteRecursively() }

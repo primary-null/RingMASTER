@@ -92,7 +92,7 @@ data class FakeSubmit(
 )
 
 /**
- * A [CreateGuestGateway] for core and desktop tests. Every list loads sample data by default (the demo lists); set a
+ * A [CreateGuestGateway] for core and desktop tests. Every list loads sample data by default; set a
  * property to script it, for example:
  *
  * ```
@@ -111,16 +111,18 @@ data class FakeSubmit(
  * The fake never contacts a server. Task status and log reads follow the scripted [create] by UPID.
  */
 class FakeCreateGuestGateway : CreateGuestGateway {
-    var nextId: FakeRead<NextIdReply> = FakeRead.loads(NextIdReply.Free(DEMO_CREATE_NEXT_ID))
+    var nextId: FakeRead<NextIdReply> = FakeRead.loads(NextIdReply.Free(SAMPLE_CREATE_NEXT_ID))
     /** Typed-ID checks by ID. An ID not listed is free. */
     val idChecks: MutableMap<Int, FakeRead<NextIdReply>> = mutableMapOf()
     var pools: FakeRead<List<PoolChoice>> = FakeRead.loads(listOf(PoolChoice("lab", "Sample pool")))
-    var bridges: FakeRead<List<BridgeChoice>> = FakeRead.loads(demoCreateBridges)
-    var cpuModels: FakeRead<List<CpuModelChoice>> = FakeRead.loads(demoCreateCpuModels)
-    var cpuFlags: FakeRead<List<CpuFlagChoice>> = FakeRead.loads(demoCreateCpuFlags)
+    var bridges: FakeRead<List<BridgeChoice>> = FakeRead.loads(sampleCreateBridges)
+    var cpuModels: FakeRead<List<CpuModelChoice>> = FakeRead.loads(sampleCreateCpuModels)
+    var cpuFlags: FakeRead<List<CpuFlagChoice>> = FakeRead.loads(sampleCreateCpuFlags)
     var clusterOptions: FakeRead<ClusterTagRules> = FakeRead.loads(ClusterTagRules(userAllow = "free"))
-    /** By (storage, content). A pair not listed loads [demoCreateVolumes] or, failing that, an empty list. */
+    /** By (storage, content). A pair not listed loads from [shelfVolumes] when set, else [sampleCreateVolumes] or an empty list. */
     val volumes: MutableMap<Pair<String, String>, FakeRead<List<StorageVolume>>> = mutableMapOf()
+    /** Where an unlisted pair is read from: (connection, node, storage, content). */
+    var shelfVolumes: ((Connection, String, String, String) -> List<StorageVolume>)? = null
     var create: FakeCreate = FakeCreate.Succeeds()
     /** When set, every task status read fails with it (the follow keeps the earlier result). */
     var statusFailure: Exception? = null
@@ -171,7 +173,8 @@ class FakeCreateGuestGateway : CreateGuestGateway {
     override suspend fun volumes(connection: Connection, node: String, storage: String, content: String): List<StorageVolume> {
         record("volumes $node $storage $content")
         val key = storage to content
-        val script = synchronized(this) { volumes[key] } ?: FakeRead.loads(demoCreateVolumes[key].orEmpty())
+        val script = synchronized(this) { volumes[key] }
+            ?: FakeRead.loads(shelfVolumes?.invoke(connection, node, storage, content) ?: sampleCreateVolumes[key].orEmpty())
         return resolve(script)
     }
 

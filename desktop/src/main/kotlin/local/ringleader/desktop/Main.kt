@@ -265,7 +265,10 @@ private var desktopShortcuts: ((KeyEvent) -> Boolean)? = null
     val resident = if (host.web) null else LocalResident.current
     val residentAlerts = resident?.alerts
     // Several connections can be open at once. Each has its own workspace; one is in view and the desk is attached to it.
-    val sessions = remember { Sessions(scope) { Workspace(scope) } }
+    // Calls into a guest go through a paired RingMASTER Engine when there is one, through the guest agent otherwise.
+    val sessions = remember {
+        Sessions(scope) { Workspace(scope, guestBluetoothGateway = GuestEngine.hub.bluetoothGateway(), guestRadioGateway = GuestEngine.hub.radioGateway()) }
+    }
     val desk = remember { ProfileDesk(sessions.state.value.active.workspace, ProfileStore(profileFile()).apply { onNewerSchema = SaveStatus::notice }, vault = SystemVault.forHost(host.web), rememberedProfiles = RememberedProfiles(profileFile().resolveSibling("remembered.json"))).also(sessions::bind) }
     DisposableEffect(sessions) { onDispose { desk.close(); sessions.close() } }
     val sessionsState by sessions.state.collectAsState()
@@ -284,6 +287,7 @@ private var desktopShortcuts: ((KeyEvent) -> Boolean)? = null
     remember(scannedAt) { scannedSelection?.let { applyScanPick(desk, it) } }
     val scanSession = remember { ScanSession(scope) }
     val bluetoothScanner = remember { localBluetoothScanner() }
+    val wifiScanner = remember { if (host.web) null else localWifiScanner() }
     val vpnSession = remember { VpnSession(scope, local.ringleader.core.localVpnBackend(host.hostActions), host.hostActions) }
     SideEffect { vpnSession.minimized = minimized; TailnetSsh.session = vpnSession.takeUnless { host.web } }
     // The tailnet's subnet routes join the Scan page's list of networks this computer can reach. Every offered route is
@@ -331,10 +335,18 @@ private var desktopShortcuts: ((KeyEvent) -> Boolean)? = null
     val workspace = session.workspace
     val state by workspace.state.collectAsState()
     val deskState by desk.state.collectAsState()
+    // Radios (RadiosScreen.kt): the feeds for the session in view, and where their links go. Navigation only.
+    var radiosRequest by remember { mutableStateOf<RadiosRequest?>(null) }
+    val radiosNav = remember(session.id) { RadiosNav(
+        openGuest = { ref, tab -> ref.resource?.let { fleetRequest = FleetRequest(it, tab, System.nanoTime()); page = "Fleet" } },
+        openNode = { node -> workspace.selectMember(node.name); page = "Fleet" },
+        openRadios = { target -> radiosRequest = RadiosRequest(target, System.nanoTime()); page = "Radios" }) }
+    val radiosHub = rememberRadiosHub(state, radiosNav, workspace, session.id.toString(), active = (page == "Fleet" || page == "Radios") && !minimized,
+        radiosOpen = page == "Radios" && !minimized, scanner = wifiScanner)
     SideEffect { desk.onWorkspace(state) }
     // Notifications and the Watcher for the connection in view: LocalAlerts when the parent maps them itself, otherwise the
     // engine from LocalAlertsSource, mapped here (AlertsAdapter.kt). With neither there is no bell and no Watcher page.
-    val inViewScope = remember(session.id, state.connectionEpoch, state.connected, state.demo, session.profileId) { watchScopeOf(state, session.profileId) }
+    val inViewScope = remember(session.id, state.connectionEpoch, state.connected, session.profileId) { watchScopeOf(state, session.profileId) }
     val alertsSource = if (host.web) null else LocalAlertsSource.current ?: residentAlerts?.let { owner ->
         remember(owner, resident?.keepWatching, nativeDelivery) {
             AlertsSource(owner.center, owner.watcher, owner.io,
@@ -352,7 +364,7 @@ private var desktopShortcuts: ((KeyEvent) -> Boolean)? = null
     val watcherOn = alerts?.watcher != null
     LaunchedEffect(watcherOn) { if (!watcherOn && page == WATCHER_PAGE) page = "Desk" }
     LaunchedEffect(alerts?.notices != null) { if (alerts?.notices == null) noticesOpen = false }
-    if (settingsOpen) CompositionLocalProvider(LocalDiagnosticSessions provides diagnosticSessions) { SettingsDialog(state, workspace, settingsSection, { settingsSection = it }, { settingsOpen = false }) { host.windowControls?.quit?.invoke() } }
+    if (settingsOpen) CompositionLocalProvider(LocalDiagnosticSessions provides diagnosticSessions, LocalEngineHub provides GuestEngine.hub) { SettingsDialog(state, workspace, settingsSection, { settingsSection = it }, { settingsOpen = false }) { host.windowControls?.quit?.invoke() } }
     if (resident != null) {
         val immersive = LocalImmersive.current
         LaunchedEffect(resident.trayRequest) {
@@ -419,14 +431,14 @@ private var desktopShortcuts: ((KeyEvent) -> Boolean)? = null
         } else false
     })
     DisposableEffect(host) { host.shortcuts = { Shortcuts.handle(it, pageKeys, modals) }; if (!host.web) desktopShortcuts = host.shortcuts; onDispose { host.shortcuts = null; if(!host.web) desktopShortcuts = null } }
-    val connectionKey = pinConnectionKey(state.demo, deskState.connectedProfileId, state.address)
+    val connectionKey = pinConnectionKey(deskState.connectedProfileId, state.address)
     // Pins saved on a manual connection live under the origin. When this session moves from that manual connection to
     // the saved profile for the same server, kind and account, they move onto the profile once. Profile to profile never adopts.
     LaunchedEffect(connectionKey) {
         val previous = lastPinKeys.put(session.id, connectionKey)
         lastPinKeys.keys.retainAll(sessionsState.open.map { it.id }.toSet())
         val profileId = deskState.connectedProfileId
-        if (state.demo || profileId.isNullOrBlank() || connectionKey != profileId) return@LaunchedEffect
+        if (profileId.isNullOrBlank() || connectionKey != profileId) return@LaunchedEffect
         val profile = deskState.profiles.find { it.id == profileId } ?: return@LaunchedEffect
         val origin = profile.origin.trim()
         if (origin != state.address.trim() || profile.kind != state.kind) return@LaunchedEffect
@@ -516,10 +528,10 @@ private var desktopShortcuts: ((KeyEvent) -> Boolean)? = null
     if (noticesOpen && alerts?.notices != null) NotificationCenterOverlay(alerts, canOpenNotice, openNotice) { noticesOpen = false }
     val consoleImmersive = LocalImmersive.current?.active == true
     // The route tag follows the session in view; it reads only while its heading is on screen.
-    val routeContext = when { state.demo -> RouteContext.Demo; host.web -> RouteContext.Browser
+    val routeContext = when { host.web -> RouteContext.Browser
         state.connected && state.address.isNotBlank() -> RouteContext.Server(session.id, state.connectionEpoch, state.address); else -> RouteContext.None }
     LaunchedEffect(routeContext, page, minimized, consoleImmersive) { routeObserver.update(routeContext, page in sessionPages && !minimized && !consoleImmersive) }
-    CompositionLocalProvider(LocalAlerts provides alerts, LocalPageFocus provides pageFocus, LocalTickerActivity provides tickerActivity) {
+    CompositionLocalProvider(LocalAlerts provides alerts, LocalPageFocus provides pageFocus, LocalTickerActivity provides tickerActivity, LocalRadios provides radiosHub) {
     Row(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         val updateState by DesktopUpdates.checker.state.collectAsState()
         if (!consoleImmersive) NavigationRail(state,page,platform,workspace,railToggle, updateAvailable = !host.web && updateState is UpdateState.Available, onSettings = { settingsOpen = true }, onAbout = { settingsSection = SettingsSection.About; settingsOpen = true }, pins = pins, connectionKey = connectionKey, onPin = ::openPin,
@@ -550,7 +562,7 @@ private var desktopShortcuts: ((KeyEvent) -> Boolean)? = null
                     "Fleet" -> ChartLensHost(state, workspace) { InventoryScreen(state, workspace, activeProfile?.let { "${it.displayName} · ${it.origin}" }, search, { search = it }, filter, { filter = it }, { page = "Desk" }, disconnectInView, pins, connectionKey, fleetRequest) { fleetRequest = null } }
                     "Activity" -> ActivityScreen(state, workspace, activeProfile?.let { "${it.displayName} · ${it.origin}" }, { page = "Desk" }, disconnectInView)
                     "Scan" -> ScanScreen(scanSession, deskState.profiles.map { it.origin }, known = scanKnownOf(deskState.profiles, sessionsState.open)) { scannedSelection = it; scannedAt = System.nanoTime(); desk.discardSecrets(); page = "Desk" }
-                    "Bluetooth" -> BluetoothScreen(bluetoothScanner)
+                    "Radios" -> RadiosScreen(radiosHub, bluetoothScanner, radiosRequest) { radiosRequest = null }
                     "VPN" -> VpnScreen(vpnSession, if (state.connected) state.address else null, deskState.profiles.map { it.origin }) { scannedSelection = it; scannedAt = System.nanoTime(); desk.discardSecrets(); page = "Desk" }
                     "Tools" -> ToolsScreen(toolsSession)
                     "Under the Hood" -> UnderTheHoodScreen(state)
@@ -594,7 +606,6 @@ private val sessionPages = setOf("Fleet", "Storage", "Activity", "Under the Hood
 
 /** Short name of a session for the rail and headings: the saved profile's name, else the server's host and port. */
 internal fun sessionLabel(state: WorkspaceState, profile: ConnectionProfile?): String = when {
-    state.demo -> "Demonstration"
     profile != null -> profile.displayName
     state.address.isNotBlank() -> state.address.removePrefix("https://")
     // A sign-in the server refused closed the session; the heading still names the server it was for.

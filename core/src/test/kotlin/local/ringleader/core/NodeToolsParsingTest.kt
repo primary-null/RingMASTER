@@ -314,16 +314,16 @@ class NodeToolsParsingTest {
     // ---- demo ----
 
     @Test fun demoSamplesAreDeterministicAndShowEveryServiceState() {
-        assertEquals(demoSyslogLine("demo-node-a", 5), demoSyslogLine("demo-node-a", 5))
-        assertTrue(demoSyslogLine("demo-node-a", 5).text.contains("demo-node-a"))
-        assertEquals((11..15).toList(), demoSyslogPage("demo-node-a", 10, 5, 100).lines.map { it.n })
-        assertEquals(listOf(99, 100), demoSyslogPage("demo-node-a", 98, 5, 100).lines.map { it.n })
-        assertTrue(demoSyslogPage("demo-node-a", 100, 5, 100).lines.isEmpty())
-        val health = demoNodeServices.map { serviceHealth(it) }.toSet()
+        assertEquals(sampleSyslogLine("demo-node-a", 5), sampleSyslogLine("demo-node-a", 5))
+        assertTrue(sampleSyslogLine("demo-node-a", 5).text.contains("demo-node-a"))
+        assertEquals((11..15).toList(), sampleSyslogPage("demo-node-a", 10, 5, 100).lines.map { it.n })
+        assertEquals(listOf(99, 100), sampleSyslogPage("demo-node-a", 98, 5, 100).lines.map { it.n })
+        assertTrue(sampleSyslogPage("demo-node-a", 100, 5, 100).lines.isEmpty())
+        val health = sampleNodeServices.map { serviceHealth(it) }.toSet()
         assertTrue(ServiceHealth.Running in health && ServiceHealth.Failed in health && ServiceHealth.Exited in health)
         assertTrue(ServiceHealth.EnabledNotRunning in health && ServiceHealth.Stopped in health)
-        assertEquals(demoNodeServices.map { it.name.lowercase() }.sorted(), demoNodeServices.map { it.name.lowercase() })
-        assertEquals("Proxmox", demoPackageUpdates.first().origin)
-        assertTrue(demoPackageUpdates.any { it.origin == "Debian" })
+        assertEquals(sampleNodeServices.map { it.name.lowercase() }.sorted(), sampleNodeServices.map { it.name.lowercase() })
+        assertEquals("Proxmox", samplePackageUpdates.first().origin)
+        assertTrue(samplePackageUpdates.any { it.origin == "Debian" })
     }
 }

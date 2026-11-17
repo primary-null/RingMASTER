@@ -1,0 +1,7 @@
+RINGMASTER-RADIO 1 wifi ba59ee0b75fdb8d4
+ba59ee0b75fdb8d4	tools	nmcli	rfkill
+ba59ee0b75fdb8d4	uid	0
+ba59ee0b75fdb8d4	begin	rfkill-list
+
+ba59ee0b75fdb8d4	end	rfkill-list
+ba59ee0b75fdb8d4	done

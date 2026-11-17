@@ -14,7 +14,14 @@ dependencies {
     testFixturesImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0")
 }
-tasks.test { useJUnitPlatform() }
+tasks.test {
+    useJUnitPlatform()
+    // CodeBudgetTest reads the Kotlin sources of both modules, and its mode from the environment. Declared here so a
+    // change in :desktop alone, or asking for an update, runs the test again instead of reusing the last result.
+    inputs.files(rootProject.fileTree("desktop/src") { include("**/*.kt") }).withPropertyName("budgetedDesktopSources")
+    inputs.files(rootProject.fileTree("core/src") { include("**/*.kt") }).withPropertyName("budgetedCoreSources")
+    inputs.property("codeBudgetMode", providers.environmentVariable("RINGMASTER_CODE_BUDGET").orElse(""))
+}
 
 tasks.register<JavaExec>("releaseKey") {
     classpath = sourceSets.main.get().runtimeClasspath

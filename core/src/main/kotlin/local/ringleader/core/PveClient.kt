@@ -10,14 +10,13 @@ import javax.net.ssl.SSLContext
 import javax.net.ssl.X509TrustManager
 import kotlinx.serialization.json.*
 
-/** Stable guest identity. [scope] is empty for direct PVE and demo. [Guest.node] is the mutable route and is not part of this key. */
+/** Stable guest identity. [scope] is empty for direct PVE. [Guest.node] is the mutable route and is not part of this key. */
 data class ResourceId(val remote: String, val scope: String, val kind: String, val vmid: Int) {
     init {
         require(scope.isEmpty() || pdmScopeOrNull(scope) != null) { "The guest scope is not a PDM remote id." }
     }
 }
 
-const val DEMO_REMOTE_KEY = "demo"
 const val DIRECT_REQUEST_REFUSAL = "A PDM connection cannot use a direct Proxmox VE request."
 const val DIRECT_GUEST_REFUSAL = "A PDM guest cannot use a direct Proxmox VE request."
 
@@ -47,7 +46,7 @@ data class Guest(
 ) {
     val resource get() = ResourceId(remote, scope, kind, id)
     init {
-        if (remote != DEMO_REMOTE_KEY) require(serverOrigin(remote).toString() == remote) { "The guest is missing its connection identity." }
+        require(serverOrigin(remote).toString() == remote) { "The guest is missing its connection identity." }
         require(scope.isEmpty() || pdmScopeOrNull(scope) != null) { "The guest scope is not a PDM remote id." }
     }
 }
@@ -360,29 +359,41 @@ class PveClient(
      * One exec, then status polls on that pid only; the exec is never resent if its reply is lost.
      */
     fun guestBluetoothScan(connection: Connection, guest: Guest, seconds: Int, sleep: (Long) -> Unit = Thread::sleep): BtScan {
-        val base = boundGuestPath(connection, guest).removeSuffix("/status/current")
+        boundGuestPath(connection, guest)
         require(guest.kind == "VM") { "Bluetooth scans inside a guest need a QEMU VM with the guest agent." }
         require(guest.status == "running" && !guest.template) { GUEST_BT_NOT_RUNNING }
         val window = seconds.coerceIn(3, 30)
+        val status = guestAgentRun(connection, guest, bluezScanCommand(window), window, window + 25, sleep)
+        check(!status.truncated) { "The scan output from the VM was truncated." }
+        return parseBluezScanOutput(status.out, guestBluetoothSource(guest), java.time.Instant.now())
+    }
+
+    /**
+     * Runs one command inside a running VM through the QEMU guest agent and returns how it ended. One exec, then status
+     * polls on that pid only; the exec is never resent if its reply is lost. The first poll waits [firstPollSeconds], then
+     * one poll a second until [budgetSeconds] have passed since the exec was accepted. The call must be one the user
+     * started. A failure is a [GuestAgentFailure] that carries its [GuestRefusal].
+     */
+    fun guestAgentRun(connection: Connection, guest: Guest, command: List<String>, firstPollSeconds: Int, budgetSeconds: Int, sleep: (Long) -> Unit = Thread::sleep): AgentExecStatus {
+        val base = boundGuestPath(connection, guest).removeSuffix("/status/current")
         return connection.withSecret { secret ->
             try {
                 val pid = parseAgentExecPid(http.direct(connection, "$base/agent/exec",
-                    agentExecBody(bluezScanCommand(window)), badRequest = GUEST_BT_AGENT, missing = GUEST_BT_AGENT))
-                val deadline = System.nanoTime() + (window + 25) * 1_000_000_000L
-                sleep(window * 1000L)
+                    agentExecBody(command), badRequest = GUEST_BT_AGENT, missing = GUEST_BT_AGENT))
+                val deadline = System.nanoTime() + budgetSeconds * 1_000_000_000L
+                sleep(firstPollSeconds * 1000L)
                 while (true) {
                     val status = parseAgentExecStatus(http.direct(connection,
                         "$base/agent/exec-status?pid=$pid", badRequest = GUEST_BT_AGENT, missing = GUEST_BT_AGENT))
-                    if (status.exited) {
-                        check(!status.truncated) { "The scan output from the VM was truncated." }
-                        return@withSecret parseBluezScanOutput(status.out, guestBluetoothSource(guest), java.time.Instant.now())
-                    }
-                    check(System.nanoTime() < deadline) { GUEST_BT_TIMEOUT }
+                    if (status.exited) return@withSecret status
+                    if (System.nanoTime() >= deadline) throw GuestAgentFailure(GuestRefusal.TimedOut)
                     sleep(1000)
                 }
                 @Suppress("UNREACHABLE_CODE") error(GUEST_BT_TIMEOUT)
-            } catch (e: GuestPermissionException) { error(GUEST_BT_NO_PERMISSION) }
-            catch (e: AmbiguousPowerResultException) { error(GUEST_BT_AGENT) }
+            } catch (e: GuestPermissionException) { throw GuestAgentFailure(GuestRefusal.NoPermission) }
+            catch (e: AmbiguousPowerResultException) { throw GuestAgentFailure(GuestRefusal.AgentNotAnswering) }
+            // The transport answers an unusable request with this sentence; make it typed too.
+            catch (e: IllegalStateException) { if (e !is GuestAgentFailure && e.message == GUEST_BT_AGENT) throw GuestAgentFailure(GuestRefusal.AgentNotAnswering) else throw e }
         }
     }
 
@@ -817,27 +828,6 @@ private fun isDirectPath(path: String): Boolean {
     if (path.startsWith("/api2/json/resources/")) return false
     return path.startsWith("/api2/json/")
 }
-
-private const val DEMO_GIB = 1024L * 1024 * 1024
-
-val demoOverview = Overview(
-    2,
-    listOf(
-        Guest(DEMO_REMOTE_KEY, 120, "debian-workbench", "demo-node-a", "VM", "running"),
-        Guest(DEMO_REMOTE_KEY, 121, "web-services", "demo-node-a", "Container", "running", haState = "started"),
-        Guest(DEMO_REMOTE_KEY, 130, "backup-lab", "demo-node-b", "VM", "stopped", lock = "backup"),
-    ),
-    members = listOf(
-        RecordedMember(DEMO_REMOTE_KEY, "demo-node-a", "online", null, 0.25, 4.0, 2 * DEMO_GIB, 8 * DEMO_GIB, 5 * DEMO_GIB, 32 * DEMO_GIB, 3600),
-        RecordedMember(DEMO_REMOTE_KEY, "demo-node-b", "online", "maintenance", 0.0, 4.0, null, 8 * DEMO_GIB, 4 * DEMO_GIB, 32 * DEMO_GIB, 7200),
-    ),
-    storage = listOf(
-        RecordedStorage(DEMO_REMOTE_KEY, "demo-node-a", "local", false, 2 * DEMO_GIB, 40 * DEMO_GIB, "available", "dir", "iso,vztmpl,import"),
-        RecordedStorage(DEMO_REMOTE_KEY, "demo-node-a", "local-lvm", false, 10 * DEMO_GIB, 40 * DEMO_GIB, "available", "lvmthin", "images,rootdir"),
-        RecordedStorage(DEMO_REMOTE_KEY, "demo-node-a", "shared-data", true, 20 * DEMO_GIB, 100 * DEMO_GIB, "available", "dir", "images,backup"),
-        RecordedStorage(DEMO_REMOTE_KEY, "demo-node-b", "shared-data", true, 20 * DEMO_GIB, 100 * DEMO_GIB, "available", "dir", "images,backup"),
-    ),
-)
 
 internal fun certificateMatches(certificate: X509Certificate, fingerprint: String): Boolean =
     MessageDigest.getInstance("SHA-256").digest(certificate.encoded).joinToString("") { "%02x".format(it) } ==

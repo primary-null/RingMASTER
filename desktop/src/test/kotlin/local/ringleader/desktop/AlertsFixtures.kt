@@ -2,7 +2,7 @@ package local.ringleader.desktop
 
 import java.time.Duration
 import java.time.Instant
-import local.ringleader.core.DEMO_REMOTE_KEY
+import local.ringleader.core.SAMPLE_ADDRESS
 import local.ringleader.core.ResourceId
 
 /**
@@ -16,7 +16,7 @@ internal object AlertsFixtures {
     const val SOURCE_CANARY = "canary-lab-server"
     const val DETAIL_CANARY = "canary-detail-text"
 
-    fun resource(vmid: Int) = ResourceId(DEMO_REMOTE_KEY, "", "VM", vmid)
+    fun resource(vmid: Int) = ResourceId(SAMPLE_ADDRESS, "", "VM", vmid)
 
     fun notice(id: String, severity: NoticeSeverity = NoticeSeverity.Warning, minutesAgo: Long = 5, read: Boolean = false, source: String = "lab",
                sourceLabel: String = SOURCE_CANARY, target: NoticeTarget? = NoticeTarget(NoticeTargetKind.Guest, NAME_CANARY, NoticeRoute.Guest(resource(120))),
@@ -69,7 +69,7 @@ internal object AlertsFixtures {
     fun targets(): List<WatchTargetView> = listOf(
         WatchTargetView("w1", WatchTargetKind.Guest, NAME_CANARY, "lab", SOURCE_CANARY, "VM", 120, node = "demo-node-a", resource = resource(120),
             availability = WatchTargetState.Live, status = "running", healthy = true, lastChange = "Started", lastChangeAt = now.minusSeconds(3 * 3600)),
-        WatchTargetView("w2", WatchTargetKind.Guest, "dns-service", "lab", SOURCE_CANARY, "CT", 121, node = "demo-node-b", resource = ResourceId(DEMO_REMOTE_KEY, "", "Container", 121),
+        WatchTargetView("w2", WatchTargetKind.Guest, "dns-service", "lab", SOURCE_CANARY, "CT", 121, node = "demo-node-b", resource = ResourceId(SAMPLE_ADDRESS, "", "Container", 121),
             availability = WatchTargetState.Live, status = "stopped", healthy = false, unread = 2, incident = true, lastChange = "Stopped unexpectedly", lastChangeAt = now.minusSeconds(6 * 60)),
         WatchTargetView("w3", WatchTargetKind.Guest, "retired-guest", "lab", SOURCE_CANARY, "VM", 404, node = "demo-node-c", resource = resource(404),
             availability = WatchTargetState.Unavailable("Not in the inventory", now.minusSeconds(2 * 86_400)), status = "stopped", unread = 1),

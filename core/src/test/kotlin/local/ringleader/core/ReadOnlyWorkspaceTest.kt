@@ -37,7 +37,7 @@ class ReadOnlyWorkspaceTest {
 
     private class Inventory(var build: (Connection) -> Overview) : InventoryGateway {
         override suspend fun overview(connection: Connection) = build(connection)
-        override suspend fun details(connection: Connection, guest: Guest) = demoDetails(guest)
+        override suspend fun details(connection: Connection, guest: Guest) = sampleDetails(guest)
     }
 
     private class QuietPdm : PdmReadGateway {
@@ -71,7 +71,7 @@ class ReadOnlyWorkspaceTest {
         var servicesReader: suspend (Connection, String) -> List<NodeService> = { _, _ -> listOf(NodeService("pveproxy", null, "PVE API Proxy Server", "running", "enabled", "active")) }
         var updatesReader: suspend (Connection, String) -> List<PackageUpdate> = { _, _ -> listOf(PackageUpdate("pve-manager", null, null, "9.2.23", "9.2.21", "all", "Proxmox", null, null)) }
         var syslogReader: suspend (SyslogCall) -> SyslogPage = { journal.page(it.start, it.limit) }
-        var networkReader: suspend (Connection, String) -> NodeNetworkReport = { _, _ -> NodeNetworkReport(demoNodeNetwork, null) }
+        var networkReader: suspend (Connection, String) -> NodeNetworkReport = { _, _ -> NodeNetworkReport(sampleNodeNetwork, null) }
         override suspend fun services(connection: Connection, node: String): List<NodeService> { servicesCalls += node; return servicesReader(connection, node) }
         override suspend fun updates(connection: Connection, node: String): List<PackageUpdate> { updatesCalls += node; return updatesReader(connection, node) }
         override suspend fun network(connection: Connection, node: String): NodeNetworkReport { networkCalls += node; return networkReader(connection, node) }
@@ -129,7 +129,7 @@ class ReadOnlyWorkspaceTest {
         assertEquals(PermissionIdentity.Token, section.value!!.identity)
         assertEquals(setOf("/"), section.value!!.dump.paths.keys)
         assertEquals(now, section.updatedAt)
-        assertFalse(section.stale || section.loading || section.sample || section.denied)
+        assertFalse(section.stale || section.loading || section.denied)
         assertNull(section.error)
         assertEquals(1, gateway.calls)
         workspace.connect(connection(token = "tester@pve")); runCurrent()
@@ -205,18 +205,6 @@ class ReadOnlyWorkspaceTest {
         workspace.connect(connection(otherRemote)); workspace.setLive(false); runCurrent()
         gate.complete(PermissionDump(mapOf("/" to mapOf("Sys.Audit" to true)))); runCurrent()
         assertEquals(ReadSection(), workspace.state.value.permissions)
-        workspace.close()
-    }
-
-    @Test fun demoPermissionsAreALabelledSampleAndContactNoServer() = runTest {
-        val gateway = Permissions()
-        val workspace = newWorkspace(gateway)
-        workspace.exploreDemo(); workspace.setLive(false)
-        workspace.loadPermissions(); runCurrent()
-        val section = workspace.state.value.permissions
-        assertTrue(section.sample)
-        assertEquals(PermissionsView(demoPermissions, PermissionIdentity.Sample), section.value)
-        assertEquals(0, gateway.calls)
         workspace.close()
     }
 
@@ -321,18 +309,6 @@ class ReadOnlyWorkspaceTest {
         workspace.disconnect()
         late.complete(Unit); runCurrent()
         assertEquals(WorkspaceState(), workspace.state.value)
-        workspace.close()
-    }
-
-    @Test fun demoServicesAndUpdatesAreLabelledSamplesAndContactNoServer() = runTest {
-        val tools = Tools()
-        val workspace = newWorkspace(tools = tools)
-        workspace.exploreDemo(); workspace.setLive(false)
-        workspace.loadNodeServices("demo-node-a"); workspace.loadNodeUpdates("demo-node-a"); runCurrent()
-        assertTrue(workspace.state.value.nodeServices.sample && workspace.state.value.nodeUpdates.sample)
-        assertEquals(demoNodeServices, workspace.state.value.nodeServices.value!!.services)
-        assertEquals(demoPackageUpdates, workspace.state.value.nodeUpdates.value!!.updates)
-        assertTrue(tools.servicesCalls.isEmpty() && tools.updatesCalls.isEmpty())
         workspace.close()
     }
 
@@ -654,27 +630,6 @@ class ReadOnlyWorkspaceTest {
         workspace.close()
     }
 
-    @Test fun demoLogGrowsWithoutAServer() = runTest {
-        val tools = Tools()
-        val workspace = newWorkspace(tools = tools)
-        workspace.exploreDemo(); workspace.setLive(false)
-        workspace.setSyslogVisible(true)
-        workspace.openNodeSyslog("demo-node-a"); runCurrent()
-        var view = workspace.state.value.nodeSyslog.value!!
-        assertTrue(workspace.state.value.nodeSyslog.sample)
-        assertEquals(DEMO_SYSLOG_START_TOTAL, view.lines.last().n)
-        assertEquals(SYSLOG_PAGE, view.lines.size)
-        advanceTimeBy(5_000); runCurrent()
-        view = workspace.state.value.nodeSyslog.value!!
-        assertEquals(DEMO_SYSLOG_START_TOTAL + 2, view.lines.last().n)
-        assertEquals(DEMO_SYSLOG_START_TOTAL + 2, view.total)
-        workspace.loadEarlierSyslog(); runCurrent()
-        // The tail began at line 741 (1240 - 500 + 1); one more page of 500 lines goes before it.
-        assertEquals(741 - 500, workspace.state.value.nodeSyslog.value!!.lines.first().n)
-        assertTrue(tools.syslogCalls.isEmpty(), "Demo contacts no server")
-        workspace.close()
-    }
-
     @Test fun turningFollowOnWhenItIsAlreadyOnDoesNotRestartTheWait() = runTest {
         val tools = Tools()
         val workspace = connected(tools = tools)
@@ -815,7 +770,7 @@ class ReadOnlyWorkspaceTest {
         workspace.loadNodeNetwork("node-a"); runCurrent()
         val first = workspace.state.value.nodeNetwork.value
         assertEquals(listOf("node-a"), tools.networkCalls)
-        assertEquals(demoNodeNetwork, first)
+        assertEquals(sampleNodeNetwork, first)
         assertNull(workspace.state.value.nodeNetworkPending)
         assertFalse(workspace.state.value.nodeNetworkLoading)
         val gate = CompletableDeferred<Unit>()
@@ -854,20 +809,6 @@ class ReadOnlyWorkspaceTest {
         workspace.loadNodeNetwork("node-a"); runCurrent()
         assertEquals(first, workspace.state.value.nodeNetwork.value)
         assertEquals(NODE_NETWORK_DENIED, workspace.state.value.nodeNetwork.error)
-        workspace.close()
-    }
-
-    @Test fun demoNetworkContactsNoServer() = runTest {
-        val tools = Tools()
-        val workspace = newWorkspace(tools = tools)
-        workspace.exploreDemo(); workspace.setLive(false)
-        workspace.loadNodeNetwork("demo-node-a"); runCurrent()
-        assertEquals(demoNodeNetwork, workspace.state.value.nodeNetwork.value)
-        assertNull(workspace.state.value.nodeNetworkPending)
-        assertNull(workspace.state.value.nodeNetwork.error)
-        workspace.loadNodeNetwork("not a node"); runCurrent()
-        assertEquals(NODE_TOOLS_NODE_UNKNOWN, workspace.state.value.nodeNetwork.error)
-        assertTrue(tools.networkCalls.isEmpty())
         workspace.close()
     }
 
@@ -978,22 +919,6 @@ class ReadOnlyWorkspaceTest {
         workspace.clearStorageSelection()
         assertNull(workspace.state.value.storageSelection)
         assertEquals(ReadSection(), workspace.state.value.storageContent)
-        workspace.close()
-    }
-
-    @Test fun demoStorageContentFollowsTheRecordedContentTypesAndContactsNoServer() = runTest {
-        val storage = Storage()
-        val workspace = newWorkspace(storage = storage)
-        workspace.exploreDemo(); workspace.setLive(false)
-        workspace.selectStorage("demo-node-a", "shared-data"); runCurrent()
-        val section = workspace.state.value.storageContent
-        assertTrue(section.sample)
-        assertEquals(setOf("images", "backup"), section.value!!.volumes.mapNotNull { it.content }.toSet())
-        workspace.selectStorage("demo-node-a", "shared-data", "backup"); runCurrent()
-        assertEquals(setOf("backup"), workspace.state.value.storageContent.value!!.volumes.mapNotNull { it.content }.toSet())
-        workspace.selectStorage("demo-node-b", "missing"); runCurrent()
-        assertEquals(STORAGE_NOT_RECORDED, workspace.state.value.storageContent.error)
-        assertTrue(storage.calls.isEmpty())
         workspace.close()
     }
 

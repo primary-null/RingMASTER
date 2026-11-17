@@ -21,8 +21,7 @@ class SettingsUiScreenshotsTest {
         if (System.getenv("RINGMASTER_SCREENSHOTS") != "1") return
         val phase = System.getenv("RINGMASTER_UI_PHASE") ?: "settings"
         val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
-        val workspace = Workspace(scope)
-        workspace.exploreDemo()
+        val workspace = sampleWorkspace(scope)
         workspace.select(workspace.state.value.overview!!.guests.first())
         workspace.inspectGuest("hour")
         val updates = UpdateChecker(AppVersion.value, UpdatePreferences(Files.createTempDirectory("settings-updates").resolve("updates.properties")))

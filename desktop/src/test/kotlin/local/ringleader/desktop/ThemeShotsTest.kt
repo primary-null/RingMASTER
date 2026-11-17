@@ -1,5 +1,6 @@
 package local.ringleader.desktop
 
+import local.ringleader.core.sampleWorkspace
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -31,8 +32,8 @@ class ThemeShotsTest {
     @Test fun shots() {
         val out = System.getenv("RINGMASTER_THEME_SHOTS")?.let(::File) ?: return
         val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
-        val workspace = Workspace(scope)
-        workspace.exploreDemo(); workspace.setLive(false)
+        val workspace = sampleWorkspace(scope)
+        workspace.setLive(false)
         val ms = 1_000_000L
         try {
             out.mkdirs()

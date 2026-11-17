@@ -174,18 +174,15 @@ class GuestCreateSkeletonTest {
         assertFailsWith<IllegalArgumentException> { CreateAvailability(true, "why") }
     }
 
-    @Test fun theDemoSessionIsSampleDataOnly() {
+    @Test fun theSampleSessionHasEveryListRead() {
         val at = Instant.parse("2026-01-01T00:00:00Z")
-        val vm = demoCreateSession(NewGuestKind.Vm, "demo-node-a", 7, at)
-        assertTrue(vm.sample)
-        assertEquals(DEMO_CREATE_NEXT_ID, vm.nextId.value)
-        assertTrue(listOf(vm.nextId.sample, vm.pools.sample, vm.bridges.sample, vm.cpuModels.sample, vm.cpuFlags.sample, vm.tagRules.sample).all { it })
-        assertTrue(vm.volumes.values.all { it.sample })
+        val vm = sampleCreateSession(NewGuestKind.Vm, "demo-node-a", 7, at)
+        assertEquals(SAMPLE_CREATE_NEXT_ID, vm.nextId.value)
         assertEquals(3, vm.volumes.getValue("local" to "iso").value?.size)
         assertEquals(8, vm.cpuFlags.value?.size)
         assertTrue(vm.bridges.value!!.first { it.name == "vmbr0" }.vlanAware)
         assertNull(vm.result)
-        val ct = demoCreateSession(NewGuestKind.Container, "demo-node-a", 7, at)
+        val ct = sampleCreateSession(NewGuestKind.Container, "demo-node-a", 7, at)
         assertEquals(emptyList(), ct.cpuModels.value)
         assertEquals(3, ct.volumes.getValue("local" to "vztmpl").value?.size)
     }

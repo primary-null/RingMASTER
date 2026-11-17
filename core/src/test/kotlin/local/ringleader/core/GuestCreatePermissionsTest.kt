@@ -20,7 +20,7 @@ class GuestCreatePermissionsTest {
     }
     @Test fun availabilityHandlesDisconnectedPdmStaleAndDenied() {
         assertFalse(createAvailability(WorkspaceState(), NewGuestKind.Vm).available)
-        val state = WorkspaceState(demo = true, overview = demoOverview)
+        val state = WorkspaceState(connected = true, overview = sampleOverview())
         assertTrue(createAvailability(state, NewGuestKind.Container).available)
         assertFalse(createAvailability(state.copy(kind = PDM_KIND), NewGuestKind.Container).available)
         assertFalse(createAvailability(state.copy(stale = true), NewGuestKind.Vm).available)

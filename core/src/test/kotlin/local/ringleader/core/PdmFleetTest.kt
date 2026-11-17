@@ -279,7 +279,7 @@ class PdmFleetTest {
                 directCalls++
                 return kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { directGate.await() }
             }
-            override suspend fun details(connection: Connection, guest: Guest) = demoDetails(guest)
+            override suspend fun details(connection: Connection, guest: Guest) = sampleDetails(guest)
         }
         val pdm = FakePdm()
         pdm.load = { kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { pdmGate.await() } }

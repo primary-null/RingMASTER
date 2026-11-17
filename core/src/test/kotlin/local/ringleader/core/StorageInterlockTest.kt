@@ -23,8 +23,8 @@ class StorageInterlockTest {
     }
     private fun TestScope.ready(storage:Storage,power:Power,create:CreateGuestGateway):Workspace {
         val w=Workspace(this,gateway=object:InventoryGateway {
-            override suspend fun overview(connection:Connection)=demoOverview.copy(guests=demoOverview.guests.map { it.copy(remote=remote,node="node-a") },members=demoOverview.members.map { it.copy(remote=remote,name=if(it.name.endsWith('a')) "node-a" else "node-b") },storage=demoOverview.storage.map { it.copy(remote=remote,node=if(it.node.endsWith('a')) "node-a" else "node-b") })
-            override suspend fun details(connection:Connection,guest:Guest)=demoDetails(guest)
+            override suspend fun overview(connection:Connection)=sampleOverview().copy(guests=sampleOverview().guests.map { it.copy(remote=remote,node="node-a") },members=sampleOverview().members.map { it.copy(remote=remote,name=if(it.name.endsWith('a')) "node-a" else "node-b") },storage=sampleOverview().storage.map { it.copy(remote=remote,node=if(it.node.endsWith('a')) "node-a" else "node-b") })
+            override suspend fun details(connection:Connection,guest:Guest)=sampleDetails(guest)
         },powerGateway=power,createGateway=create,storageActionGateway=storage,
             storageContentGateway=object:StorageContentGateway { override suspend fun read(connection:Connection,node:String,storage:String,content:String?)=listOf(backup) },
             taskGateway=object:TaskGateway { override suspend fun tasks(connection:Connection)=emptyList<ClusterTask>() })
@@ -66,19 +66,6 @@ class StorageInterlockTest {
         late.complete(PowerTaskStatus(PowerPhase.Succeeded,"not terminal OK evidence")); runCurrent()
         assertTrue(w.state.value.powerBusy)
         s.gate.complete(null); runCurrent(); assertFalse(w.state.value.powerBusy); w.close()
-    }
-
-    @Test fun demoChangesSurviveStorageSwitchesAndKeepContentFilters()=runTest {
-        val storage=Storage(); val w=ready(storage,Power(),FakeCreateGuestGateway()); w.exploreDemo()
-        w.selectStorage("demo-node-a","shared-data","backup")
-        val target=w.state.value.storageContent.value!!.volumes.first()
-        assertTrue(w.submitStorage(assertNotNull(w.captureStorage("demo-node-a","shared-data",StorageRequest.SetProtection(target,true),"demo")))); runCurrent()
-        w.selectStorage("demo-node-a","local","iso")
-        w.selectStorage("demo-node-a","shared-data","images")
-        assertTrue(w.state.value.storageContent.value!!.volumes.all { it.content == "images" })
-        w.selectStorage("demo-node-a","shared-data","backup")
-        assertTrue(w.state.value.storageContent.value!!.volumes.single { it.volid == target.volid }.protected)
-        assertEquals(0,storage.sends); w.close()
     }
 
 }

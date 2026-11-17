@@ -27,7 +27,7 @@ class CertificateStepTest {
         var reads = 0; var taskReads = 0
         var tasksAnswer: suspend () -> List<ClusterTask> = { emptyList() }
         override suspend fun overview(connection: Connection): Overview { reads++; return answer() }
-        override suspend fun details(connection: Connection, guest: Guest) = demoDetails(guest)
+        override suspend fun details(connection: Connection, guest: Guest) = sampleDetails(guest)
         override suspend fun tasks(connection: Connection): List<ClusterTask> { taskReads++; return tasksAnswer() }
     }
 

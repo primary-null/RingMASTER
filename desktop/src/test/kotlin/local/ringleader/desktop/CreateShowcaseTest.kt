@@ -20,7 +20,7 @@ import local.ringleader.core.CreateSecrets
 import local.ringleader.core.CreateValue
 import local.ringleader.core.NewGuestKind
 import local.ringleader.core.SecretChars
-import local.ringleader.core.demoCreateSession
+import local.ringleader.core.sampleCreateSession
 import org.jetbrains.skia.EncodedImageFormat
 import java.io.IOException
 import java.nio.file.Files
@@ -119,7 +119,7 @@ class CreateShowcaseTest {
     }
 
     @Test
-    fun showcaseAndSimulatedResultRenderWithoutSecretText() = runSceneTest {
+    fun showcaseAndAResultRenderWithoutSecretText() = runSceneTest {
         val output = System.getenv("RINGMASTER_CT_SCENES")?.takeIf(String::isNotBlank)?.let(::Path)
         output?.let(Files::createDirectories)
         Appearance.preview(light = false, showcase = true)
@@ -142,8 +142,8 @@ class CreateShowcaseTest {
         } finally { secretScene.close(); wipeCreateSecretInputs(password, keys) }
 
         Appearance.preview(light = false)
-        val resultSession = demoCreateSession(NewGuestKind.Container, "docs-node", 7L, Instant.parse("2026-11-12T12:00:00Z"))
-            .copy(result = CreateResult.Simulated(NewGuestKind.Container, "docs-node", 140))
+        val resultSession = sampleCreateSession(NewGuestKind.Container, "docs-node", 7L, Instant.parse("2026-11-12T12:00:00Z"))
+            .copy(result = CreateResult.Following(NewGuestKind.Container, "docs-node", 140, "task"))
         val resultScene = ImageComposeScene(1280, 800, Density(1.25f), coroutineContext = coroutineContext) {
             MaterialTheme(colorScheme = ringColors) { CompositionLocalProvider(LocalReduceMotion provides true) {
                 CreateCtWizard(
@@ -157,11 +157,10 @@ class CreateShowcaseTest {
         }
         try {
             repeat(8) { resultScene.render((it + 1) * 100_000_000L).close(); yield() }
-            output?.let { Files.write(it.resolve("ct-demo-simulated.png"), resultScene.render(900_000_000L).encodeToData(EncodedImageFormat.PNG)!!.bytes) }
+            output?.let { Files.write(it.resolve("ct-following.png"), resultScene.render(900_000_000L).encodeToData(EncodedImageFormat.PNG)!!.bytes) }
                 ?: resultScene.render()
         } finally { resultScene.close(); Appearance.preview(light = false) }
-        assertTrue(resultSession.sample)
-        assertTrue(resultSession.result is CreateResult.Simulated)
+        assertTrue(resultSession.result is CreateResult.Following)
     }
 }
 

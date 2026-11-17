@@ -32,7 +32,7 @@ class RouteTagShotsTest {
         override suspend fun overview(connection: Connection) = Overview(1, listOf(
             Guest(connection.remoteKey, 100, "alpha", "node-a", "VM", "running"),
             Guest(connection.remoteKey, 101, "beta", "node-a", "CT", "stopped")))
-        override suspend fun details(connection: Connection, guest: Guest) = demoDetails(guest)
+        override suspend fun details(connection: Connection, guest: Guest) = sampleDetails(guest)
     }
 
     internal data class Size(val width: Int, val height: Int, val density: Float, val font: Float) {

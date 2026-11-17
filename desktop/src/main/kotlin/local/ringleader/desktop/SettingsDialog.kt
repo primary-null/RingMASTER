@@ -17,7 +17,8 @@ import androidx.compose.ui.focus.focusRequester
 import local.ringleader.core.*
 
 internal enum class SettingsSection(val label: String) {
-    Appearance("Appearance"), Size("Size and text"), Motion("Motion and refresh"), Background("Background and tray"), Browser("Browser access"), Updates("Updates"), About("About")
+    Appearance("Appearance"), Size("Size and text"), Motion("Motion and refresh"), Background("Background and tray"),
+    Browser("Browser access"), Engine("RingMASTER Engine"), Updates("Updates"), About("About")
 }
 
 @Composable internal fun SettingsDialog(state: WorkspaceState, workspace: Workspace, section: SettingsSection,
@@ -91,6 +92,7 @@ internal fun settingsSheetSize(maxWidth: androidx.compose.ui.unit.Dp, maxHeight:
                             SettingsSection.Background -> BackgroundSettingsSection(LocalResident.current)
                             SettingsSection.Browser -> BrowserSettingsSection()
                             SettingsSection.Updates -> UpdatesSettings(updatesChecker ?: DesktopUpdates.checker, updatePreview)
+                            SettingsSection.Engine -> EngineSettingsSection(state, workspace)
                             SettingsSection.About -> AboutSettingsSection(onWiped)
                         }
                     }

@@ -29,7 +29,7 @@ import local.ringleader.core.InspectionSection
 import local.ringleader.core.Overview
 import local.ringleader.core.Workspace
 import local.ringleader.core.WorkspaceState
-import local.ringleader.core.demoInspection
+import local.ringleader.core.sampleInspection
 import local.ringleader.core.parseHardware
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
@@ -103,7 +103,7 @@ class InventoryConsoleImmersiveTest {
     fun creationRowLeavesWithImmersiveAndConsoleReachesTopEdge() = runSceneTest {
         val vm = Guest(origin, 120, "alpha-vm", "pve1", "VM", "running")
         val overview = Overview(1, listOf(vm))
-        val inspection = demoInspection(vm, "hour")
+        val inspection = sampleInspection(vm, "hour")
         val state by mutableStateOf(WorkspaceState(connected = true, selected = vm, overview = overview, inspection = inspection))
         val immersive = ImmersiveState()
         var fleetRequest by mutableStateOf<FleetRequest?>(FleetRequest(vm.resource, "Console", 1L))
@@ -178,7 +178,7 @@ class InventoryConsoleImmersiveTest {
     fun consoleStatePreservedAcrossImmersiveTransitions() = runSceneTest {
         val vm = Guest(origin, 120, "alpha-vm", "pve1", "VM", "running")
         val overview = Overview(1, listOf(vm))
-        val inspection = demoInspection(vm, "hour")
+        val inspection = sampleInspection(vm, "hour")
         val state by mutableStateOf(WorkspaceState(connected = true, selected = vm, overview = overview, inspection = inspection))
         val immersive = ImmersiveState()
         var fleetRequest by mutableStateOf<FleetRequest?>(FleetRequest(vm.resource, "Console", 1L))
@@ -252,7 +252,7 @@ class InventoryConsoleImmersiveTest {
         val overview = Overview(1, listOf(vm))
         // Enrich hardware with serial0 and spice to render complete toolbar item set
         val hwJson = """{"data":{"cores":2,"memory":2048,"vga":"qxl","serial0":"socket"}}"""
-        val inspection = demoInspection(vm, "hour").copy(hardware = InspectionSection(parseHardware(hwJson)))
+        val inspection = sampleInspection(vm, "hour").copy(hardware = InspectionSection(parseHardware(hwJson)))
         val state by mutableStateOf(WorkspaceState(connected = true, selected = vm, overview = overview, inspection = inspection))
         val immersive = ImmersiveState()
         var fleetRequest by mutableStateOf<FleetRequest?>(FleetRequest(vm.resource, "Console", 1L))
@@ -355,7 +355,7 @@ class InventoryConsoleImmersiveTest {
     fun containerConsoleHidesCreationRowInImmersiveAndRestoresOnExit() = runSceneTest {
         val ct = Guest(origin, 200, "beta-ct", "pve1", "Container", "running")
         val overview = Overview(1, listOf(ct))
-        val inspection = demoInspection(ct, "hour")
+        val inspection = sampleInspection(ct, "hour")
         val state by mutableStateOf(WorkspaceState(connected = true, selected = ct, overview = overview, inspection = inspection))
         val immersive = ImmersiveState()
         var fleetRequest by mutableStateOf<FleetRequest?>(FleetRequest(ct.resource, "Console", 1L))

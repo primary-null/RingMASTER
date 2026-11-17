@@ -1,0 +1,4 @@
+wlp3s0:wifi:connected:Example Home
+p2p-dev-wlp3s0:wifi-p2p:disconnected:
+enp5s0:ethernet:connected:Wired connection 1
+lo:loopback:connected (externally):lo

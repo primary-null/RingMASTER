@@ -64,7 +64,7 @@ class ResponsiveLayoutTest {
         } finally { workspace.close(); root.toFile().deleteRecursively() }
     }
     @Test fun everyGuestTabRemainsReachableAtLargeText() = runSceneTest {
-        val tabs=listOf("Summary","Console","Hardware","Snapshots","Backups","Bluetooth","Actions")
+        val tabs=listOf("Summary","Console","Hardware","Snapshots","Backups","Radios","Actions")
         val scene=ImageComposeScene(420,220,Density(1f,1.5f),coroutineContext=coroutineContext) {
             MaterialTheme(colorScheme=ringColors) { TechTabs(tabs,"Summary",{}) }
         }
@@ -79,7 +79,7 @@ class ResponsiveLayoutTest {
         try {
             val lab=MatrixLab(root)
             val key=StorageKey(lab.origin,"pve-east","local-lvm")
-            val state=lab.state().copy(storageSelection=key, storageContent=ReadSection.loaded(StorageContentView(key,null,demoStorageContent(lab.overview.storage.first { it.id=="local-lvm" })),lab.now,sample=true))
+            val state=lab.state().copy(storageSelection=key, storageContent=ReadSection.loaded(StorageContentView(key,null,sampleStorageContent(lab.overview.storage.first { it.id=="local-lvm" })),lab.now))
             val scene=ImageComposeScene(960,520,Density(2f,1.5f),coroutineContext=coroutineContext) {
                 MaterialTheme(colorScheme=ringColors) { StoragePage(state,workspace) }
             }

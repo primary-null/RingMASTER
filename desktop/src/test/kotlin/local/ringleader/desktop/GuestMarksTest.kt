@@ -1,6 +1,6 @@
 package local.ringleader.desktop
 
-import local.ringleader.core.DEMO_REMOTE_KEY
+import local.ringleader.core.SAMPLE_ADDRESS
 import local.ringleader.core.Guest
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -74,5 +74,5 @@ class GuestMarksTest {
         tags: List<String> = emptyList(),
         haState: String? = null,
         lock: String? = null,
-    ) = Guest(DEMO_REMOTE_KEY, 120, "guest", "demo-node-a", "VM", status, template, tags = tags, haState = haState, lock = lock)
+    ) = Guest(SAMPLE_ADDRESS, 120, "guest", "demo-node-a", "VM", status, template, tags = tags, haState = haState, lock = lock)
 }

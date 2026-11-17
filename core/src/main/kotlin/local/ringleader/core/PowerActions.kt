@@ -20,7 +20,7 @@ enum class PowerAction { Start, Shutdown, HardStop, Reboot, Suspend, Resume, Res
 const val CREATE_NOT_POWER_ACTION = "Creating a guest is not a power action."
 
 /** What the server evidence supports. Accepted is not success. */
-enum class PowerPhase { Accepted, Succeeded, Unsuccessful, Unknown, Rejected, Simulated }
+enum class PowerPhase { Accepted, Succeeded, Unsuccessful, Unknown, Rejected }
 
 /**
  * The server did not return a complete result after the request body was written.
@@ -37,7 +37,6 @@ const val HARD_STOP_CONSEQUENCE =
     "Hard stop ends this guest immediately. It is like cutting the power and can damage guest data."
 const val SHUTDOWN_GUARANTEE =
     "Requests graceful shutdown. RingMASTER does not retry it as a hard stop. For HA-managed guests, server HA policy may force a stop after its timeout."
-const val SIMULATED_POWER_DETAIL = "Simulated on this computer. No request was sent to a server."
 const val RESET_CONSEQUENCE =
     "Reset restarts this guest at once, without a shutdown. Unsaved work in the guest is lost and its data can be damaged."
 const val SNAPSHOT_DELETE_CONSEQUENCE = "The snapshot is removed for good. The guest's current state does not change."
@@ -98,7 +97,6 @@ data class PowerSubmission(
     val action: PowerAction,
     val phase: PowerPhase,
     val detail: String,
-    val simulated: Boolean,
     val checkable: Boolean,
     val checking: Boolean = false,
     /** A create whose outcome was unknown and whose ID a later read found free: it no longer blocks the session (design 4.5). */
@@ -107,7 +105,6 @@ data class PowerSubmission(
     init {
         require(localId.startsWith("local-") && !localId.contains("UPID:")) { "The submission identity is not usable." }
         require(detail.none { it.isISOControl() }) { "The submission detail is not usable." }
-        require(!simulated || (!checkable && phase == PowerPhase.Simulated)) { "A simulated action cannot look like a server task." }
         require(phase != PowerPhase.Succeeded || detail == "Stopped with exit status OK.") { "Success requires a stopped task whose exit status is OK." }
     }
 }
@@ -115,7 +112,7 @@ data class PowerSubmission(
 data class PowerTaskStatus(val phase: PowerPhase, val detail: String)
 
 fun liveActionsAvailable(state: WorkspaceState): Boolean =
-    state.connected && !state.demo && state.kind == DIRECT_PVE_KIND && state.overview != null && !state.stale && !state.loading
+    state.connected && state.kind == DIRECT_PVE_KIND && state.overview != null && !state.stale && !state.loading
 
 fun actionMatches(guest: Guest, action: PowerAction): Boolean {
     if (guest.template) return false
@@ -241,11 +238,6 @@ fun powerRefusal(confirmation: PowerConfirmation, state: WorkspaceState): String
     if (!validSnapshotRequest(confirmation)) return notSent("The snapshot request is invalid.")
     if (confirmation.epoch != state.connectionEpoch) return notSent("The connection changed.")
     if (state.kind == PDM_KIND || confirmation.resource.scope.isNotEmpty()) return notSent("Power actions are not available for a PDM connection.")
-    if (state.demo) {
-        if (confirmation.remote != DEMO_REMOTE_KEY || confirmation.origin != "Demonstration") return notSent("The connection changed.")
-    } else if (!state.connected || confirmation.remote != state.address || confirmation.origin != state.address) {
-        return notSent("The connection changed.")
-    }
     unresolvedSubmission(state)?.let { return notSent(unresolvedActionText(it)) }
     if (state.loading || state.overview == null) return notSent("Inventory is still loading.")
     if (state.stale) return notSent("Inventory is stale.")
@@ -272,7 +264,6 @@ fun powerPhaseLabel(submission: PowerSubmission): String = when (submission.phas
     PowerPhase.Unsuccessful -> submission.detail
     PowerPhase.Unknown -> "Unknown"
     PowerPhase.Rejected -> "Not accepted"
-    PowerPhase.Simulated -> "Simulated"
 }
 
 /** Fields Activity may show. The UPID and token are not included. */
@@ -324,20 +315,6 @@ fun parsePowerTaskStatus(body: String, node: String, upid: String): PowerTaskSta
         else -> PowerTaskStatus(PowerPhase.Unknown, "The task status was not recognized. That is not success.")
     }
 }
-
-internal fun simulatedSubmission(confirmation: PowerConfirmation) = PowerSubmission(
-    localId = newLocalId(),
-    remote = confirmation.remote,
-    node = confirmation.node,
-    vmid = confirmation.resource.vmid,
-    kind = confirmation.kind,
-    name = confirmation.name,
-    action = confirmation.action,
-    phase = PowerPhase.Simulated,
-    detail = SIMULATED_POWER_DETAIL,
-    simulated = true,
-    checkable = false,
-)
 
 internal fun newLocalId(): String = "local-${UUID.randomUUID()}"
 

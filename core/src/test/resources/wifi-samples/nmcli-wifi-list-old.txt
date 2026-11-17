@@ -1,0 +1,2 @@
+*:02\:00\:00\:00\:01\:00:Example Home:Infra:36:5180 MHz:540 Mbit/s:82:WPA2:wlan0
+ :02\:00\:00\:00\:02\:00:Sample Guest:Infra:11:2462 MHz:130 Mbit/s:41:--:wlan0

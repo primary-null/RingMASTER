@@ -189,7 +189,7 @@ class StorageContentTest {
 
     @Test fun aSharedIdCountsOnceAndOtherRowsCountEach() {
         fun row(node: String, id: String, shared: Boolean?) =
-            RecordedStorage(DEMO_REMOTE_KEY, node, id, shared, 1, 2, "available", "dir", "images")
+            RecordedStorage(SAMPLE_ADDRESS, node, id, shared, 1, 2, "available", "dir", "images")
         val rows = listOf(
             row("demo-node-a", "shared-data", true),
             row("demo-node-b", "shared-data", true),
@@ -210,25 +210,25 @@ class StorageContentTest {
     // ---- demo ----
 
     private fun recorded(id: String, content: String?, plugin: String? = "dir") =
-        RecordedStorage(DEMO_REMOTE_KEY, "demo-node-a", id, false, 1, 2, "available", plugin, content)
+        RecordedStorage(SAMPLE_ADDRESS, "demo-node-a", id, false, 1, 2, "available", plugin, content)
 
     @Test fun demoContentFollowsTheTypesTheRecordedStorageLists() {
-        val all = demoStorageContent(recorded("full", "iso,vztmpl,backup,images,rootdir,snippets,import,nonsense"))
+        val all = sampleStorageContent(recorded("full", "iso,vztmpl,backup,images,rootdir,snippets,import,nonsense"))
         assertEquals(STORAGE_CONTENT_TYPES.toSet(), all.mapNotNull { it.content }.toSet())
         assertTrue(all.all { it.volid.startsWith("full:") })
         assertEquals(all.map { it.volid }.size, all.map { it.volid }.toSet().size)
-        assertEquals(listOf("images"), demoStorageContent(recorded("lvm", "images", "lvmthin")).map { it.content }.distinct())
-        assertTrue(demoStorageContent(recorded("none", null)).isEmpty())
-        assertTrue(demoStorageContent(recorded("odd", "nonsense")).isEmpty())
+        assertEquals(listOf("images"), sampleStorageContent(recorded("lvm", "images", "lvmthin")).map { it.content }.distinct())
+        assertTrue(sampleStorageContent(recorded("none", null)).isEmpty())
+        assertTrue(sampleStorageContent(recorded("odd", "nonsense")).isEmpty())
         // The demo inventory's own storages produce samples.
-        for (storage in demoOverview.storage) assertTrue(demoStorageContent(storage).isNotEmpty(), storage.id)
+        for (storage in sampleOverview().storage) assertTrue(sampleStorageContent(storage).isNotEmpty(), storage.id)
     }
 
     @Test fun onlyBackupServerSamplesCarryVerificationStates() {
-        val pbs = demoStorageContent(recorded("pbs", "backup", "pbs"))
+        val pbs = sampleStorageContent(recorded("pbs", "backup", "pbs"))
         assertEquals(setOf("ok", "failed"), pbs.mapNotNull { it.verification }.toSet())
         assertTrue(pbs.all { it.format?.startsWith("pbs-") == true })
-        assertTrue(demoStorageContent(recorded("dir", "backup")).all { it.verification == null })
-        assertTrue(demoStorageContent(recorded("dir", "backup")).any { it.protected })
+        assertTrue(sampleStorageContent(recorded("dir", "backup")).all { it.verification == null })
+        assertTrue(sampleStorageContent(recorded("dir", "backup")).any { it.protected })
     }
 }

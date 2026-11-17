@@ -35,13 +35,13 @@ import kotlin.test.assertTrue
 class SessionsUiTest {
     private class FakeGateway : InventoryGateway {
         override suspend fun overview(connection: Connection) = Overview(1, listOf(Guest(connection.remoteKey, 100, "alpha", "node-a", "VM", "running")))
-        override suspend fun details(connection: Connection, guest: Guest) = demoDetails(guest)
+        override suspend fun details(connection: Connection, guest: Guest) = sampleDetails(guest)
     }
 
     @Test fun aDoubleClickOpensTheGuestAndAClickOnTheSelectedRowReadsNothingAgain() = runSceneTest {
         val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
-        val workspace = Workspace(scope)
-        workspace.exploreDemo(); workspace.setLive(false)
+        val workspace = sampleWorkspace(scope)
+        workspace.setLive(false)
         var now = 1_000_000L
         val realClock = rowClickClock
         rowClickClock = { now }
@@ -92,7 +92,7 @@ class SessionsUiTest {
             desk.beginCreate(); desk.updateDraft("Lab cluster", "https://pve.example.test:8006", "tester@pve!read", ""); assertTrue(desk.saveDraft())
             desk.setProfileSecret("session-secret-value"); assertTrue(desk.connectSelected())
             desk.setManualSecret("session-secret-value"); assertTrue(desk.connectManual("https://192.0.2.15:8006", "root@pam", ""))
-            assertTrue(desk.exploreDemo())
+            desk.setManualSecret("session-secret-value"); assertTrue(desk.connectManual("https://192.0.2.16:8006", "root@pam", ""))
             val open = sessions.state.value
             assertEquals(3, open.open.size)
             for ((name, expanded) in listOf("expanded" to true, "collapsed" to false)) {
@@ -122,7 +122,7 @@ class SessionsUiTest {
                         val first = open.open.first()
                         sessions.disconnect(first.id); repeat(3) { frame().close() }
                         assertEquals(open.open.drop(1).map { it.id }, sessions.state.value.open.map { it.id })
-                        assertTrue(sessions.state.value.active.workspace.state.value.demo)
+                        assertTrue(sessions.state.value.active.workspace.state.value.connected)
                     }
                 } finally { scene.close() }
             }

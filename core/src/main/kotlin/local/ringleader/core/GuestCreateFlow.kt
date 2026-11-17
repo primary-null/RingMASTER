@@ -8,7 +8,7 @@ import java.util.UUID
 /*
  * The create flow around the pure model in GuestCreate.kt: the secrets holders, the one-use confirmation, the refusal
  * and availability rules, the gateway, the wizard's session state, the result of a create (with the maintainer's
- * "finished with warnings" outcome, D2), and the demo session.
+ * "finished with warnings" outcome, D2).
  *
  * Specification: C0-CREATE-GUEST-DESIGN.md sections 4, 6.6 to 6.10, 7 and 8, with C1-CREATE-GUEST-BUILD.md D1 to D3.
  */
@@ -129,7 +129,7 @@ fun redactSecrets(text: String, secrets: CreateSecrets): String = run {
 /**
  * The one-use confirmation captured when the user asks to create. Not a data class and it holds no secret, so it can be
  * shown, kept in state or used as a test value. [start] is the request's "Start after it is created".
- * [epoch] is the connection session; [remote] and [origin] the server (`DEMO_REMOTE_KEY` and "Demonstration" in demo).
+ * [epoch] is the connection session; [remote] and [origin] the server.
  */
 class CreateConfirmation(
     val epoch: Long,
@@ -153,7 +153,7 @@ class CreateConfirmation(
 
 /**
  * Why this confirmation must not be sent now, or null. Every text ends "Nothing was sent.". Reasons (design 4.1 step 1):
- * the connection epoch or origin changed, a PDM connection, a demo mismatch, the inventory is loading or stale, an
+ * the connection epoch or origin changed, a PDM connection, the inventory is loading or stale, an
  * unresolved submission exists, another send is in flight, the node is no longer online in the overview, the ID now
  * belongs to a guest in the overview, or a container has neither a password nor a key.
  * (The one-use check lives in the workspace, as for power actions.)
@@ -161,7 +161,7 @@ class CreateConfirmation(
 fun createRefusal(confirmation: CreateConfirmation, state: WorkspaceState): String? = run {
     val reason = when {
         confirmation.epoch != state.connectionEpoch -> "The connection changed."
-        confirmation.remote != (if (state.demo) DEMO_REMOTE_KEY else state.address) || confirmation.origin != (if (state.demo) "Demonstration" else state.address) -> "The connection changed."
+        confirmation.remote != (state.address) || confirmation.origin != (state.address) -> "The connection changed."
         !createAvailability(state, confirmation.request.kind).available -> createAvailability(state, confirmation.request.kind).reason
         state.overview?.members?.none { it.name == confirmation.request.node && it.status == "online" } != false -> "That node is not online."
         state.overview.guests.any { it.id == confirmation.request.vmid } -> "That ID is already in the inventory."
@@ -187,7 +187,7 @@ data class CreateAvailability(val available: Boolean, val reason: String? = null
  */
 fun createAvailability(state: WorkspaceState, kind: NewGuestKind): CreateAvailability = run {
     val reason = when {
-        !state.demo && !state.connected -> "Connect to a Proxmox VE server first."
+        !state.connected -> "Connect to a Proxmox VE server first."
         state.kind == PDM_KIND -> "Creating guests needs a direct Proxmox VE connection."
         state.loading || state.overview == null -> "Wait for the inventory to load."
         state.stale -> "The inventory is stale. Refresh first."
@@ -410,8 +410,6 @@ sealed interface CreateResult {
         val text: String, val check: IdCheck = IdCheck.Idle, val checking: Boolean = false,
     ) : CreateResult
 
-    /** Demo: "Simulated. Nothing was sent to a server." */
-    data class Simulated(override val kind: NewGuestKind, override val node: String, override val vmid: Int) : CreateResult
 }
 
 /** After the task ends, quiet resource-list reads at these offsets until the new guest appears (design 5). */
@@ -445,8 +443,6 @@ data class CreateSession(
     val cpuFlags: ReadSection<List<CpuFlagChoice>> = ReadSection(),
     val tagRules: ReadSection<ClusterTagRules> = ReadSection(),
     val result: CreateResult? = null,
-    /** Demo mode: every list is sample data and nothing is sent. */
-    val sample: Boolean = false,
     val identityIsRootPam: Boolean = false,
 )
 
@@ -460,81 +456,3 @@ fun createContext(state: WorkspaceState, session: CreateSession): CreateContext 
     bridges = session.bridges.takeIf { !it.loading && it.error == null }?.value.orEmpty(),
     cpuModels = session.cpuModels.takeIf { !it.loading && it.error == null }?.value.orEmpty(),
     cpuFlags = session.cpuFlags.takeIf { !it.loading && it.error == null }?.value.orEmpty())
-
-// ---------------------------------------------------------------------------------------------------------------------
-// Demo (design 8)
-// ---------------------------------------------------------------------------------------------------------------------
-
-const val DEMO_CREATE_NEXT_ID = 140
-const val DEMO_CREATE_LABEL = "Demo · sample lists"
-const val DEMO_CREATE_COMMIT = "Simulate create"
-const val DEMO_CREATE_SUBTITLE = "Demo mode. Nothing is sent."
-const val DEMO_CREATE_SIMULATED = "Simulated. Nothing was sent to a server."
-
-private fun demoVolume(volid: String, content: String, format: String, sizeBytes: Long) = StorageVolume(
-    volid = volid, content = content, format = format, sizeBytes = sizeBytes, approximateSizeBytes = null, usedBytes = null,
-    createdAt = null, vmid = null, notes = null, protected = false, verification = null,
-)
-
-private const val MIB = 1024L * 1024
-
-/** Sample ISO images, templates and import images on the demo storage `local`, by (storage, content). */
-val demoCreateVolumes: Map<Pair<String, String>, List<StorageVolume>> = mapOf(
-    ("local" to "iso") to listOf(
-        demoVolume("local:iso/debian-13.2.0-amd64-netinst.iso", "iso", "iso", 754 * MIB),
-        demoVolume("local:iso/ubuntu-26.04-live-server-amd64.iso", "iso", "iso", 3_100 * MIB),
-        demoVolume("local:iso/virtio-win-0.1.285.iso", "iso", "iso", 754 * MIB),
-    ),
-    ("local" to "vztmpl") to listOf(
-        demoVolume("local:vztmpl/debian-13-standard_13.1-1_amd64.tar.zst", "vztmpl", "tzst", 126 * MIB),
-        demoVolume("local:vztmpl/alpine-3.22-default_20250617_amd64.tar.xz", "vztmpl", "txz", 3 * MIB),
-        demoVolume("local:vztmpl/ubuntu-26.04-standard_26.04-1_arm64.tar.zst", "vztmpl", "tzst", 140 * MIB),
-    ),
-    ("local" to "import") to listOf(
-        demoVolume("local:import/appliance-disk.qcow2", "import", "qcow2", 2_048 * MIB),
-    ),
-)
-
-val demoCreateBridges: List<BridgeChoice> = listOf(
-    BridgeChoice("vmbr0", "bridge", active = true, vlanAware = true, comment = "LAN"),
-    BridgeChoice("vmbr1", "bridge", active = true, comment = "Lab"),
-    BridgeChoice("lab10", "vnet", active = true, comment = "SDN vnet"),
-)
-
-val demoCreateCpuModels: List<CpuModelChoice> = listOf(
-    CpuModelChoice("x86-64-v2-AES", "default", abstract = true),
-    CpuModelChoice("x86-64-v3", "default", abstract = true),
-    CpuModelChoice("host", "default"),
-    CpuModelChoice("kvm64", "default"),
-    CpuModelChoice("qemu64", "default"),
-)
-
-val demoCreateCpuFlags: List<CpuFlagChoice> = listOf(
-    CpuFlagChoice("md-clear", "Required to let the guest OS know if MDS is mitigated correctly", listOf("demo-node-a", "demo-node-b")),
-    CpuFlagChoice("pcid", "Meltdown fix cost reduction on Westmere, Sandy- and Ivy Bridge Intel CPUs", listOf("demo-node-a", "demo-node-b")),
-    CpuFlagChoice("spec-ctrl", "Allows improved Spectre mitigation with Intel CPUs", listOf("demo-node-a", "demo-node-b")),
-    CpuFlagChoice("ssbd", "Protection for Speculative Store Bypass for Intel models", listOf("demo-node-a", "demo-node-b")),
-    CpuFlagChoice("ibpb", "Allows improved Spectre mitigation with AMD CPUs", listOf("demo-node-a", "demo-node-b")),
-    CpuFlagChoice("virt-ssbd", "Basis for Speculative Store Bypass protection for AMD models", listOf("demo-node-a", "demo-node-b")),
-    CpuFlagChoice("pdpe1gb", "Allow the guest OS to use 1 GB pages, if the host supports it", listOf("demo-node-a")),
-    CpuFlagChoice("aes", "Activate the AES instruction set for hardware acceleration", listOf("demo-node-a", "demo-node-b")),
-)
-
-/**
- * The demo wizard's session: next ID 140, pool `lab`, bridges `vmbr0` (VLAN-aware), `vmbr1` and vnet `lab10`, five CPU
- * models, eight flags, free tags, and the sample volumes of [demoCreateVolumes]; every section marked as a sample.
- * Storage choices come from the demo inventory, as for a server (D1).
- */
-fun demoCreateSession(kind: NewGuestKind, node: String, epoch: Long, at: Instant): CreateSession = CreateSession(
-    kind = kind,
-    node = node,
-    epoch = epoch,
-    nextId = ReadSection.loaded(DEMO_CREATE_NEXT_ID, at, sample = true),
-    pools = ReadSection.loaded(listOf(PoolChoice("lab", "Sample pool")), at, sample = true),
-    volumes = demoCreateVolumes.mapValues { (_, rows) -> ReadSection.loaded(rows, at, sample = true) },
-    bridges = ReadSection.loaded(demoCreateBridges, at, sample = true),
-    cpuModels = ReadSection.loaded(if (kind == NewGuestKind.Vm) demoCreateCpuModels else emptyList(), at, sample = true),
-    cpuFlags = ReadSection.loaded(if (kind == NewGuestKind.Vm) demoCreateCpuFlags else emptyList(), at, sample = true),
-    tagRules = ReadSection.loaded(ClusterTagRules(userAllow = "free"), at, sample = true),
-    sample = true,
-)

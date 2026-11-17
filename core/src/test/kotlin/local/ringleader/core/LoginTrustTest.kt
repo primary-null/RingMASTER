@@ -13,7 +13,7 @@ class LoginTrustTest {
         val root = Files.createTempDirectory("login-trust")
         val gateway = object : InventoryGateway {
             override suspend fun overview(connection: Connection) = Overview(0, emptyList())
-            override suspend fun details(connection: Connection, guest: Guest) = demoDetails(guest)
+            override suspend fun details(connection: Connection, guest: Guest) = sampleDetails(guest)
         }
         val workspace = Workspace(this, gateway, pdmGateway = object : PdmReadGateway {
             override suspend fun read(connection: Connection): PdmFleetDocument = error("Offline fake PDM read")

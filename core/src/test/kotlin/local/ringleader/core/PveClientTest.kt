@@ -45,15 +45,15 @@ class PveClientTest {
     }
 
     @Test fun demoOverviewShowsOneHaGuestAndOneLockedGuest() {
-        val ha = demoOverview.guests.filter { it.haState != null }
-        val locked = demoOverview.guests.filter { it.lock != null }
+        val ha = sampleOverview().guests.filter { it.haState != null }
+        val locked = sampleOverview().guests.filter { it.lock != null }
         assertEquals(listOf(121), ha.map { it.id })
         assertEquals("started", ha.single().haState)
         assertEquals("running", ha.single().status)
         assertEquals(listOf(130), locked.map { it.id })
         assertEquals("backup", locked.single().lock)
-        assertNull(demoOverview.guests.single { it.id == 120 }.haState)
-        assertNull(demoOverview.guests.single { it.id == 120 }.lock)
+        assertNull(sampleOverview().guests.single { it.id == 120 }.haState)
+        assertNull(sampleOverview().guests.single { it.id == 120 }.lock)
     }
 
     @Test fun rejectsBrokenPayloadInsteadOfDisplayingEmptySuccess() {
@@ -61,6 +61,6 @@ class PveClientTest {
         assertFails { parseOverview("""{"errors":"denied"}""", remote) }
         assertFails { parseOverview("""{"data":[{"type":"qemu"}]}""", remote) }
         assertFails { parseOverview("""{"data":[]}""", "https://example.test:8006/") }
-        assertFails { parseOverview("""{"data":[]}""", DEMO_REMOTE_KEY) }
+        assertFails { parseOverview("""{"data":[]}""", "demo") }
     }
 }

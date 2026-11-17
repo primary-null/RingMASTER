@@ -21,8 +21,7 @@ class UiScreenshotsTest {
     @Test fun screenshots() {
         if (System.getenv("RINGMASTER_SCREENSHOTS") != "1") return
         val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
-        val workspace = Workspace(scope)
-        workspace.exploreDemo()
+        val workspace = sampleWorkspace(scope)
         workspace.select(workspace.state.value.overview!!.guests.first())
         workspace.inspectGuest("hour")
         workspace.setLive(true,2)
@@ -34,7 +33,7 @@ class UiScreenshotsTest {
         val dense = Series((0..47).map { n -> Sample(now.minusSeconds((47-n)*2L), .08 + .06 * kotlin.math.sin(n*.7),1073741824,4294967296,1200.0,800.0) })
         val state = base.copy(selected=guests.first(),history=FleetHistory(guests.associate { it.resource to dense },guests.map { it.node }.distinct().associateWith { dense },dense),overview=base.overview!!.copy(nodes=3,guests=guests,members=base.overview!!.members + base.overview!!.members.first().copy(name="demo-node-c")),inspection=inspection.copy(resource=guests.first().resource,node=guests.first().node),tasks=(0..11).map { n ->
             val outcome=TaskOutcome.entries[n%4]; val end=if(outcome==TaskOutcome.Succeeded || outcome==TaskOutcome.Unsuccessful) now else null
-            ClusterTask(DEMO_REMOTE_KEY,"demo:fixture$n","demo-node-a",listOf("vzdump","qmstart","qmstop","lab-maintenance")[n%4],"${120+n}","demo@ringmaster",now.minusSeconds(120+n*60L),end,when(outcome) { TaskOutcome.Running -> "running"; TaskOutcome.Succeeded -> "OK"; TaskOutcome.Unsuccessful -> "Backup storage unavailable"; else -> null },outcome)
+            ClusterTask(SAMPLE_ADDRESS,sampleUpid(listOf("vzdump","qmstart","qmstop","lab-maintenance")[n%4],"${120+n}",serial=n),"demo-node-a",listOf("vzdump","qmstart","qmstop","lab-maintenance")[n%4],"${120+n}","demo@ringmaster",now.minusSeconds(120+n*60L),end,when(outcome) { TaskOutcome.Running -> "running"; TaskOutcome.Succeeded -> "OK"; TaskOutcome.Unsuccessful -> "Backup storage unavailable"; else -> null },outcome)
         })
         val temp = Files.createTempDirectory("ringmaster-ui")
         val pins = PinStore(temp.resolve("pins.json"))
@@ -43,7 +42,7 @@ class UiScreenshotsTest {
         pins.addService("demo", guests[1], "AdGuard UI", "http://10.1.2.3:3000")
         pins.toggleGuest("demo", guests[2])
         pins.toggleGuest("demo", guests[4])
-        pins.toggleGuest("demo", Guest(DEMO_REMOTE_KEY, 404, "retired-guest", "gone", "VM", "stopped"))
+        pins.toggleGuest("demo", Guest(SAMPLE_ADDRESS, 404, "retired-guest", "gone", "VM", "stopped"))
         pins.toggleView("demo", guests[5], "Snapshots")
         pins.toggleGuest("demo", guests[6])
         pins.toggleView("demo", guests[7], "Backups")
@@ -93,10 +92,10 @@ class UiScreenshotsTest {
         screens["bluetooth-results"] = { BtScanView(btScan, scanning = false, platform = "Windows") }
         screens["bluetooth-note"] = { BtScanView(BtScan(BtSource.Local, emptyList(), emptyList(), btAt, BT_NO_ADAPTER), scanning = false, platform = "Windows") }
         screens["components"] = { Column { Row { listOf(.04,.62,.93).forEach { ArcGauge(it,"CPU") } }; Sparkline(Series(base.history.cluster.samples + Sample(now,null,null,null,null,null) + base.history.cluster.samples),Modifier.fillMaxWidth().height(80.dp)) } }
-        screens["history-guest"] = { Column(Modifier.verticalScroll(rememberScrollState())) { HistoryGroup(state.copy(chartHistory=InspectionSection(demoInspection(guests.first(),"hour").history.value)),workspace) } }
-        screens["history-node"] = { Column(Modifier.verticalScroll(rememberScrollState())) { HistoryGroup(state.copy(chartHistory=InspectionSection(demoNodeHistory("hour","AVERAGE"))),workspace,"sample-node") } }
+        screens["history-guest"] = { Column(Modifier.verticalScroll(rememberScrollState())) { HistoryGroup(state.copy(chartHistory=InspectionSection(sampleInspection(guests.first(),"hour").history.value)),workspace) } }
+        screens["history-node"] = { Column(Modifier.verticalScroll(rememberScrollState())) { HistoryGroup(state.copy(chartHistory=InspectionSection(sampleNodeHistory("hour","AVERAGE"))),workspace,"sample-node") } }
         val phase=System.getenv("RINGMASTER_UI_PHASE") ?: "before"
-        screens["guest-bluetooth"] = { GuestDetailPage(state,workspace,{},{_,_->},initialTab="Bluetooth",pins=pins,connectionKey="demo") }
+        screens["guest-bluetooth"] = { GuestDetailPage(state,workspace,{},{_,_->},initialTab="Radios",pins=pins,connectionKey="demo") }
         // Dark at every size, then light and showcase variants of the main screens at 1920x1080.
         val looks = listOf(Triple("", false, false)) + listOf(Triple("light-", true, false), Triple("showcase-", false, true))
         val lookScreens = setOf("history-guest", "history-node", "fleet", "fleet-overview", "guest-summary", "guest-actions-light", "desk", "activity", "bluetooth-results", "scan-complete", "guest-hardware", "guest-bluetooth")
@@ -108,7 +107,7 @@ class UiScreenshotsTest {
                     Surface(Modifier.fillMaxSize()) { Column {
                         Row(Modifier.fillMaxWidth().height(32.dp)) { Text("\u25c8 RingMASTER",Modifier.weight(1f),color=Tech.Amber);WindowControl("\u2014") {};WindowControl("\u25a1") {};WindowControl("\u00d7") {} }
                         Row(Modifier.weight(1f)) {
-                        NavigationRail(state,when { screen.startsWith("scan") -> "Scan"; screen=="desk" -> "Desk"; screen=="activity" -> "Activity"; screen.startsWith("bluetooth") -> "Bluetooth"; else -> "Fleet" },"Screenshot / Windows",workspace,initialExpanded=expanded,pins=pins,connectionKey="demo") {}
+                        NavigationRail(state,when { screen.startsWith("scan") -> "Scan"; screen=="desk" -> "Desk"; screen=="activity" -> "Activity"; screen.startsWith("bluetooth") -> "Radios"; else -> "Fleet" },"Screenshot / Windows",workspace,initialExpanded=expanded,pins=pins,connectionKey="demo") {}
                         Column(Modifier.weight(1f).padding(16.dp)) {
                             Row(Modifier.height(40.dp),verticalAlignment=androidx.compose.ui.Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(12.dp)) { Text("WORKSPACE / ${name.uppercase()}",fontSize=Tech.Label,color=Tech.Muted);Text("RingMASTER / $name",fontSize=Tech.Title) }
                             HorizontalDivider(color=Tech.Edge,modifier=Modifier.padding(vertical=Tech.Space12))

@@ -66,8 +66,7 @@ class ReadmeShotsTest {
     private suspend fun render(dir: File, sandbox: java.nio.file.Path) {
         val context = currentCoroutineContext()
         val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
-        val workspace = Workspace(scope)
-        workspace.exploreDemo()
+        val workspace = sampleWorkspace(scope)
         workspace.select(workspace.state.value.overview!!.guests.first())
         workspace.inspectGuest("hour")
         delay(1500)
@@ -147,7 +146,8 @@ class ReadmeShotsTest {
         val tasks = jobs.mapIndexed { n, job ->
             val outcome = when { job.seconds == null -> TaskOutcome.Running; job.failed -> TaskOutcome.Unsuccessful; else -> TaskOutcome.Succeeded }
             val start = now.minusSeconds(job.ago)
-            ClusterTask(DEMO_REMOTE_KEY, "demo:readme$n", nodeOf(job.id) ?: "demo-node-b", job.type, job.id, "demo@ringmaster", start,
+            val node = nodeOf(job.id) ?: "demo-node-b"
+            ClusterTask(SAMPLE_ADDRESS, sampleUpid(job.type, job.id, node, n), node, job.type, job.id, "demo@ringmaster", start,
                 job.seconds?.let { start.plusSeconds(it) },
                 when (outcome) { TaskOutcome.Running -> "running"; TaskOutcome.Succeeded -> "OK"; else -> "Backup storage unavailable" }, outcome)
         }
@@ -347,14 +347,14 @@ class ReadmeShotsTest {
                 val consoleWorkspace = Workspace(consoleScope,
                     gateway = object : InventoryGateway {
                         override suspend fun overview(connection: Connection) = Overview(3, consoleGuests)
-                        override suspend fun details(connection: Connection, guest: Guest) = demoDetails(guest)
+                        override suspend fun details(connection: Connection, guest: Guest) = sampleDetails(guest)
                     },
                     taskGateway = object : TaskGateway { override suspend fun tasks(connection: Connection) = emptyList<ClusterTask>() },
                     nodeStatusGateway = object : NodeStatusGateway {
                         override suspend fun status(connection: Connection, origin: String, node: String, scope: String): NodeLiveStatus = error("Not part of the README scene.")
                     },
                     inspectionGateway = object : GuestInspectionGateway {
-                        override suspend fun read(connection: Connection, guest: Guest, storages: List<String>, timeframe: String) = demoInspection(guest, timeframe)
+                        override suspend fun read(connection: Connection, guest: Guest, storages: List<String>, timeframe: String) = sampleInspection(guest, timeframe)
                     },
                     consoleStillGateway = object : ConsoleStillGateway {
                         override suspend fun capture(connection: Connection, guest: Guest): ConsoleStill = error("Not part of the README scene.")

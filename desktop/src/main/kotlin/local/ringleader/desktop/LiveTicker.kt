@@ -86,7 +86,7 @@ internal class TickerNav(
             is TickerTarget.Vpn -> { focus.request(target); showPage("VPN") }
             TickerTarget.Tools -> showPage("Tools")
             TickerTarget.Storage -> showPage("Storage")
-            TickerTarget.Bluetooth -> showPage("Bluetooth")
+            TickerTarget.Bluetooth -> { focus.request(target); showPage("Radios") }
             is TickerTarget.Activity -> { focus.request(target); showPage("Activity") }
             is TickerTarget.Fleet -> target.guest?.let { showGuest(it, target.console) } ?: showPage("Fleet")
         }
@@ -191,7 +191,6 @@ internal class TickerReader(
     private fun session(open: OpenSession, inView: Boolean, known: List<ConnectionProfile>): TickerSession? {
         val ws = open.workspace.state.value
         val phase = when {
-            ws.demo -> TickerSessionPhase.Demo
             connectionFailed(ws) -> TickerSessionPhase.Failed
             ws.connected && ws.overview == null -> TickerSessionPhase.Loading
             ws.connected -> TickerSessionPhase.Connected
@@ -199,7 +198,7 @@ internal class TickerReader(
         }
         val info = open.workspace.diagnostic()
         return TickerSession(open.id, inView, phase, ws.kind, sessionLabel(ws, known.find { it.id == open.profileId }), ws.address.ifBlank { ws.failedAddress },
-            signIn = info?.authKind, pinned = if (phase == TickerSessionPhase.Demo) null else info?.let { it.pin != null },
+            signIn = info?.authKind, pinned = info?.let { it.pin != null },
             route = routes.routeOf(open.id, ws.connectionEpoch), live = ws.live, liveSeconds = ws.liveIntervalSeconds, backoffSeconds = ws.liveBackoffSeconds,
             updatedAt = ws.updatedAt, failure = if (phase == TickerSessionPhase.Failed) classifyFailure(ws.error) else null)
     }

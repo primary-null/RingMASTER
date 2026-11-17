@@ -16,7 +16,7 @@ import kotlinx.coroutines.*
 import local.ringleader.core.*
 
 internal fun storageVerdict(state: WorkspaceState, row: RecordedStorage): StorageVisibility =
-    if(state.storageContent.value?.filter!=null || state.demo || state.permissions.value?.identity==PermissionIdentity.Sample || row.content.isNullOrBlank()) StorageVisibility.Unknown else storageVisibility(state.permissions.value?.dump,row.id,
+    if(state.storageContent.value?.filter!=null || state.permissions.value?.identity==PermissionIdentity.Sample || row.content.isNullOrBlank()) StorageVisibility.Unknown else storageVisibility(state.permissions.value?.dump,row.id,
         row.content.orEmpty().split(',').map { it.trim() }.toSet(),state.overview?.guests.orEmpty().map { it.id })
 
 internal fun storageFilteredVolumes(volumes: List<StorageVolume>, type: String, guest: Int?, volume: String?): List<StorageVolume> =

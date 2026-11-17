@@ -8,7 +8,7 @@ Watch every node and guest with live charts, open their consoles, and start, sto
 
 ![Fleet overview with live sparklines for every guest and the inspector open on a container](docs/images/fleet.png)
 
-<sub>All pictures use the built-in demo mode or invented sample data.</sub>
+<sub>All pictures use invented sample data.</sub>
 
 ## Download
 
@@ -93,7 +93,6 @@ gh attestation verify RingMASTER-<version>.msi --repo primary-null/RingMASTER
 - Quicker sign-in: choosing Password fills in root@pam, and a user without a realm signs in as name@pam. Choosing a saved connection puts the cursor in the password field, so Enter connects. While a connection's sign-in form is open, the window title names it, so a password manager's auto-type can match it.
 - Normal TLS validation, or a SHA-256 certificate pin you enter. There is no trust-on-first-use and no switch to ignore certificate errors.
 - Up to six connections open at once, each with its own live data, tasks and secret.
-- A demo mode with clearly labelled sample data, to look around without a server.
 
 ![The connection desk with a saved connection selected and the Remember on this computer option](docs/images/sign-in.png)
 

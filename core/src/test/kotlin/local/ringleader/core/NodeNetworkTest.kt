@@ -33,7 +33,7 @@ class NodeNetworkTest {
         for (bad in listOf("node.example", "node_a", "a/b", "", "https://node")) {
             assertFailsWith<IllegalArgumentException>(bad) { nodeNetworkPath(bad) }
         }
-        assertTrue(demoNodeNetwork.isNotEmpty())
+        assertTrue(sampleNodeNetwork.isNotEmpty())
     }
 
     @Test fun stagedChangesAndAddressMethodsStayWithTheRows() {

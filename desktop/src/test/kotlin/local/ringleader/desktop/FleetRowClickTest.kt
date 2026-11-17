@@ -31,7 +31,6 @@ class FleetRowClickTest {
         assertEquals("Summary", guestOpenTab(guest("VM", "stopped")))
         assertEquals("Summary", guestOpenTab(guest("VM", "running", template = true)))
         // The demo has no consoles, so a running sample guest opens on its summary too.
-        assertEquals("Summary", guestOpenTab(guest("VM", "running"), demo = true))
     }
 
     @Test fun theDoubleClickTimeIsSane() {

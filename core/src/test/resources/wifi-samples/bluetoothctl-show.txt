@@ -1,0 +1,16 @@
+Controller 02:00:00:00:00:10 (public)
+	Name: sample-host
+	Alias: Sample Host
+	Class: 0x007c0104
+	Powered: yes
+	PowerState: on
+	Discoverable: no
+	DiscoverableTimeout: 0x000000b4
+	Pairable: yes
+	UUID: Generic Attribute Profile (00001801-0000-1000-8000-00805f9b34fb)
+	Modalias: usb:v13D3p3585d0001
+	Discovering: no
+	Roles: central
+	Roles: peripheral
+Advertising Features:
+	ActiveInstances: 0x00 (0)

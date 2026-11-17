@@ -21,7 +21,7 @@ class CreateReviewRegressionTest {
     }
     @Test fun realCreateContextDoesNotFallbackWhenListsAreUnreadOrLoading() {
         val session = CreateSession(NewGuestKind.Vm, "a", 1)
-        val context = createContext(WorkspaceState(overview = demoOverview), session)
+        val context = createContext(WorkspaceState(overview = sampleOverview()), session)
         assertEquals("a", context.choiceNode); assertEquals(emptyList(), context.bridges); assertEquals(emptyMap(), context.volumes)
         assertIs<FreezeResult.Invalid>(freezeVm(vm().copy(nic = VmNic(bridge = "br-a")), context))
         val populated = session.copy(bridges = ReadSection(value = listOf(BridgeChoice("br-a", "bridge")), loading = true))

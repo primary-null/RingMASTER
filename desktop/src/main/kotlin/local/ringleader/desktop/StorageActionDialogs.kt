@@ -20,12 +20,12 @@ internal fun storageActionTitle(action: StorageAction): String = when(action) {
     StorageAction.SetProtection -> "Backup protection"
 }
 
-@Composable internal fun StorageConfirmDialog(c: StorageConfirmation, sample: Boolean, onConfirm: () -> Unit, onCancel: () -> Unit, contextFacts: List<String> = emptyList()) {
+@Composable internal fun StorageConfirmDialog(c: StorageConfirmation, onConfirm: () -> Unit, onCancel: () -> Unit, contextFacts: List<String> = emptyList()) {
     val cancel = remember { FocusRequester() }
-    StorageDialog(if(sample) "Simulate storage action" else storageActionTitle(c.request.action), onCancel,
+    StorageDialog(storageActionTitle(c.request.action), onCancel,
         initialFocus = cancel, actions = {
             TechAction("Cancel", Modifier.focusRequester(cancel), onClick = onCancel)
-            TechAction(if(sample) "Simulate" else "Confirm", active = true, onClick = onConfirm)
+            TechAction("Confirm", active = true, onClick = onConfirm)
         }) {
         Text("${c.profileLabel} \u00b7 ${c.origin}", Modifier.identity(), color = Tech.Ink)
         c.facts.forEach { Text(if(it == "Action: ${c.request.action}") "Action: ${storageActionTitle(c.request.action)}" else it, Modifier.identity(), color = if(c.replaces || c.request is StorageRequest.RemoveVolume) Tech.Amber else Tech.Ink) }
@@ -127,7 +127,6 @@ internal fun storageActionTitle(action: StorageAction): String = when(action) {
         TechAction("Cancel",onClick=onClose)
         TechAction("Review", active=true, enabled=request()?.let { storageRequestError(it)==null } == true && !ioBusy && (action != StorageAction.Upload || !browser), onClick=::capture)
     }) {
-        if(state.demo) Text("Demo \u00b7 no server requests",color=Tech.Amber)
         when(action) {
             StorageAction.TemplateDownload -> {
                 MiniAction("Refresh catalogue",enabled="catalogue:${key.node}" !in state.storageActions.readLoading) { workspace.loadStorageCatalogue(key.node,key.storage) }
@@ -203,7 +202,7 @@ internal fun storageActionTitle(action: StorageAction): String = when(action) {
         state.storageActions.readErrors.values.forEach { Text(it,color=Tech.Red) }
         (localError ?: state.storageActions.notice)?.let {Text(it,Modifier.identity(),color=Tech.Amber)}
     }
-    confirmation?.let { c -> StorageConfirmDialog(c,state.demo,{
+    confirmation?.let { c -> StorageConfirmDialog(c,{
         confirmation=null
         val previous=workspace.state.value.storageActions.submissions.map {it.localId}.toSet()
         if(workspace.submitStorage(c)) {

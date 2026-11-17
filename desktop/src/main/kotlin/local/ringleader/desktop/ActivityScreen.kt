@@ -114,17 +114,16 @@ private fun statusColor(outcome: TaskOutcome) = when (outcome) {
             Column(verticalArrangement = Arrangement.spacedBy(Tech.Space8)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Tech.Space12)) {
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                    Text(if (state.demo) "DEMONSTRATION / SAMPLE TASKS" else sessionTitle ?: state.address.substringAfter("://").trimEnd('/').ifBlank { "NO ACTIVE CONNECTION" },
+                    Text(sessionTitle ?: state.address.substringAfter("://").trimEnd('/').ifBlank { "NO ACTIVE CONNECTION" },
                         fontFamily = FontFamily.Monospace, fontSize = 13.sp, color = Tech.Ink, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text(when {
-                        state.demo -> "LOCAL SAMPLE · NO SERVER IS CONTACTED"
                         state.kind == PDM_KIND -> "PDM TASK FEED IS NOT AVAILABLE"
                         state.tasksStale -> "STALE ACTIVITY · LAST SUCCESS ${activityClock(state.tasksUpdatedAt)}"
                         else -> "SYNCED ${activityClock(state.tasksUpdatedAt)}"
-                    }, fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = if (state.tasksStale || state.demo || state.kind == PDM_KIND) Tech.Amber else Tech.Muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }, fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = if (state.tasksStale || state.kind == PDM_KIND) Tech.Amber else Tech.Muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
-                MiniAction("Sync · F5", primary = true, enabled = state.kind != PDM_KIND && (state.connected || state.demo) && !state.tasksLoading, onClick = workspace::refreshTasks)
-                MiniAction("Disconnect", enabled = state.connected || state.demo, onClick = onDisconnect)
+                MiniAction("Sync · F5", primary = true, enabled = state.kind != PDM_KIND && state.connected && !state.tasksLoading, onClick = workspace::refreshTasks)
+                MiniAction("Disconnect", enabled = state.connected, onClick = onDisconnect)
             }
             if (state.tasksLoading) TechProgress()
             if (!state.connected) state.error?.let { Text(it, color = Tech.Red, fontSize = 13.sp) }
@@ -134,7 +133,7 @@ private fun statusColor(outcome: TaskOutcome) = when (outcome) {
             if (state.connected && state.lostPowerResults.isNotEmpty()) {
                 item { LostPowerResults(state, workspace) }
             }
-            if ((state.connected || state.demo) && state.submissions.isNotEmpty()) {
+            if (state.connected && state.submissions.isNotEmpty()) {
                 item {
                 Column(verticalArrangement = Arrangement.spacedBy(Tech.Space8)) {
                 SectionLabel("Submitted actions", suffix = state.submissions.size.toString())
@@ -153,10 +152,10 @@ private fun statusColor(outcome: TaskOutcome) = when (outcome) {
                     Spacer(Modifier.height(8.dp))
                     Text(PDM_ACTIVITY_EXPLANATION, color = Tech.Muted, fontSize = 13.sp)
                 } }
-                !state.connected && !state.demo -> item { TechPanel(Modifier.fillMaxWidth(), rail = Tech.Amber) {
+                !state.connected -> item { TechPanel(Modifier.fillMaxWidth(), rail = Tech.Amber) {
                     Text("Open your infrastructure workspace", fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
                     Spacer(Modifier.height(12.dp))
-                    Text("Connect to a Proxmox server to read its recent tasks, or explore the demo.", color = Tech.Muted)
+                    Text("Connect to a Proxmox server to read its recent tasks.", color = Tech.Muted)
                     Spacer(Modifier.height(18.dp))
                     TechAction("Desk", active = true, onClick = onConnect)
                 } }
@@ -169,8 +168,8 @@ private fun statusColor(outcome: TaskOutcome) = when (outcome) {
                 else -> {
                     item {
                     Column(verticalArrangement = Arrangement.spacedBy(Tech.Space8)) {
-                    SectionLabel("Recent tasks", suffix = if (state.demo) "${tasks.size} · SAMPLE" else tasks.size.toString())
-                    if (tasks.isEmpty()) Text(if (state.demo) "No sample tasks." else "No recent tasks are visible to this sign-in.", color = Tech.Muted)
+                    SectionLabel("Recent tasks", suffix = tasks.size.toString())
+                    if (tasks.isEmpty()) Text("No recent tasks are visible to this sign-in.", color = Tech.Muted)
                     else Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         val warned = tasks.count { it.outcome == TaskOutcome.Succeeded && taskHasWarnings(it) }
                         listOf(TaskOutcome.Running to "RUNNING", TaskOutcome.Succeeded to "OK", TaskOutcome.Unsuccessful to "FAILED", TaskOutcome.Unknown to "UNKNOWN").forEach { (outcome, label) ->
@@ -226,7 +225,7 @@ private fun statusColor(outcome: TaskOutcome) = when (outcome) {
         PowerPhase.Succeeded -> Tech.Green
         PowerPhase.Accepted -> Tech.Amber
         PowerPhase.Unsuccessful, PowerPhase.Rejected -> Tech.Red
-        PowerPhase.Unknown, PowerPhase.Simulated -> Tech.Muted
+        PowerPhase.Unknown -> Tech.Muted
     }
     // A submission that ends well glows once; one that fails nudges its status line once and keeps the red rail.
     val source = "submission:${submission.localId}"

@@ -1,0 +1,14 @@
+RINGMASTER-RADIO 1 wifi 8deaedbc13df2da8
+8deaedbc13df2da8	tools
+8deaedbc13df2da8	uid	1000
+8deaedbc13df2da8	rfkill	name=phy0 	type=wlan 	soft=0 	hard=0 
+8deaedbc13df2da8	rfkill	name=hci0 	type=bluetooth 	soft=1 	hard=0 
+8deaedbc13df2da8	wifi	id=wlp3s0	driver=iwlwifi	bus=pci	pci=0000:03:00.0	vendor=0x8086 	device=0x2725 	product=	maker=	phy=phy0	mac=02:00:00:00:00:01 	operstate=up 	carrier=1 
+8deaedbc13df2da8	wifiphy	id=phy1	driver=	bus=	pci=	vendor=	device=	product=	maker=	phy=phy1
+8deaedbc13df2da8	begin	proc-wireless
+Inter-| sta-|   Quality        |   Discarded packets               | Missed | WE
+ face | tus | link level noise |  nwid  crypt   frag  retry   misc | beacon | 22
+wlp3s0: 0000   59.  -51.  -256        0      0      0      0      0        0
+
+8deaedbc13df2da8	end	proc-wireless
+8deaedbc13df2da8	done

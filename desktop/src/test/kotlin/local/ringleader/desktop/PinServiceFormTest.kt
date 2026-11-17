@@ -2,6 +2,7 @@
 @file:OptIn(androidx.compose.ui.InternalComposeUiApi::class, androidx.compose.ui.ExperimentalComposeUiApi::class)
 package local.ringleader.desktop
 
+import local.ringleader.core.SAMPLE_ADDRESS
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -32,7 +33,7 @@ import kotlin.test.assertTrue
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.yield
-import local.ringleader.core.DEMO_REMOTE_KEY
+import local.ringleader.core.SAMPLE_ADDRESS
 import local.ringleader.core.Guest
 import local.ringleader.core.GuestHints
 import local.ringleader.core.ServiceProbe
@@ -220,7 +221,7 @@ class PinServiceFormTest {
     @Test fun editAddressSavesTheCorrectedAddress() {
         val file = Files.createTempDirectory("ringmaster-pins").resolve("pins.json")
         val store = PinStore(file)
-        val guest = Guest(DEMO_REMOTE_KEY, 121, "adguard", "demo-node-a", "Container", "running")
+        val guest = Guest(SAMPLE_ADDRESS, 121, "adguard", "demo-node-a", "Container", "running")
         assertNull(store.addService("profile", guest, "AdGuard", "http://192.0.2.8"))
         val pin = store.list("profile").single()
         var closed = 0
@@ -245,7 +246,7 @@ class PinServiceFormTest {
     @Test fun theRailMenuOffersEditAddressForAServicePin() {
         val file = Files.createTempDirectory("ringmaster-pins").resolve("pins.json")
         val store = PinStore(file)
-        val guest = Guest(DEMO_REMOTE_KEY, 121, "grafana", "demo-node-a", "Container", "running")
+        val guest = Guest(SAMPLE_ADDRESS, 121, "grafana", "demo-node-a", "Container", "running")
         assertNull(store.addService("profile", guest, "Grafana", "http://192.0.2.8"))
         store.toggleGuest("profile", guest)
         val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Unconfined + kotlinx.coroutines.SupervisorJob())

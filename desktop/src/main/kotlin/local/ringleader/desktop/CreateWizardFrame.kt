@@ -172,10 +172,10 @@ enum class ResultAction { CheckId, OpenGuest, ViewLog, Edit, Close }
 }
 
 /** Confirmation consumes no secrets: only SecretState reaches this view. */
-@Composable fun CreateConfirmDialog(confirmation: CreateConfirmation, params: List<ParamLine>, sample: Boolean,
+@Composable fun CreateConfirmDialog(confirmation: CreateConfirmation, params: List<ParamLine>,
     onConfirm: () -> Unit, onCancel: () -> Unit, privilegeHints: List<String> = emptyList()) {
     val cancelFocus = remember { FocusRequester() }
-    TechDialog(if (sample) "Simulate create" else "Create ${confirmation.request.kind.guestKind}", onDismiss = onCancel,
+    TechDialog("Create ${confirmation.request.kind.guestKind}", onDismiss = onCancel,
         dismiss = Dismiss.Confirm, initialFocus = cancelFocus) {
         Text("${confirmation.profileLabel} \u00b7 ${confirmation.origin}", Modifier.identity(), color = Tech.Muted)
         Text("Create ${confirmation.request.kind.guestKind} ${confirmation.request.vmid} \u00b7 ${confirmation.request.name} on ${confirmation.request.node}", Modifier.identity(), color = Tech.Ink)
@@ -187,7 +187,7 @@ enum class ResultAction { CheckId, OpenGuest, ViewLog, Edit, Close }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             TechAction("Cancel", Modifier.focusRequester(cancelFocus), onClick = onCancel)
-            TechAction(if (sample) "Simulate create" else "Create", active = true, onClick = onConfirm)
+            TechAction("Create", active = true, onClick = onConfirm)
         }
     }
 }
@@ -206,7 +206,6 @@ enum class ResultAction { CheckId, OpenGuest, ViewLog, Edit, Close }
         is CreateResult.Failed -> "Create failed: ${result.text}"
         is CreateResult.Rejected -> result.message
         is CreateResult.Unknown -> "Outcome unknown. ${result.text} It was not sent again. Check the server before trying again."
-        is CreateResult.Simulated -> DEMO_CREATE_SIMULATED
     }
     Text(title, Modifier.identity(), color = color, fontSize = 20.sp)
     Text("${result.kind.guestKind} ${result.vmid} \u00b7 ${result.node}", Modifier.identity(), color = Tech.Muted)
@@ -349,7 +348,7 @@ internal class PendingCreate : AutoCloseable {
                 onReady={ ready -> if(mediaReadyMatches(ready,session)) {mediaReady=ready;mediaIntent=null} },onClose={mediaIntent=null})
         }
         pending.confirmation?.let { captured ->
-            CreateConfirmDialog(captured, createParamLines(captured.request.params, captured.secretsSet, captured.start), session.sample,
+            CreateConfirmDialog(captured, createParamLines(captured.request.params, captured.secretsSet, captured.start),
                 { pending.confirm(workspace::submitCreate) }, pending::close,
                 state.permissions.value?.let { createPrivilegeHints(it.dump, captured.request, it.identity) }.orEmpty())
         }

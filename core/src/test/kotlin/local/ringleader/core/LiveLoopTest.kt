@@ -34,7 +34,7 @@ class LiveLoopTest {
         var overviews = 0
         var detailReads = 0
         var inventory: suspend (Connection) -> Overview = { error("set inventory") }
-        var detail: suspend (Connection, Guest) -> GuestDetails = { _, guest -> demoDetails(guest) }
+        var detail: suspend (Connection, Guest) -> GuestDetails = { _, guest -> sampleDetails(guest) }
         override suspend fun overview(connection: Connection): Overview { overviews++; return inventory(connection) }
         override suspend fun details(connection: Connection, guest: Guest): GuestDetails { detailReads++; return detail(connection, guest) }
     }
@@ -197,7 +197,7 @@ class LiveLoopTest {
             assertEquals(before + 1, state.history.guests.getValue(listed.resource).samples.size)
             assertNotNull(workspace.capturePower(PowerAction.Shutdown, "Lab"), "a side-read failure must not block power")
             // The next read comes after the interval, not a backoff, and a good read clears the error.
-            fake.detail = { _, guest -> demoDetails(guest) }
+            fake.detail = { _, guest -> sampleDetails(guest) }
             val reads = fake.overviews
             step(5_000)
             assertEquals(reads + 1, fake.overviews)
@@ -350,7 +350,7 @@ class LiveLoopTest {
             assertNull(state.error)
             assertNull(state.liveBackoffSeconds)
             assertEquals(samples + 1, state.history.guests.getValue(listed.resource).samples.size)
-            gate.complete(demoDetails(listed)); runCurrent()
+            gate.complete(sampleDetails(listed)); runCurrent()
             assertEquals(2, seen.size)                      // the details follow on their own
         } finally { workspace.close() }
     }

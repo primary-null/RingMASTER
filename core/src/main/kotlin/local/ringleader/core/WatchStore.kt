@@ -14,8 +14,8 @@ internal const val MAX_WATCH_BYTES = 256 * 1024
 /**
  * `watcher.json` beside `profiles.json`: the watched resources of saved connections. Stored per entry: the profile id,
  * the connection binding digest, the resource identity, its last seen name and when it was added. Never stored: the
- * server address, account, pin, any secret, any metric or state. Watches of Demo mode and of connections that were
- * not saved as a profile stay in memory. See [GuardedFile] for the write and failure rules.
+ * server address, account, pin, any secret, any metric or state. Watches of connections that were not saved as
+ * a profile stay in memory. See [GuardedFile] for the write and failure rules.
  */
 class WatchStore internal constructor(private val guarded: GuardedFile) {
     constructor(file: Path) : this(GuardedFile(file, MAX_WATCH_BYTES))
@@ -49,6 +49,6 @@ internal fun decodeWatched(text: String): List<WatchEntry> {
         val o = StrictJson.obj(element, setOf("profileId", "binding", "resource", "name", "addedAt"))
         WatchEntry(StrictJson.str(o, "profileId"), StrictJson.str(o, "binding"), decodeWatchResource(o["resource"]), StrictJson.str(o, "name"), StrictJson.instant(o, "addedAt"))
     }
-    if (entries.any { it.binding == DEMO_WATCH_BINDING } || entries.map { it.binding to it.resource }.distinct().size != entries.size) throw StrictJson.Bad()
+    if (entries.map { it.binding to it.resource }.distinct().size != entries.size) throw StrictJson.Bad()
     return entries
 }

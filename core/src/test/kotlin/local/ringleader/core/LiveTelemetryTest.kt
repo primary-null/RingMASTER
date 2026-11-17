@@ -35,13 +35,13 @@ class LiveTelemetryTest {
 
     private class Fake : InventoryGateway {
         var inventory: suspend (Connection) -> Overview = { connection -> Overview(1, listOf(Guest(connection.remoteKey, 100, "alpha", "node-a", "VM", "running"))) }
-        var detail: suspend (Connection, Guest) -> GuestDetails = { _, guest -> demoDetails(guest) }
+        var detail: suspend (Connection, Guest) -> GuestDetails = { _, guest -> sampleDetails(guest) }
         override suspend fun overview(connection: Connection) = inventory(connection)
         override suspend fun details(connection: Connection, guest: Guest) = detail(connection, guest)
     }
 
     private class Inspect : GuestInspectionGateway {
-        override suspend fun read(connection: Connection, guest: Guest, storages: List<String>, timeframe: String) = demoInspection(guest, timeframe)
+        override suspend fun read(connection: Connection, guest: Guest, storages: List<String>, timeframe: String) = sampleInspection(guest, timeframe)
     }
 
     private fun TestScope.step(millis: Long) {
@@ -117,7 +117,7 @@ class LiveTelemetryTest {
             assertFalse(workspace.state.value.detailsLoading)
             assertFalse(workspace.state.value.inspectionLoading)
             assertFalse(workspace.state.value.nodeStatusLoading)
-            val fresh = demoDetails(listed).copy(cpuFraction = 0.5)
+            val fresh = sampleDetails(listed).copy(cpuFraction = 0.5)
             gate.complete(fresh); runCurrent()
             assertEquals(fresh, workspace.state.value.details)
             assertEquals(inspection, workspace.state.value.inspection)
@@ -480,77 +480,6 @@ class LiveTelemetryTest {
         assertEquals(listOf("app", "db"), pdm.tags)
         assertEquals(80L, pdm.metrics?.netIn)
         assertEquals(20L, pdm.metrics?.netOut)
-    }
-
-    @Test fun demoWalkStaysInBoundsAndMatchesItsSeed() {
-        val seed = 42L
-        var overview = demoOverview
-        val random = Random(seed)
-        var previousIn = 0L
-        var previousOut = 0L
-        repeat(40) {
-            overview = stepDemoOverview(overview, random)
-            overview.guests.forEach { guest ->
-                if (guest.status != "running") {
-                    assertNull(guest.metrics?.cpuFraction)
-                    assertNull(guest.metrics?.memoryBytes)
-                } else {
-                    val metrics = guest.metrics!!
-                    assertTrue(metrics.cpuFraction!! in 0.0..1.0)
-                    assertTrue(metrics.memoryBytes!! in 0L..metrics.memoryLimitBytes!!)
-                    assertTrue(metrics.netIn!! > 0L)
-                    assertTrue(metrics.netOut!! > 0L)
-                }
-            }
-            val running = overview.guests.first { it.id == 120 }.metrics!!
-            assertTrue(running.netIn!! > previousIn)
-            assertTrue(running.netOut!! > previousOut)
-            previousIn = running.netIn
-            previousOut = running.netOut
-            overview.members.forEach { member ->
-                member.cpuFraction?.let { assertTrue(it in 0.0..1.0) }
-                val used = member.memoryBytes
-                val max = member.maxMemoryBytes
-                if (used != null && max != null) assertTrue(used in 0L..max)
-            }
-            assertNull(overview.members.single { it.name == "demo-node-b" }.memoryBytes)
-        }
-        var again = demoOverview
-        val repeatRandom = Random(seed)
-        repeat(40) { again = stepDemoOverview(again, repeatRandom) }
-        assertEquals(overview, again)
-    }
-
-    @Test fun demoTickMatchesTheSeededWalk() = runTest {
-        val seed = 21L
-        val scope = this
-        val workspace = Workspace(this, object : InventoryGateway {
-            override suspend fun overview(connection: Connection) = error("Unexpected network request")
-            override suspend fun details(connection: Connection, guest: Guest) = error("Unexpected network request")
-        }, clock = { Instant.ofEpochMilli(scope.currentTime) }, demoSeed = seed)
-        try {
-            workspace.exploreDemo()
-            assertTrue(workspace.state.value.live)
-            val selected = workspace.state.value.overview!!.guests.first()
-            workspace.select(selected)
-            workspace.inspectGuest()
-            val inspection = workspace.state.value.inspection
-            workspace.setLive(true, 2); runCurrent()
-            step(2_000)
-            val random = Random(seed)
-            val first = stepDemoOverview(demoOverview, random)
-            assertEquals(first, workspace.state.value.overview)
-            assertEquals(inspection, workspace.state.value.inspection)
-            assertEquals(selected.resource, workspace.state.value.selected?.resource)
-            assertFalse(workspace.state.value.loading)
-            assertNotNull(workspace.state.value.details)
-            assertNull(workspace.state.value.overview!!.guests.single { it.id == 130 }.metrics?.cpuFraction)
-            step(2_000)
-            val second = stepDemoOverview(first, random)
-            assertEquals(second, workspace.state.value.overview)
-            assertEquals(inspection, workspace.state.value.inspection)
-            assertFalse(workspace.state.value.loading)
-        } finally { workspace.close() }
     }
 
     @Test fun setLiveFalseStopsTicks() = runTest {

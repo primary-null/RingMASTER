@@ -43,7 +43,6 @@ class ConnectionRouteTagTest {
         assertEquals("ROUTE UNKNOWN", view(s.failed).label)
         assertEquals("VIA PROXY", view(s.proxy).label)
         assertEquals("CHECKING ROUTE", view(s.checking).label)
-        assertEquals("DEMO · NO ROUTE", view(RouteTagState.Demo).label)
         assertEquals("ROUTE NOT SHOWN", view(RouteTagState.Browser).label)
         assertNull(routeTagView(RouteTagState.Hidden, false, s.now))
         assertEquals(listOf("DIRECT", "VPN", "UNKNOWN", "CHECKING"), listOf(s.direct, s.wireguard, s.unknown, s.checking).map { view(it).short })
@@ -129,7 +128,6 @@ class ConnectionRouteTagTest {
         assertEquals("Direct, Wi-Fi", spokenRouteLabel(view(s.wifi).label))
         assertEquals("VPN, WireGuard", spokenRouteLabel(view(s.wireguard).label))
         assertEquals("Route unknown", spokenRouteLabel(view(s.unknown).label))
-        assertEquals("Demo, no route", spokenRouteLabel(view(RouteTagState.Demo).label))
     }
 
     @Test fun showcaseConcealsUnexpectedDiagnosticIdentities() {

@@ -1,6 +1,7 @@
 @file:OptIn(androidx.compose.ui.InternalComposeUiApi::class)
 package local.ringleader.desktop
 
+import local.ringleader.core.SAMPLE_ADDRESS
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -227,7 +228,7 @@ class AlertsUiTest {
             click("UNWATCH", last = true)
             assertEquals(1, unwatched.size)
         }) {
-            WatcherScreen(AlertsFixtures.watcher(), WatcherActions(onUnwatch = { unwatched += it }), { r -> r in present || r == ResourceId(local.ringleader.core.DEMO_REMOTE_KEY, "", "Container", 121) },
+            WatcherScreen(AlertsFixtures.watcher(), WatcherActions(onUnwatch = { unwatched += it }), { r -> r in present || r == ResourceId(local.ringleader.core.SAMPLE_ADDRESS, "", "Container", 121) },
                 { opened += it.key }, Modifier.padding(16.dp))
         }
     }

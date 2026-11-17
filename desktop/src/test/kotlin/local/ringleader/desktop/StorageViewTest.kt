@@ -19,22 +19,12 @@ import kotlin.test.*
 
 class StorageViewTest {
     @Test fun overviewFiltersKeepGuestAndVolumeConstraints() {
-        val row=demoOverview.storage.first()
-        val volumes=demoStorageContent(row)
+        val row=sampleOverview().storage.first()
+        val volumes=sampleStorageContent(row)
         val iso=volumes.first { it.content=="iso" }
         assertEquals(listOf(iso),storageFilteredVolumes(volumes,VOLUME_TYPE_ALL,null,iso.volid))
         assertEquals(emptyList(),storageFilteredVolumes(volumes,"backup",null,iso.volid))
         assertTrue(storageFilteredVolumes(volumes,"iso",999,null).isEmpty())
-    }
-    @Test fun demoVisibilityCannotBecomeRealCompleteness() {
-        val workspace=Workspace(CoroutineScope(Dispatchers.Unconfined))
-        workspace.exploreDemo()
-        val state=workspace.state.value
-        assertEquals(StorageVisibility.Unknown,storageVerdict(state,state.overview!!.storage.first()))
-        val subject=LensSubject.StorageSubject("demo-node-a","local")
-        assertTrue(lensServerRanges(state,subject,null))
-        assertFalse(lensServerRanges(state.copy(demo=false,kind=PDM_KIND),subject,null))
-        assertNull(liveMetricFor(listOf("used","total")))
     }
     private fun nodes(scene: ImageComposeScene): List<SemanticsNode> {
         val all=mutableListOf<SemanticsNode>()
@@ -45,10 +35,10 @@ class StorageViewTest {
     private suspend fun step(scene: ImageComposeScene) { repeat(4) { scene.render(System.nanoTime()).close(); yield() } }
     @Test fun overviewFilterChangesContentsWithoutReadingAgain() = runSceneTest {
         val scope=CoroutineScope(coroutineContext+SupervisorJob())
-        val workspace=Workspace(scope); workspace.exploreDemo()
+        val workspace=sampleWorkspace(scope).awaitInventory()
         val row=workspace.state.value.overview!!.storage.first()
         workspace.selectStorage(row.node,row.id)
-        val state=workspace.state.value
+        val state=workspace.awaitState { it.storageContent.value != null }
         val scene=ImageComposeScene(1600,1000,coroutineContext=coroutineContext) {
             MaterialTheme(colorScheme=ringColors) { CompositionLocalProvider(LocalReduceMotion provides true) { StoragePage(state,workspace) } }
         }
@@ -62,14 +52,14 @@ class StorageViewTest {
         } finally {scene.close();scope.cancel()}
     }
     @Test fun deniedListingKeepsUsageButHidesBreakdown() = runSceneTest {
-        val scope=CoroutineScope(coroutineContext+SupervisorJob()); val workspace=Workspace(scope);workspace.exploreDemo()
+        val scope=CoroutineScope(coroutineContext+SupervisorJob()); val workspace=sampleWorkspace(scope).awaitInventory()
         val row=workspace.state.value.overview!!.storage.first(); workspace.selectStorage(row.node,row.id)
         val state=workspace.state.value.copy(storageContent=ReadSection<StorageContentView>().failed(STORAGE_CONTENT_DENIED,true))
         val scene=ImageComposeScene(1600,1000,coroutineContext=coroutineContext) { MaterialTheme(colorScheme=ringColors) { StoragePage(state,workspace) } }
         try {step(scene);val texts=nodes(scene).map(::text);assertTrue(texts.any {it=="USAGE"});assertFalse(texts.any {it=="WHAT USES THE SPACE"});assertTrue(texts.any {it.contains("Not permitted")})} finally {scene.close();scope.cancel()}
     }
     @Test fun arrowsDoNotReadUntilEnter() = runSceneTest {
-        val scope=CoroutineScope(coroutineContext+SupervisorJob());val workspace=Workspace(scope);workspace.exploreDemo()
+        val scope=CoroutineScope(coroutineContext+SupervisorJob());val workspace=sampleWorkspace(scope).awaitInventory()
         val scene=ImageComposeScene(1600,1000,coroutineContext=coroutineContext) {
             val state by workspace.state.collectAsState()
             MaterialTheme(colorScheme=ringColors) {StoragePage(state,workspace)}

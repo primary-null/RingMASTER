@@ -83,7 +83,7 @@ internal class TickerPages(private val scope: CoroutineScope, val lab: MatrixLab
         }
     }
 
-    val names = listOf("Desk", "Fleet", "Storage", "Activity", "Scan", "Bluetooth", "VPN", "Tools", "Schedules", WATCHER_PAGE, "Under the Hood")
+    val names = listOf("Desk", "Fleet", "Storage", "Activity", "Scan", "Radios", "VPN", "Tools", "Schedules", WATCHER_PAGE, "Under the Hood")
 
     fun state(page: String): WorkspaceState = when (page) {
         "Fleet" -> lab.state(lab.vm)
@@ -102,11 +102,11 @@ internal class TickerPages(private val scope: CoroutineScope, val lab: MatrixLab
             "Storage" -> {
                 val key = StorageKey(origin, "pve-east", "local-lvm")
                 val row = lab.overview.storage.first { it.id == "local-lvm" && it.node == "pve-east" }
-                StoragePage(s.copy(storageSelection = key, storageContent = ReadSection.loaded(StorageContentView(key, null, demoStorageContent(row)), lab.now, sample = true)), idle)
+                StoragePage(s.copy(storageSelection = key, storageContent = ReadSection.loaded(StorageContentView(key, null, sampleStorageContent(row)), lab.now)), idle)
             }
             "Activity" -> ActivityScreen(s, idle, title, {}, {})
             "Scan" -> ScanScreen(scanDone, emptyList()) {}
-            "Bluetooth" -> BtScanView(btScan, scanning = false, platform = "Windows")
+            "Radios" -> BtScanView(btScan, scanning = false, platform = "Windows")
             "VPN" -> VpnScreen(vpnSession, "https://100.64.0.2:8006", emptyList()) {}
             "Tools" -> ToolsScreen(tools)
             "Schedules" -> scheduler().let { SchedulesContent(it.engine, null, TrayStatus.Installed, true, {}, now = { it.now }) }

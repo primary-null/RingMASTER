@@ -484,7 +484,7 @@ class RememberTest {
             Overview(1, listOf(Guest(connection.remoteKey, 100, "alpha", "node-a", "VM", "running")))
         }
         override suspend fun overview(connection: Connection) = inventory(connection)
-        override suspend fun details(connection: Connection, guest: Guest) = demoDetails(guest)
+        override suspend fun details(connection: Connection, guest: Guest) = sampleDetails(guest)
     }
 }
 

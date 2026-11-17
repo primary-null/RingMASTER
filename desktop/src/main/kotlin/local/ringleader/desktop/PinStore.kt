@@ -38,11 +38,10 @@ data class FleetRequest(val resource: ResourceId, val tab: String, val nonce: Lo
 internal const val PIN_GUEST = "guest"
 internal const val PIN_VIEW = "view"
 internal const val PIN_SERVICE = "service"
-internal const val PIN_CONNECTION_DEMO = "demo"
 
 private const val PIN_VERSION = 1
 private val pinTargets = setOf(PIN_GUEST, PIN_VIEW, PIN_SERVICE)
-internal val pinTabs = setOf("Summary", "Console", "Hardware", "Snapshots", "Backups", "Bluetooth", "Actions")
+internal val pinTabs = setOf("Summary", "Console", "Hardware", "Snapshots", "Backups", "Radios", "Actions")
 private val pinGuestKinds = setOf("VM", "Container")
 private val pinJson = Json { prettyPrint = true; ignoreUnknownKeys = true }
 
@@ -119,9 +118,8 @@ internal fun visiblePinCount(total: Int, room: Int, row: Int, more: Int, cap: In
     return 0
 }
 
-/** Profile id while a saved profile is connected, otherwise the origin. Demo never shares those keys. */
-internal fun pinConnectionKey(demo: Boolean, profileId: String?, origin: String): String? = when {
-    demo -> PIN_CONNECTION_DEMO
+/** Profile id while a saved profile is connected, otherwise the origin. */
+internal fun pinConnectionKey(profileId: String?, origin: String): String? = when {
     !profileId.isNullOrBlank() -> profileId
     origin.isNotBlank() -> origin.trim()
     else -> null
@@ -298,7 +296,7 @@ class PinStore(private val file: Path = pinsFile()) {
     fun adoptOriginPins(origin: String, profileId: String) {
         if (refuse() != null) return
         val from = origin.trim()
-        if (from.isBlank() || from == profileId || from == PIN_CONNECTION_DEMO || profileId == PIN_CONNECTION_DEMO) return
+        if (from.isBlank() || from == profileId) return
         if (!keyOk(from) || !keyOk(profileId)) return
         val source = slots[from] as? Slot.Rows ?: return
         val moving = source.rows.filterIsInstance<PinRow.Known>()
@@ -419,7 +417,7 @@ private fun keyOk(key: String) = key.length in 1..200 && key.none { it.isISOCont
 
 private fun guestOk(guest: Guest) = guest.kind in pinGuestKinds && guest.id > 0 && (guest.scope.isEmpty() || pdmScopeOrNull(guest.scope) != null)
 
-private fun tabOk(guest: Guest, tab: String) = tab in pinTabs && (tab != "Bluetooth" || guest.kind == "VM")
+private fun tabOk(guest: Guest, tab: String) = tab in pinTabs
 
 private fun guestLabel(guest: Guest): String {
     val raw = guest.name.trim().filterNot { it.isISOControl() }.take(80)
@@ -500,14 +498,14 @@ private fun parsePin(row: JsonObject): Pin? {
     if (guestName.length !in 1..80 || guestName.any { it.isISOControl() }) return null
     val target = row.text("target") ?: return null
     if (target !in pinTargets) return null
-    val tab = row.text("tab")
+    // The guest page's Bluetooth tab became Radios (for VMs and containers); a pin saved before that opens Radios.
+    val tab = row.text("tab")?.let { if (it == "Bluetooth") "Radios" else it }
     val serviceName = row.text("serviceName")
     val serviceUrl = row.text("serviceUrl")
     when (target) {
         PIN_GUEST -> if (tab != null || serviceName != null || serviceUrl != null) return null
         PIN_VIEW -> {
             if (tab == null || tab !in pinTabs || serviceName != null || serviceUrl != null) return null
-            if (tab == "Bluetooth" && guestKind != "VM") return null
         }
         PIN_SERVICE -> {
             if (tab != null || serviceName == null || serviceUrl == null) return null

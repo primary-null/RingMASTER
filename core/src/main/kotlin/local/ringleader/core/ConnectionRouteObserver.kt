@@ -17,8 +17,6 @@ import kotlinx.coroutines.sync.withLock
 sealed interface RouteContext {
     /** No server connection in view. */
     data object None : RouteContext
-    /** Demonstration data: there is no server, so there is no route. */
-    data object Demo : RouteContext
     /** Browser mode: the RingMASTER host makes the connection, not the viewer's browser. Not inspected. */
     data object Browser : RouteContext
     /** A connected session. [epoch] changes on every connect, so a reconnect is a new key. */
@@ -29,7 +27,6 @@ data class RouteKey(val session: Long, val epoch: Long, val origin: String)
 
 sealed interface RouteTagState {
     data object Hidden : RouteTagState
-    data object Demo : RouteTagState
     data object Browser : RouteTagState
     data class Checking(val key: RouteKey, val target: RouteTarget) : RouteTagState
     /** [refreshing] while a newer read of the same key is running. */
@@ -39,7 +36,6 @@ sealed interface RouteTagState {
 /** Fence the rendered frame too: the observer's UI effect runs after composition switches sessions. */
 fun RouteTagState.forContext(context: RouteContext): RouteTagState = when (context) {
     RouteContext.None -> RouteTagState.Hidden
-    RouteContext.Demo -> RouteTagState.Demo
     RouteContext.Browser -> RouteTagState.Browser
     is RouteContext.Server -> routeTarget(context.address)?.let { target ->
         val expected = RouteKey(context.session, context.epoch, target.origin)
@@ -157,7 +153,6 @@ class ConnectionRouteObserver(
         if (keyChanged || !active) { job?.cancel(); job = null; generation++ }
         if (!active && wasActive) pausedAt = clock()
         when {
-            context is RouteContext.Demo -> mutable.value = RouteTagState.Demo
             context is RouteContext.Browser -> mutable.value = RouteTagState.Browser
             nextKey == null || nextTarget == null -> mutable.value = RouteTagState.Hidden
             keyChanged -> { mutable.value = initialState(nextKey, nextTarget, resumed = false); if (active) start(nextKey, nextTarget) }

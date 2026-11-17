@@ -60,7 +60,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import java.text.NumberFormat
 import java.util.Locale
-import local.ringleader.core.DEMO_REMOTE_KEY
 import local.ringleader.core.PDM_KIND
 import local.ringleader.core.RECORDED_CAPTION
 import local.ringleader.core.RECORDED_SAMPLE_CAPTION
@@ -90,7 +89,7 @@ import local.ringleader.core.volumeTypeCounts
  */
 @Composable fun StoragePage(state: WorkspaceState, workspace: Workspace, modifier: Modifier = Modifier, profileLabel: String = "Active connection") {
     val searchFocus=remember { FocusRequester() }
-    LaunchedEffect(state.connectionEpoch, state.demo) {
+    LaunchedEffect(state.connectionEpoch) {
         if (state.kind != PDM_KIND) { workspace.loadStorageConfig(); if(state.permissions.value==null && !state.permissions.loading && state.permissions.error==null) workspace.loadPermissions() }
     }
     BoxWithConstraints(modifier.fillMaxSize().onPreviewKeyEvent {
@@ -119,7 +118,7 @@ import local.ringleader.core.volumeTypeCounts
 // ---- left: the recorded storage list ----------------------------------------------------------------------------------
 
 private fun recordedStorage(state: WorkspaceState): List<RecordedStorage> {
-    val remote = if (state.demo) DEMO_REMOTE_KEY else state.address
+    val remote = state.address
     return state.overview?.storage.orEmpty().filter { it.remote == remote }
 }
 
@@ -160,7 +159,7 @@ private fun recordedStorage(state: WorkspaceState): List<RecordedStorage> {
     }
     PaneFrame(modifier) {
         SectionLabel("Storage", suffix = "$count recorded")
-        Text(if (state.demo) RECORDED_SAMPLE_CAPTION else RECORDED_CAPTION, fontFamily = Tech.Mono, fontSize = 10.sp, color = Tech.Muted)
+        Text(RECORDED_CAPTION, fontFamily = Tech.Mono, fontSize = 10.sp, color = Tech.Muted)
         if (state.stale || state.overview?.indexStale == true) Text("Inventory is stale. Last recorded rows are shown.", color=Tech.Amber,fontSize=10.sp)
         state.overview?.indexError?.let { Text(it,color=Tech.Amber,fontSize=10.sp) }
         when {
@@ -198,7 +197,7 @@ private fun recordedStorage(state: WorkspaceState): List<RecordedStorage> {
                     } }
                     if(rows.isEmpty()) item { Text("No recorded storage this account can audit. Disabled storage comes from configuration.",color=Tech.Muted,fontSize=11.sp) }
                     item { Text("Capacities are not added across storage IDs or nodes.",color=Tech.Muted,fontSize=10.sp) }
-                    if(storageListComplete(state.permissions.value?.dump)!=true || state.demo) item { Text("Storage this account cannot audit is not listed.",color=Tech.Muted,fontSize=10.sp) }
+                    if(storageListComplete(state.permissions.value?.dump)!=true) item { Text("Storage this account cannot audit is not listed.",color=Tech.Muted,fontSize=10.sp) }
                     if(model.disabled.isNotEmpty()) item { Text("Disabled storage comes from the storage configuration.",color=Tech.Muted,fontSize=10.sp) }
                     if(state.storageView.config.error!=null) item { Text(STORAGE_CONFIG_UNREAD,color=Tech.Muted,fontSize=10.sp) }
                 }

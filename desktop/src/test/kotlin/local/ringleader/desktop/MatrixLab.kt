@@ -91,7 +91,7 @@ internal class MatrixLab(val sandbox: Path) {
             "netin" to 42_000.0 * (1 + wave), "netout" to 13_000.0 * (1 + abs(sin(n * .4 + seed)) * .6),
             "diskread" to 60_000.0 + 45_000.0 * abs(sin(n * .5 + seed)), "diskwrite" to 30_000.0 + 22_000.0 * abs(sin(n * .37 + seed * 1.3))))
     }
-    val nodeHistory = demoNodeHistory("hour", "AVERAGE")
+    val nodeHistory = sampleNodeHistory("hour", "AVERAGE")
 
     private fun hardwareFor(g: Guest): HardwareSummary = parseHardware(
         if (g.kind == "VM") """{"data":{"cores":4,"sockets":1,"cpu":"x86-64-v2-AES","memory":8192,"balloon":2048,"ostype":"l26","machine":"q35","bios":"ovmf","agent":"1","scsihw":"virtio-scsi-single","boot":"order=scsi0;ide2;net0","vga":"qxl","onboot":1,"tags":"${g.tags.joinToString(";")}","description":"Build agent for the nightly and release jobs. Owner: platform team. Do not migrate during the backup window.","scsi0":"shared-storage-ceph-pool-1:vm-${g.id}-disk-0,size=512G,ssd=1,discard=on,iothread=1","scsi1":"local-lvm:vm-${g.id}-disk-1,size=64G","ide2":"local:iso/debian-13.2.0-amd64-netinst.iso,media=cdrom,size=780M","net0":"virtio=02:00:00:00:01:20,bridge=vmbr0,firewall=1,tag=10","net1":"e1000=02:00:00:00:01:21,bridge=vmbr1,link_down=1","usb0":"host=1234:abcd","hostpci0":"0000:01:00.0,pcie=1"}}"""
@@ -100,7 +100,7 @@ internal class MatrixLab(val sandbox: Path) {
     fun inspectionFor(g: Guest): GuestInspection {
         val running = g.status == "running" && !g.template
         val rowOf = rows.first { it.id == g.id }
-        return demoInspection(g, "hour").copy(
+        return sampleInspection(g, "hour").copy(
             hardware = InspectionSection(hardwareFor(g)), history = InspectionSection(hourHistory(g.id % 7, rowOf.cpu, rowOf.mem, rowOf.max, rowOf.vcpus.toInt())),
             snapshots = InspectionSection(listOf(
                 GuestSnapshot("clean-install", null, now.epochSecond - 86_400 * 21, "Fresh install, updates applied", false, false),
@@ -136,13 +136,13 @@ internal class MatrixLab(val sandbox: Path) {
     }
 
     /** A state like a real connected session's, with [selected] or [node] chosen and its reads loaded. */
-    fun state(selected: Guest? = null, node: String? = null, demo: Boolean = false): WorkspaceState {
+    fun state(selected: Guest? = null, node: String? = null): WorkspaceState {
         val pick = selected?.let { s -> if (s.id == 131 && s.name != guest(131).name) s else guests.first { it.id == s.id } }
         val inspected = pick?.let(::inspectionFor)
         val with = if (pick != null && pick.id == 131 && pick.name != guest(131).name) overview.copy(guests = guests.map { if (it.id == 131) pick else it }) else overview
         return WorkspaceState(
-            connected = !demo, demo = demo, address = if (demo) "" else origin, overview = with, updatedAt = now, selected = pick, selectedNode = node,
-            details = pick?.let(::demoDetails), inspection = inspected?.copy(resource = pick.resource, node = pick.node), history = history, tasks = tasks, tasksUpdatedAt = now,
+            connected = true, address = origin, overview = with, updatedAt = now, selected = pick, selectedNode = node,
+            details = pick?.let(::sampleDetails), inspection = inspected?.copy(resource = pick.resource, node = pick.node), history = history, tasks = tasks, tasksUpdatedAt = now,
             chartHistory = if (node != null) InspectionSection(nodeHistory) else InspectionSection(inspected?.history?.value),
             nodeStatus = if (node == "pve-east") nodeStatus else null, nodeStatusUpdatedAt = if (node == "pve-east") now else null,
             consoleStills = if (pick != null && pick.kind == "VM" && pick.status == "running" && !pick.template) mapOf(pick.resource to still) else emptyMap(),

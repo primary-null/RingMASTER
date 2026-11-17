@@ -18,27 +18,6 @@ import java.nio.ByteBuffer
 import java.util.concurrent.*
 import org.jetbrains.skia.*
 
-/**
- * Centre of the Explore demo label in the 1440x900 Desk frame. Anchors on the amber outline of the disabled Connect
- * button, then takes the bright label just to its right on the same row (checked against Windows and Debian frames).
- */
-internal fun exploreDemoCentre(screen: java.awt.image.BufferedImage): Pair<Int, Int> {
-    fun px(x: Int, y: Int) = screen.getRGB(x, y).let { Triple(it shr 16 and 255, it shr 8 and 255, it and 255) }
-    var ax1 = -1; var ay0 = Int.MAX_VALUE; var ay1 = -1
-    for (y in 480 until 680) for (x in 720 until 1420) {
-        val (r, g, b) = px(x, y)
-        if (r > 200 && g in 111..189 && b < 90) { ax1 = maxOf(ax1, x); ay0 = minOf(ay0, y); ay1 = maxOf(ay1, y) }
-    }
-    check(ax1 >= 0) { "Connect button outline not found in the Desk frame" }
-    var minX = Int.MAX_VALUE; var maxX = -1; var minY = Int.MAX_VALUE; var maxY = -1
-    for (y in ay0..ay1) for (x in ax1 + 1 until minOf(screen.width, ax1 + 300)) {
-        val (r, g, b) = px(x, y)
-        if (r > 200 && g > 200 && b > 200) { minX = minOf(minX, x); maxX = maxOf(maxX, x); minY = minOf(minY, y); maxY = maxOf(maxY, y) }
-    }
-    check(maxX >= 0) { "Explore demo label not found beside Connect" }
-    return (minX + maxX) / 2 to (minY + maxY) / 2
-}
-
 /** Status code of one plain HTTP/1.1 request with a chosen Host, which java.net.http does not allow setting. */
 internal fun rawStatus(port: Int, path: String, host: String, headers: String = ""): Int =
     java.net.Socket(java.net.InetAddress.getLoopbackAddress(), port).use { socket ->
@@ -432,10 +411,9 @@ class WebModeTest {
                 }
                 assertEquals(345,covered.size,"Full 1440x900 frame")
                 javax.imageio.ImageIO.write(screen,"png",java.io.File(System.getProperty("java.io.tmpdir"),"ringmaster-web-test.png"))
-                // Find Explore demo in the frame instead of trusting fixed coordinates: font metrics move it by ~130 px between
-                // Windows and Linux. Its label is the only bright text in the connect panel's button band (labels,
-                // placeholders and the disabled Connect are muted).
-                val (cx, cy) = exploreDemoCentre(screen)
+                // A click on the second entry of the rail, inside its icon column: the point is on the row whether the rail
+                // is collapsed to its icons (60 px wide) or open, and font metrics do not move a row out from under it.
+                val cx = 30; val cy = 102
                 frames.clear()
                 ws.sendText("""{"t":"pointer","kind":"down","x":$cx,"y":$cy,"button":0,"buttons":1}""",true).join()
                 ws.sendText("""{"t":"pointer","kind":"up","x":$cx,"y":$cy,"button":0,"buttons":0}""",true).join()

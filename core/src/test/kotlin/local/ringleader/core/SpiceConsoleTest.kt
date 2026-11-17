@@ -66,7 +66,7 @@ class SpiceConsoleTest {
         assertEquals("pve.example.test", spiceProxyHost("https://pve.example.test:8006"))
     }
 
-    @Test fun workspaceRefusesDemoAndUnknownGuestsAndPassesTheLiveGuest() = runTest {
+    @Test fun workspaceRefusesUnknownGuestsAndPassesTheLiveGuest() = runTest {
         val calls = mutableListOf<Guest>()
         val spice = object : SpiceGateway {
             override suspend fun ticket(connection: Connection, guest: Guest): SpiceTicket { calls += guest; return parseSpiceTicket(body(), "192.0.2.10") }
@@ -83,12 +83,6 @@ class SpiceConsoleTest {
         assertFailsWith<IllegalStateException> { w.spiceTicket(vm.copy(id = 999)) }
         assertEquals(1, calls.size)
         w.close()
-
-        val demo = Workspace(this, gateway = inventory, spiceGateway = spice)
-        demo.exploreDemo(); runCurrent()
-        assertEquals(SPICE_DEMO, assertFailsWith<IllegalStateException> { demo.spiceTicket(demoOverview.guests.first()) }.message)
-        assertEquals(1, calls.size)
-        demo.close()
     }
 
     @Test fun expiredSessionDisconnects() = runTest {

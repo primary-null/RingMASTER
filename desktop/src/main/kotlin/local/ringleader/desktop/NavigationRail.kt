@@ -47,7 +47,7 @@ private const val SESSION_ROW = 28
 private const val SESSION_HEAD = 18
 
 /** Rail order. Ctrl+1 opens the first name; Main maps the number keys to these names. */
-internal val ringPages = listOf("Desk", "Fleet", "Storage", "Activity", "Scan", "Bluetooth", "VPN", "Tools", "Under the Hood", "Schedules")
+internal val ringPages = listOf("Desk", "Fleet", "Storage", "Activity", "Scan", "Radios", "VPN", "Tools", "Under the Hood", "Schedules")
 
 /** Pages this host is allowed to show. The browser drops Under the Hood so Ctrl+1-8 keep their meaning. */
 internal fun pagesFor(host: AppHost): List<String> = if (host.traceView) ringPages else ringPages - "Under the Hood" - "Schedules"
@@ -88,16 +88,15 @@ private fun DrawScope.railIcon(kind: String, c: Color) {
             drawLine(c, center, Offset(w * .86f, h * .18f), st.width, StrokeCap.Round)
             drawCircle(c, 1.4.dp.toPx(), Offset(w * .3f, h * .64f))
         }
-        "Bluetooth" -> { // bind rune: stem, right zigzag, two crossing strokes
-            val x = w * .50f; val left = w * .28f; val right = w * .78f
-            val y0 = h * .08f; val y1 = h * .29f; val y2 = h * .50f; val y3 = h * .71f; val y4 = h * .92f
-            drawLine(c, Offset(x, y0), Offset(x, y4), st.width, StrokeCap.Round)
-            drawLine(c, Offset(x, y0), Offset(right, y1), st.width, StrokeCap.Round)
-            drawLine(c, Offset(right, y1), Offset(x, y2), st.width, StrokeCap.Round)
-            drawLine(c, Offset(x, y2), Offset(right, y3), st.width, StrokeCap.Round)
-            drawLine(c, Offset(right, y3), Offset(x, y4), st.width, StrokeCap.Round)
-            drawLine(c, Offset(left, y1), Offset(right, y3), st.width, StrokeCap.Round)
-            drawLine(c, Offset(left, y3), Offset(right, y1), st.width, StrokeCap.Round)
+        "Radios" -> { // a mast on a base, waves on both sides
+            val x = w * .50f
+            drawLine(c, Offset(x, h * .34f), Offset(x, h * .92f), st.width, StrokeCap.Round)
+            drawLine(c, Offset(w * .32f, h * .92f), Offset(w * .68f, h * .92f), st.width, StrokeCap.Round)
+            drawCircle(c, 1.8.dp.toPx(), Offset(x, h * .30f))
+            for (r in listOf(w * .20f, w * .38f)) {
+                drawArc(c, 140f, 80f, false, Offset(x - r, h * .30f - r), Size(r * 2, r * 2), style = st)
+                drawArc(c, -40f, 80f, false, Offset(x - r, h * .30f - r), Size(r * 2, r * 2), style = st)
+            }
         }
         "VPN" -> { // shield with a keyhole
             val p = Path().apply { moveTo(w * .5f, h * .04f); lineTo(w * .88f, h * .18f); lineTo(w * .82f, h * .6f); lineTo(w * .5f, h * .96f); lineTo(w * .18f, h * .6f); lineTo(w * .12f, h * .18f); close() }
@@ -222,11 +221,11 @@ private fun DrawScope.railIcon(kind: String, c: Color) {
     val unreadNotices = rememberNoticeBadge(alerts)
     var expanded by remember { mutableStateOf(initialExpanded ?: prefs.option("expanded", false)) }
     LaunchedEffect(toggle) { if (toggle > 0) { expanded = !expanded; prefs.put("expanded", expanded) } }
-    LaunchedEffect(state.connectionEpoch) { if (state.connected || state.demo) workspace.setLive(prefs.option("live", true), prefs.number("liveInterval", LIVE_INTERVAL_DEFAULT)) }
+    LaunchedEffect(state.connectionEpoch) { if (state.connected) workspace.setLive(prefs.option("live", true), prefs.number("liveInterval", LIVE_INTERVAL_DEFAULT)) }
     val reduce = LocalReduceMotion.current
     val motion = LocalMotion.current
     // Width and the active mark are movement: spatial springs, which snap under Reduce motion.
-    // Expanded labels are text: at large text sizes the rail widens a little (up to 30 %) instead of cutting "Bluetooth" to "Blueto…".
+    // Expanded labels are text: at large text sizes the rail widens a little (up to 30 %) instead of cutting "Activity" to "Activi…".
     val labelScale = LocalDensity.current.fontScale.coerceIn(1f, 1.3f)
     val width by animateDpAsState(if (expanded) 208.dp * labelScale else 60.dp, motion.spatial(MotionSpring.SpatialDefault))
     val pages = railPagesFor(LocalAppHost.current, alerts?.watcher != null)
@@ -234,8 +233,8 @@ private fun DrawScope.railIcon(kind: String, c: Color) {
     val offset by animateDpAsState(((index.coerceAtLeast(0)) * ITEM_HEIGHT + 8).dp, motion.spatial(MotionSpring.SpatialFast))
     val running = state.tasks.orEmpty().count { it.outcome == TaskOutcome.Running }
     val backoff = state.liveBackoffSeconds
-    val beacon = when { !state.connected && !state.demo -> Tech.Muted; backoff != null || state.stale -> Tech.Amber; state.demo -> Tech.Amber; state.live -> Tech.Green; else -> Tech.Muted }
-    val pulseOn = !reduce && state.live && backoff == null && (state.connected || state.demo) && LocalMotionPhase.current.active.value
+    val beacon = when { !state.connected -> Tech.Muted; backoff != null || state.stale -> Tech.Amber; state.live -> Tech.Green; else -> Tech.Muted }
+    val pulseOn = !reduce && state.live && backoff == null && state.connected && LocalMotionPhase.current.active.value
     val entries = if (pins != null && connectionKey != null) pins.list(connectionKey) else emptyList()
     var moreOpen by remember { mutableStateOf(false) }
     BoxWithConstraints(Modifier.width(width).fillMaxHeight().background(Tech.Panel).drawBehindRight()) {
@@ -388,8 +387,8 @@ internal fun pinRowKey(key: androidx.compose.ui.input.key.Key, alt: Boolean, shi
     val state by session.workspace.state.collectAsState()
     val label = sessionLabel(state, profile)
     val open = sessionOpen(state)
-    val status = when { !open -> if (state.error != null) "Not connected" else "Not connected yet"; state.liveBackoffSeconds != null -> "Retrying"; state.stale -> "Stale"; state.demo -> "Sample data"; state.live -> "Live"; else -> "Paused" }
-    val dot = when { !open -> Tech.Muted; state.liveBackoffSeconds != null || state.stale || state.demo -> Tech.Amber; state.live -> Tech.Green; else -> Tech.Muted }
+    val status = when { !open -> if (state.error != null) "Not connected" else "Not connected yet"; state.liveBackoffSeconds != null -> "Retrying"; state.stale -> "Stale"; state.live -> "Live"; else -> "Paused" }
+    val dot = when { !open -> Tech.Muted; state.liveBackoffSeconds != null || state.stale -> Tech.Amber; state.live -> Tech.Green; else -> Tech.Muted }
     val interaction = remember { MutableInteractionSource() }
     val hovered by interaction.collectIsHoveredAsState()
     val focused by interaction.collectIsFocusedAsState()
@@ -479,7 +478,7 @@ private fun DrawScope.pinGlyph(kind: String, c: Color) {
     val ago = syncedAgo(state.updatedAt, now)
     val backoff = state.liveBackoffSeconds
     val phase = LocalMotionPhase.current
-    val beaconText = when { !state.connected && !state.demo -> "Offline"; backoff != null -> "Retrying in ${backoff}s"; state.live -> "Live ${liveIntervalLabel(state.liveIntervalSeconds)} · $ago"; else -> "Paused · $ago" }
+    val beaconText = when { !state.connected -> "Offline"; backoff != null -> "Retrying in ${backoff}s"; state.live -> "Live ${liveIntervalLabel(state.liveIntervalSeconds)} · $ago"; else -> "Paused · $ago" }
     val beaconRow = @Composable {
         Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(start = 22.dp, end = 12.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             Canvas(Modifier.size(16.dp)) {
@@ -487,7 +486,7 @@ private fun DrawScope.pinGlyph(kind: String, c: Color) {
                 drawCircle(beacon, size.minDimension / 2, alpha = alpha); drawCircle(beacon, 3.dp.toPx())
             }
             if (expanded) Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text(if (state.demo) "Demonstration" else state.address.removePrefix("https://").ifBlank { "Not connected" }, Modifier.identity(), fontSize = 11.sp, lineHeight = 14.sp, fontFamily = Tech.Mono, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(state.address.removePrefix("https://").ifBlank { "Not connected" }, Modifier.identity(), fontSize = 11.sp, lineHeight = 14.sp, fontFamily = Tech.Mono, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(beaconText, fontSize = 10.sp, lineHeight = 13.sp, color = if (backoff != null) Tech.Amber else Tech.Muted, fontFamily = Tech.Mono, maxLines = 1)
             }
         }

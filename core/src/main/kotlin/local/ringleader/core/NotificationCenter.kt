@@ -55,7 +55,6 @@ fun interface NotificationSink { fun post(event: NotificationEvent): PostResult 
  * - Snooze: a snoozed event is still recorded; it only does not reach the OS.
  * - Storage: every change is saved before the call returns. A failed load or save never discards what is in memory
  *   and never overwrites a file that could not be read; it is reported in [NotificationCenterState.problem].
- * - Demo events are kept in memory only and never reach the OS.
  *
  * Thread-safe. Saving is small, synchronous file I/O: call from a background dispatcher, not from the UI thread, when
  * that matters. [native] and [posted] drop the oldest entry when nobody collects fast enough; neither replays.
@@ -72,8 +71,6 @@ class NotificationCenter(private val store: NotificationStore, private val now: 
     val posted: SharedFlow<AppNotification> = postedFlow.asSharedFlow()
     private var seen = ArrayDeque<String>()
     private var seenSet = HashSet<String>()
-    /** Demo identities never reach the file. */
-    private val demoSeen = HashSet<String>()
 
     /** Reads the file once. On failure the center works in memory, reports the problem and leaves the file alone. */
     fun load() = synchronized(lock) {
@@ -99,16 +96,16 @@ class NotificationCenter(private val store: NotificationStore, private val now: 
             if (!current.loaded) return PostResult.NotLoaded
             if (!current.preferences.master || !current.preferences.enabled(event.category)) return PostResult.Disabled
             val id = event.identity.id
-            if (id in seenSet || id in demoSeen) return PostResult.Duplicate
+            if (id in seenSet) return PostResult.Duplicate
             val at = now()
             notification = AppNotification(id, event.identity.subjectId, event.category, event.severity,
                 notificationText(event.title, NOTIFICATION_TITLE_MAX).ifBlank { event.category.genericTitle },
-                notificationText(event.body, NOTIFICATION_BODY_MAX), event.target, at, demo = event.demo)
-            if (event.demo) { if (demoSeen.size >= MAX_NOTIFICATION_SEEN) demoSeen.clear(); demoSeen += id } else remember(id)
+                notificationText(event.body, NOTIFICATION_BODY_MAX), event.target, at)
+            remember(id)
             val next = current.copy(items = (listOf(notification) + current.items).take(MAX_NOTIFICATIONS))
             mutable.value = next
-            if (!event.demo) persist()
-            val deliver = event.native && !event.demo && next.preferences.native && !next.snoozed(notification, at)
+            persist()
+            val deliver = event.native && next.preferences.native && !next.snoozed(notification, at)
             request = if (!deliver) null else presentNotification(notification, next.preferences.privacy).let {
                 NativeNotificationRequest(id, event.category, event.severity, it.title, it.body, next.preferences.privacy, event.target)
             }
@@ -124,14 +121,6 @@ class NotificationCenter(private val store: NotificationStore, private val now: 
     fun dismiss(id: String) = change { state -> state.copy(items = state.items.filter { it.id != id }) }
     /** Empties the history. Identities stay known. */
     fun clear() = change { state -> state.copy(items = emptyList()) }
-    /** Drops what Demo mode posted. Called when the demo session ends. */
-    fun dropDemo() = synchronized(lock) {
-        // Demo items were never on disk, so there is nothing to save.
-        demoSeen.clear()
-        val current = mutable.value
-        if (current.items.any { it.demo }) mutable.value = current.copy(items = current.items.filter { !it.demo })
-    }
-
     /** No OS notifications until [until]. Events are still recorded. A time in the past ends the snooze. */
     fun snoozeAll(until: Instant?) = change { state -> state.copy(snoozeAllUntil = until?.takeIf { it.isAfter(now()) }) }
 
@@ -151,7 +140,7 @@ class NotificationCenter(private val store: NotificationStore, private val now: 
     fun prepareNative(request: NativeNotificationRequest, showcase: Boolean = false): NativeNotificationRequest? = synchronized(lock) {
         val current = mutable.value
         val item = current.items.firstOrNull { it.id == request.id } ?: return@synchronized null
-        if (item.demo || !current.preferences.master || !current.preferences.native ||
+        if (!current.preferences.master || !current.preferences.native ||
             !current.preferences.enabled(item.category) || current.snoozed(item, now())) return@synchronized null
         val private = current.preferences.privacy || showcase
         val text = presentNotification(item, private)
@@ -195,7 +184,7 @@ class NotificationCenter(private val store: NotificationStore, private val now: 
             return false
         }
         return try {
-            store.save(NotificationDocument(state.preferences, state.snoozeAllUntil, state.snoozes, state.items.filter { !it.demo }, seen.toList()))
+            store.save(NotificationDocument(state.preferences, state.snoozeAllUntil, state.snoozes, state.items, seen.toList()))
             mutable.value = state.copy(problem = null, unreadable = false, readOnly = false, unsaved = false)
             true
         } catch (e: GuardedStoreException) {

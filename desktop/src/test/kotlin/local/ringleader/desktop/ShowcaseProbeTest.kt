@@ -24,7 +24,7 @@ class ShowcaseProbeTest {
         if (System.getenv("RINGMASTER_PROBE") != "1") return
         val dir = File(System.getenv("RINGMASTER_PROBE_DIR") ?: return).apply { mkdirs() }
         val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
-        val workspace = Workspace(scope); workspace.exploreDemo()
+        val workspace = sampleWorkspace(scope)
         val desk = ProfileDesk(workspace, ProfileStore(Files.createTempDirectory("rm").resolve("p.json")))
         val hit = ScanHit("192.168.50.21", 8006, true, ScanKind.PVE, "Proxmox VE", "AB:CD")
         val showcase = System.getenv("PROBE_SHOWCASE") != "0"

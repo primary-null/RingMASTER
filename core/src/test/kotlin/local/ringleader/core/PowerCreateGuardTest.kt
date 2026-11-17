@@ -14,7 +14,7 @@ import kotlin.test.assertTrue
  */
 class PowerCreateGuardTest {
     private val guests = listOf("running", "stopped", "paused", "suspended").flatMap { status ->
-        listOf("VM", "Container").map { kind -> Guest(DEMO_REMOTE_KEY, 120, "guest", "node-a", kind, status) }
+        listOf("VM", "Container").map { kind -> Guest(SAMPLE_ADDRESS, 120, "guest", "node-a", kind, status) }
     }
 
     @Test fun createNeverMatchesAGuest() {
@@ -24,7 +24,7 @@ class PowerCreateGuardTest {
 
     @Test fun createCannotBeConfirmedAsAPowerAction() {
         val error = assertFailsWith<IllegalArgumentException> {
-            PowerConfirmation(1, DEMO_REMOTE_KEY, "Demonstration", "Demo", ResourceId(DEMO_REMOTE_KEY, "", "VM", 120), "node-a", "guest", "VM", PowerAction.Create, "stopped", false)
+            PowerConfirmation(1, SAMPLE_ADDRESS, "Demonstration", "Demo", ResourceId(SAMPLE_ADDRESS, "", "VM", 120), "node-a", "guest", "VM", PowerAction.Create, "stopped", false)
         }
         assertEquals(CREATE_NOT_POWER_ACTION, error.message)
     }
@@ -44,7 +44,7 @@ class PowerCreateGuardTest {
     }
 
     @Test fun aCreateSubmissionIsRecordedAndBlocksUntilResolvedByCheck() {
-        val unknown = PowerSubmission("local-1", DEMO_REMOTE_KEY, "node-a", 105, "VM", "web-1", PowerAction.Create, PowerPhase.Unknown, "Unknown.", false, false)
+        val unknown = PowerSubmission("local-1", SAMPLE_ADDRESS, "node-a", 105, "VM", "web-1", PowerAction.Create, PowerPhase.Unknown, "Unknown.", checkable = false)
         assertTrue(isCreateSubmission(unknown))
         assertEquals(unknown, unresolvedSubmission(WorkspaceState(submissions = listOf(unknown))))
         assertNull(unresolvedSubmission(WorkspaceState(submissions = listOf(unknown.copy(resolvedByCheck = true)))))

@@ -1,5 +1,6 @@
 package local.ringleader.desktop
 
+import local.ringleader.core.sampleWorkspace
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -23,7 +24,7 @@ import kotlinx.coroutines.Delay
 import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import local.ringleader.core.DEMO_REMOTE_KEY
+import local.ringleader.core.SAMPLE_ADDRESS
 import local.ringleader.core.PDM_KIND
 import local.ringleader.core.PERMISSIONS_DENIED
 import local.ringleader.core.PermissionsView
@@ -33,7 +34,7 @@ import local.ringleader.core.StorageContentView
 import local.ringleader.core.StorageKey
 import local.ringleader.core.Workspace
 import local.ringleader.core.WorkspaceState
-import local.ringleader.core.demoStorageContent
+import local.ringleader.core.sampleStorageContent
 
 /**
  * Opt-in render of the 0.21.4 read-only panels with demo data: RINGMASTER_PROBE=1 RINGMASTER_PROBE_DIR=<dir>.
@@ -74,9 +75,9 @@ class ReadOnlyPanelsProbeTest {
         if (System.getenv("RINGMASTER_PROBE") != "1") return
         val dir = File(System.getenv("RINGMASTER_PROBE_DIR") ?: return).apply { mkdirs() }
         val scope = CoroutineScope(FrozenTime + SupervisorJob())
-        val workspace = Workspace(scope)
+        val workspace = sampleWorkspace(scope)
         try {
-            workspace.exploreDemo(); workspace.setLive(false)
+            workspace.setLive(false)
             workspace.loadPermissions()
             workspace.loadNodeServices("demo-node-a")
             workspace.loadNodeUpdates("demo-node-a")
@@ -108,14 +109,14 @@ class ReadOnlyPanelsProbeTest {
             shot(dir, "node-log-denied", 380, 330) { Box(Modifier.width(348.dp)) { NodeSyslogPanel(refusedLog, workspace, "demo-node-a", height = 120.dp) } }
 
             // Storage: a richer inventory than the demo's, so every content type, the PBS verification marks and "no usage recorded" show.
-            val local = RecordedStorage(DEMO_REMOTE_KEY, "demo-node-a", "local", false, 34 * gib, 100 * gib, "available", "dir", "iso,vztmpl,backup,snippets,import")
-            val pbs = RecordedStorage(DEMO_REMOTE_KEY, "demo-node-a", "pbs-main", true, 410 * gib, 1000 * gib, "available", "pbs", "backup")
-            val remoteLocal = RecordedStorage(DEMO_REMOTE_KEY, "demo-node-b", "local", false, null, null, "unknown", "dir", "iso,vztmpl,backup,snippets")
+            val local = RecordedStorage(SAMPLE_ADDRESS, "demo-node-a", "local", false, 34 * gib, 100 * gib, "available", "dir", "iso,vztmpl,backup,snippets,import")
+            val pbs = RecordedStorage(SAMPLE_ADDRESS, "demo-node-a", "pbs-main", true, 410 * gib, 1000 * gib, "available", "pbs", "backup")
+            val remoteLocal = RecordedStorage(SAMPLE_ADDRESS, "demo-node-b", "local", false, null, null, "unknown", "dir", "iso,vztmpl,backup,snippets")
             val overview = demo.overview!!.copy(storage = demo.overview!!.storage + listOf(local, pbs, remoteLocal))
             fun storageState(row: RecordedStorage): WorkspaceState {
                 val key = StorageKey(row.remote, row.node, row.id)
                 return demo.copy(overview = overview, storageSelection = key,
-                    storageContent = ReadSection.loaded(StorageContentView(key, null, demoStorageContent(row)), at, sample = true))
+                    storageContent = ReadSection.loaded(StorageContentView(key, null, sampleStorageContent(row)), at))
             }
             val images = overview.storage.first { it.id == "local-lvm" }
             shot(dir, "storage-local", 1280, 760) { StoragePage(storageState(local), workspace) }

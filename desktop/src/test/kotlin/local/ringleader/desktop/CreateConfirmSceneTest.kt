@@ -11,10 +11,10 @@ import kotlin.test.*
 
 class CreateConfirmSceneTest {
     @Test fun confirmationUsesOnlySecretState() = runSceneTest {
-        val confirmation = CreateConfirmation(1,DEMO_REMOTE_KEY,"https://example.invalid","Sample connection",
+        val confirmation = CreateConfirmation(1,SAMPLE_ADDRESS,"https://example.invalid","Sample connection",
             CreateRequest(NewGuestKind.Container,"node-a",140,"sample-ct",listOf(CreateParam("vmid",CreateValue.Int(140)))), SecretState(true,2))
         val scene = ImageComposeScene(960,640,coroutineContext=coroutineContext) {
-            MaterialTheme(colorScheme=ringColors) { CreateConfirmDialog(confirmation,emptyList(),true,{},{}) }
+            MaterialTheme(colorScheme=ringColors) { CreateConfirmDialog(confirmation,emptyList(),{},{}) }
         }
         try {
             repeat(5) { scene.render((it+1)*16_000_000L).close(); yield() }
@@ -24,7 +24,7 @@ class CreateConfirmSceneTest {
             val text = texts.joinToString(" ")
             assertTrue(text.contains("Root password: set")); assertTrue(text.contains("SSH keys: 2"))
             assertTrue(text.contains("example.invalid")); assertTrue(text.contains("sample-ct"))
-            assertTrue(text.contains("SIMULATE CREATE"))
+            assertTrue("CREATE" in texts, "the confirming button says Create")
         } finally { scene.close() }
     }
 }

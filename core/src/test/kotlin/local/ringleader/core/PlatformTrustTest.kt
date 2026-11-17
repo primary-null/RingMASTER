@@ -144,7 +144,7 @@ class PlatformTrustTest {
         val overview = Overview(1, listOf(Guest("https://pve.example.test:8006", 100, "alpha", "node-a", "VM", "running")))
         val gateway = object : InventoryGateway {
             override suspend fun overview(connection: Connection) = overview
-            override suspend fun details(connection: Connection, guest: Guest) = demoDetails(guest)
+            override suspend fun details(connection: Connection, guest: Guest) = sampleDetails(guest)
         }
         val workspace = Workspace(this, gateway, trustSource = { TrustSource.ThisComputer })
         workspace.connect(Connection("https://pve.example.test:8006", "root@pam!read", "secret", ""))
@@ -155,8 +155,6 @@ class PlatformTrustTest {
         runCurrent()
         assertNull(workspace.state.value.tlsTrust, "a pinned connection consults no store")
         assertEquals("Certificate pin", connectionTrustLabel(workspace.state.value))
-        workspace.exploreDemo()
-        assertNull(connectionTrustLabel(workspace.state.value))
         workspace.close()
         val public = Workspace(this, gateway, trustSource = { TrustSource.JavaRoots })
         public.connect(Connection("https://pve.example.test:8006", "root@pam!read", "secret", ""))

@@ -80,7 +80,7 @@ class TaskLogFollowWorkspaceTest {
 
     private class QuietInventory : InventoryGateway {
         override suspend fun overview(connection: Connection) = Overview(0, emptyList())
-        override suspend fun details(connection: Connection, guest: Guest) = demoDetails(guest)
+        override suspend fun details(connection: Connection, guest: Guest) = sampleDetails(guest)
     }
 
     private class ScriptedLog : TaskLogGateway {

@@ -176,7 +176,6 @@ class ManualCertificateCheckTest {
                 ui.until("the note about a private certificate") { ui.has(refusedNote) }
                 assertFalse(ui.has("Connect with normal TLS"))
                 assertTrue(ui.has("Trust and connect"))
-                assertTrue(ui.has("Explore demo"))
                 // One muted 12 sp line, between the fingerprint and the buttons.
                 val note = ui.nodes().first { it.withText(refusedNote) }
                 assertEquals(12.sp, note.drawnStyle().fontSize)

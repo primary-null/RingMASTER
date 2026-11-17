@@ -580,7 +580,7 @@ internal const val DIALOG_MORE_TAG = "dialog-more-below"
 
 /**
  * "Web UI" toolbar action: opens [url] (a Proxmox web page) in the system browser. Hidden when there is no link
- * (demo, PDM), in browser mode, or when the desktop has no browser; a failed launch says so in the tooltip.
+ * (PDM), in browser mode, or when the desktop has no browser; a failed launch says so in the tooltip.
  */
 @Composable fun WebUiAction(url: String?) {
     if (url == null || LocalAppHost.current.web) return

@@ -11,7 +11,7 @@ import kotlin.test.assertTrue
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import local.ringleader.core.ConnectionProfile
-import local.ringleader.core.DEMO_REMOTE_KEY
+import local.ringleader.core.SAMPLE_ADDRESS
 import local.ringleader.core.NotificationCategory
 import local.ringleader.core.NotificationEvent
 import local.ringleader.core.NotificationIdentity
@@ -41,33 +41,34 @@ class AlertsAdapterTest {
     private val source = AlertsSource(center, watcher, CoroutineScope(Dispatchers.Unconfined),
         NativeDeliveryView(available = true, enabled = true), keepWatchingInBackground = false, onKeepWatchingInBackground = { keep += it },
         onProblem = { problems += it }, clock = { now })
-    private val demo = WatchScope.Demo
+    /** A connection made by hand: no saved profile, so the window calls it "Manual connection". */
+    private val scope = WatchScope.of(null, local.ringleader.core.DIRECT_PVE_KIND, SAMPLE_ADDRESS, "tester@pve!sample", null)
     private val names = ConnectionNames(listOf(ConnectionProfile("11111111-1111-1111-1111-111111111111", "Lab cluster", local.ringleader.core.DIRECT_PVE_KIND, "https://pve.example.test:8006", "u@pve!t", null)))
 
     private fun post(subject: String, title: String, target: NotificationTarget, severity: NotificationSeverity = NotificationSeverity.Warning,
                      category: NotificationCategory = NotificationCategory.WatchState): PostResult =
-        center.post(NotificationEvent(NotificationIdentity("watch", demo.binding, subject, "1"), category, severity, title, "On demo-node-a", target))
+        center.post(NotificationEvent(NotificationIdentity("watch", scope.binding, subject, "1"), category, severity, title, "On demo-node-a", target))
 
     @Test fun notificationsMapWithGenericHeadlinesAndRouteOnlyInTheConnectionInView() {
         center.load()
-        val guest = NotificationTarget.Resource(null, demo.binding, WatchResource(CoreKind.VM, vmid = 120))
+        val guest = NotificationTarget.Resource(null, scope.binding, WatchResource(CoreKind.VM, vmid = 120))
         assertEquals(PostResult.Posted, post("VM/120", "debian-workbench (120) stopped", guest, NotificationSeverity.Error))
         val state = center.state.value
-        val view = notificationCenterViewOf(state, names, demo, now)
+        val view = notificationCenterViewOf(state, names, scope, now)
         val n = view.items.single()
         assertEquals(NoticeSeverity.Critical, n.severity)
         assertEquals(NotificationCategory.WatchState.genericTitle, n.headline, "the bold line is the generic wording")
         assertTrue(n.detail!!.contains("debian-workbench"), "RingMASTER's own title is the identifying detail")
-        assertEquals("Demonstration", n.sourceLabel)
-        assertEquals(NoticeRoute.Guest(ResourceId(DEMO_REMOTE_KEY, "", "VM", 120)), n.target!!.route)
-        assertTrue(noticeTargetOpenable(n.target, { true }, demo.binding))
+        assertEquals("Manual connection", n.sourceLabel)
+        assertEquals(NoticeRoute.Guest(ResourceId(SAMPLE_ADDRESS, "", "VM", 120)), n.target!!.route)
+        assertTrue(noticeTargetOpenable(n.target, { true }, scope.binding))
         // Seen from another connection the same notice cannot route.
         val elsewhere = notificationCenterViewOf(state, names, null, now).items.single()
         assertEquals(NoticeRoute.None, elsewhere.target!!.route)
         assertFalse(noticeTargetOpenable(elsewhere.target, { true }, null))
         // Privacy comes from the engine's preference and drops the detail.
         center.setPreferences { it.copy(privacy = true) }
-        val private = notificationCenterViewOf(center.state.value, names, demo, now)
+        val private = notificationCenterViewOf(center.state.value, names, scope, now)
         assertTrue(private.privacy)
         assertNull(noticeText(private.items.single(), private.privacy).detail)
     }
@@ -81,13 +82,13 @@ class AlertsAdapterTest {
         actions.onMarkRead!!(setOf(ids[0]))
         assertTrue(center.state.value.items.first { it.id == ids[0] }.read)
         actions.onSnooze!!(ids[1], Duration.ofHours(1))
-        val view = notificationCenterViewOf(center.state.value, names, demo, now)
+        val view = notificationCenterViewOf(center.state.value, names, scope, now)
         assertEquals(now.plusSeconds(3600), view.items.first { it.id == ids[1] }.snoozedUntil)
         assertEquals(1, unreadNoticeCount(view.items, now), "the snoozed one is still unread and listed")
         actions.onUnsnooze!!(ids[1])
-        assertNull(notificationCenterViewOf(center.state.value, names, demo, now).items.first { it.id == ids[1] }.snoozedUntil)
+        assertNull(notificationCenterViewOf(center.state.value, names, scope, now).items.first { it.id == ids[1] }.snoozedUntil)
         actions.onSnoozeAll!!(Duration.ofHours(4))
-        assertEquals(now.plusSeconds(4 * 3600), notificationCenterViewOf(center.state.value, names, demo, now).snoozeAllUntil)
+        assertEquals(now.plusSeconds(4 * 3600), notificationCenterViewOf(center.state.value, names, scope, now).snoozeAllUntil)
         actions.onSnoozeAll!!(null)
         assertNull(center.state.value.snoozeAllUntil)
         actions.onDismiss!!(ids[0])
@@ -118,13 +119,13 @@ class AlertsAdapterTest {
 
     @Test fun watchToggleAndWatcherPageMapTheRealWatcher() {
         center.load(); watcher.load()
-        val actions = watcherActionsOf(source) { demo }
-        actions.onWatchGuest!!(ResourceId(DEMO_REMOTE_KEY, "", "VM", 120), "debian-workbench", true)
+        val actions = watcherActionsOf(source) { scope }
+        actions.onWatchGuest!!(ResourceId(SAMPLE_ADDRESS, "", "VM", 120), "debian-workbench", true)
         actions.onWatchGuest!!(ResourceId("https://other.example.test:8006", "", "VM", 121), "elsewhere", true)
         actions.onWatchNode!!("demo-node-a", true)
-        val view = watcherViewOf(watcher.state.value, center.state.value, names, demo, now)
+        val view = watcherViewOf(watcher.state.value, center.state.value, names, scope, now)
         assertEquals(2, view.targets.size, "a guest of another connection is never watched from this one")
-        assertEquals(setOf(ResourceId(DEMO_REMOTE_KEY, "", "VM", 120)), view.watchedGuests)
+        assertEquals(setOf(ResourceId(SAMPLE_ADDRESS, "", "VM", 120)), view.watchedGuests)
         assertEquals(setOf("demo-node-a"), view.watchedNodes)
         val guest = view.targets.first { it.kind == WatchTargetKind.Guest }
         assertEquals("debian-workbench", guest.name); assertEquals("VM", guest.guestKind); assertEquals(120, guest.vmid)
@@ -137,7 +138,7 @@ class AlertsAdapterTest {
         actions.onUnwatch!!(guest.key)
         actions.onWatchNode!!("demo-node-a", false)
         assertTrue(watcher.state.value.watched.isEmpty())
-        assertEquals(WatcherActivity.Off, watcherViewOf(watcher.state.value, null, names, demo, now).activity)
+        assertEquals(WatcherActivity.Off, watcherViewOf(watcher.state.value, null, names, scope, now).activity)
         assertTrue(problems.isEmpty(), "no refusals: $problems")
     }
 
@@ -145,9 +146,9 @@ class AlertsAdapterTest {
         assertEquals("Lab cluster", names.label("11111111-1111-1111-1111-111111111111", "b".repeat(64)))
         assertEquals("Removed profile", names.label("22222222-2222-2222-2222-222222222222", "b".repeat(64)))
         assertEquals("Manual connection", names.label(null, "b".repeat(64)))
-        assertEquals("Demonstration", names.label(null, demo.binding))
+        assertEquals("Manual connection", names.label(null, scope.binding))
         assertEquals("RingMASTER", names.label(null, null))
-        assertEquals(WatchResource(CoreKind.Container, vmid = 7), watchResourceOfId(ResourceId(DEMO_REMOTE_KEY, "", "Container", 7)))
-        assertNull(watchResourceOfId(ResourceId(DEMO_REMOTE_KEY, "", "Other", 7)))
+        assertEquals(WatchResource(CoreKind.Container, vmid = 7), watchResourceOfId(ResourceId(SAMPLE_ADDRESS, "", "Container", 7)))
+        assertNull(watchResourceOfId(ResourceId(SAMPLE_ADDRESS, "", "Other", 7)))
     }
 }

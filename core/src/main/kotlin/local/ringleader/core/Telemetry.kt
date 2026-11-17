@@ -20,11 +20,9 @@ const val LIVE_TASK_INTERVAL_SECONDS = 10
  * Within this window an unchanged pair of counters keeps the last rate instead of reporting zero.
  */
 internal const val NET_COUNTER_HOLD_SECONDS = 25.0
-internal const val LIVE_DEMO_SEED = 14L
 
 private const val TAG_MAX_COUNT = 16
 private const val TAG_MAX_CHARS = 40
-private const val DEMO_GIB = 1024L * 1024 * 1024
 
 /**
  * One fleet sample. Network fields are bytes per second, not counters. Newest samples stay at the end of a [Series].
@@ -267,86 +265,4 @@ internal fun parseResourceTags(value: JsonElement?): List<String> {
     val primitive = value as? JsonPrimitive ?: return emptyList()
     if (!primitive.isString) return emptyList()
     return parseResourceTags(primitive.contentOrNull)
-}
-
-/**
- * One seeded step of the demo inventory. CPU stays inside 0..1, memory stays inside 0..max,
- * and network counters only increase. A guest that is not running contributes no CPU or memory.
- */
-internal fun stepDemoOverview(overview: Overview, random: Random): Overview {
-    val guests = overview.guests.map { guest ->
-        if (guest.status != "running") {
-            guest.copy(metrics = GuestListMetrics(
-                cpuFraction = null,
-                maxCpu = guest.metrics?.maxCpu,
-                memoryBytes = null,
-                memoryLimitBytes = guest.metrics?.memoryLimitBytes,
-                diskBytes = guest.metrics?.diskBytes,
-                diskLimitBytes = guest.metrics?.diskLimitBytes,
-                uptimeSeconds = guest.metrics?.uptimeSeconds,
-                netIn = null,
-                netOut = null,
-            ))
-        } else {
-            val base = demoRunningMetrics(guest)
-            val maxMem = base.memoryLimitBytes?.takeIf { it > 0L } ?: (8L * DEMO_GIB)
-            // Each demo guest has its own load profile: drift back toward a per-VMID target, noise, rare spikes.
-            val target = demoCpuTarget(guest.id)
-            val previous = base.cpuFraction ?: target
-            val spike = if (random.nextDouble() < 0.06) random.nextDouble(0.15, 0.4) else 0.0
-            val cpu = (previous + (target - previous) * 0.25 + (random.nextDouble() - 0.5) * 0.09 + spike).coerceIn(0.005, 0.98)
-            val swing = (maxMem / 40L).coerceAtLeast(1L)
-            val memTarget = (maxMem * demoMemTarget(guest.id)).toLong()
-            val memPrev = base.memoryBytes ?: memTarget
-            val mem = (memPrev + (memTarget - memPrev) / 5 + random.nextLong(-swing, swing + 1)).coerceIn(0L, maxMem)
-            val netIn = (base.netIn ?: (10L * 1024 * 1024)) + random.nextLong(1L, 65_537L)
-            val netOut = (base.netOut ?: (4L * 1024 * 1024)) + random.nextLong(1L, 32_769L)
-            val uptime = (base.uptimeSeconds ?: (3_600L * (6 + guest.id % 90))) + LIVE_INTERVAL_DEFAULT
-            guest.copy(metrics = base.copy(cpuFraction = cpu, memoryBytes = mem, memoryLimitBytes = maxMem, netIn = netIn, netOut = netOut, uptimeSeconds = uptime))
-        }
-    }
-    val members = overview.members.map { member ->
-        val cpu = member.cpuFraction?.takeIf { it.isFinite() }?.let { (it + (random.nextDouble() - 0.5) * 0.08).coerceIn(0.0, 1.0) }
-        val maxMem = member.maxMemoryBytes
-        val used = member.memoryBytes
-        val memory = if (used != null && maxMem != null && maxMem > 0L) {
-            val swing = (maxMem / 20L).coerceAtLeast(1L)
-            (used + random.nextLong(-swing, swing + 1)).coerceIn(0L, maxMem)
-        } else {
-            used
-        }
-        member.copy(cpuFraction = cpu, memoryBytes = memory)
-    }
-    return overview.copy(guests = guests, members = members)
-}
-
-/** Stable per-guest demo load: 3%..68% CPU, 22%..78% memory, from the VMID. */
-internal fun demoCpuTarget(vmid: Int): Double = 0.03 + ((vmid.toLong() * 2654435761L).mod(1000L)) / 1000.0 * 0.65
-internal fun demoMemTarget(vmid: Int): Double = 0.22 + ((vmid.toLong() * 40503L).mod(1000L)) / 1000.0 * 0.56
-
-private fun demoRunningMetrics(guest: Guest): GuestListMetrics {
-    val existing = guest.metrics
-    return GuestListMetrics(
-        cpuFraction = existing?.cpuFraction?.takeIf { it.isFinite() && it >= 0.0 } ?: demoCpuTarget(guest.id),
-        maxCpu = existing?.maxCpu ?: 4.0,
-        memoryBytes = existing?.memoryBytes ?: (2L * DEMO_GIB),
-        memoryLimitBytes = existing?.memoryLimitBytes?.takeIf { it > 0L } ?: (8L * DEMO_GIB),
-        diskBytes = existing?.diskBytes,
-        diskLimitBytes = existing?.diskLimitBytes,
-        uptimeSeconds = existing?.uptimeSeconds,
-        netIn = existing?.netIn ?: (10L * 1024 * 1024),
-        netOut = existing?.netOut ?: (4L * 1024 * 1024),
-    )
-}
-
-internal fun demoLiveDetails(guest: Guest): GuestDetails {
-    val metrics = guest.metrics ?: return demoDetails(guest)
-    val maxCpu = metrics.maxCpu
-    val cpus = maxCpu?.takeIf { it.isFinite() && it >= 1.0 && it <= Int.MAX_VALUE.toDouble() && it % 1.0 == 0.0 }?.toInt()
-    return GuestDetails(
-        guest, guest.status, cpus, metrics.cpuFraction,
-        metrics.memoryBytes, metrics.memoryLimitBytes?.takeIf { it > 0L },
-        if (guest.kind == "Container") metrics.diskBytes else null, metrics.diskLimitBytes?.takeIf { it > 0L },
-        metrics.uptimeSeconds, metrics.netIn, metrics.netOut,
-    )
 }

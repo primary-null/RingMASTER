@@ -120,6 +120,18 @@ val buildNotifyHelper by tasks.registering {
 }
 tasks.matching { it.name == "prepareAppResources" }.configureEach { dependsOn(buildNotifyHelper) }
 
+// RingMASTER Engine bundles (native/ringmaster-engine), built by the release workflow's engine job. A release build is
+// given that job's folder in RINGMASTER_ENGINE_BUNDLES and packs its bundles and SHA256SUMS into the app. Any other build
+// packs none, so a bundle built on a developer's computer is never shipped as if it were a release file.
+val engineBundles = layout.projectDirectory.dir("resources/common/ringmaster-engine")
+val stageEngineBundles by tasks.registering(Sync::class) {
+    val source = System.getenv("RINGMASTER_ENGINE_BUNDLES")
+    onlyIf("RINGMASTER_ENGINE_BUNDLES names the release workflow's bundles") { source != null }
+    from(source ?: "engine-bundles-not-given") { include("ringmaster-engine-*-linux-*.tar.gz", "*SHA256SUMS") }
+    into(engineBundles)
+}
+tasks.matching { it.name == "prepareAppResources" }.configureEach { dependsOn(stageEngineBundles) }
+
 compose.desktop {
     application {
         mainClass = "local.ringleader.desktop.MainKt"

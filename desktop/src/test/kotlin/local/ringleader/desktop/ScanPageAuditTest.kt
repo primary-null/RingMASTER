@@ -122,7 +122,7 @@ class ScanPageAuditTest {
     private suspend fun renderAll(dir: File) {
         val context = currentCoroutineContext()
         val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
-        val workspace = Workspace(scope).also { it.exploreDemo() }
+        val workspace = sampleWorkspace(scope)
         delay(300)
         val state = workspace.state.value
         val all = cases(scope)

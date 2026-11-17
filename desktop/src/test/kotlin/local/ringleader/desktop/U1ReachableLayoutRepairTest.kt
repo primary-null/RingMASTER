@@ -264,7 +264,7 @@ class U1ReachableLayoutRepairTest {
 
     @Test fun createVmShowsAGeneralFieldInTheReachableLaptopFrame() = withLab { e, _ ->
         // create/create-vm/dark-ui200/laptop-1366x728
-        val s = e.lab.state(demo = true).copy(creation = demoCreateSession(NewGuestKind.Vm, "pve-east", 1, e.lab.now), connectionEpoch = 1)
+        val s = e.lab.state().copy(creation = sampleCreateSession(NewGuestKind.Vm, "pve-east", 1, e.lab.now), connectionEpoch = 1)
         for (scale in listOf(1f, 1.5f)) {
         val (scene, driver) = scene(1366, 728, 2f, scale) {
             MatrixWindow("Fleet", s, e.idle, e, false) { CreateGuestHost(s, e.idle, "Demonstration", {}, onViewLog = {}) }
@@ -273,7 +273,6 @@ class U1ReachableLayoutRepairTest {
             assertVisible(scene, text(scene, "NODE"), 1366, 728, "first General field label")
             assertVisible(scene, text(scene, "pve-east"), 1366, 728, "first General selection")
             for (action in listOf("Next", "Cancel", "Create VM 140…")) assertVisible(scene, text(scene, action), 1366, 728, action)
-            assertVisible(scene, text(scene, DEMO_CREATE_SUBTITLE), 1366, 728, "demo note")
             driver.activateRequired(scene, "wizard options", "Options")
             assertVisible(scene, text(scene, "Show advanced"), 1366, 728)
             assertVisible(scene, text(scene, "Show parameters"), 1366, 728)
@@ -286,7 +285,7 @@ class U1ReachableLayoutRepairTest {
     // ---- Part C overlaps -------------------------------------------------------------------------------------------
 
     @Test fun containerGeneralFieldsPrecedeRepeatedErrorSummary() = withLab { e, _ ->
-        val s = e.lab.state(demo = true).copy(creation = demoCreateSession(NewGuestKind.Container, "pve-east", 1, e.lab.now), connectionEpoch = 1)
+        val s = e.lab.state().copy(creation = sampleCreateSession(NewGuestKind.Container, "pve-east", 1, e.lab.now), connectionEpoch = 1)
         val (scene, _) = scene(1366, 728, 2f, 1.5f) {
             MatrixWindow("Fleet", s, e.idle, e, false) { CreateGuestHost(s, e.idle, "Demonstration", {}, onViewLog = {}) }
         }

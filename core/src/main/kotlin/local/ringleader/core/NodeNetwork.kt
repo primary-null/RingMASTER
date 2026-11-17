@@ -96,14 +96,3 @@ fun nodeNetworkPath(node: String): String {
     val name = pveNodeNameOrNull(node) ?: throw IllegalArgumentException("The node name cannot be requested.")
     return "/api2/json/nodes/${encodePathSegment(name)}/network"
 }
-
-/** Demo data for the network panel. */
-val demoNodeNetwork: List<NodeInterface> = parseNodeNetwork("""{"data":[
- {"iface":"vmbr0","type":"bridge","active":1,"autostart":1,"cidr":"192.168.50.10/24","gateway":"192.168.50.1","bridge_ports":"bond0","bridge_vlan_aware":1,"comments":"LAN"},
- {"iface":"vmbr1","type":"bridge","active":1,"autostart":1,"bridge_ports":"none","comments":"Isolated lab"},
- {"iface":"bond0","type":"bond","active":1,"autostart":1,"slaves":"enp1s0 enp2s0","bond_mode":"802.3ad","mtu":9000},
- {"iface":"vmbr0.20","type":"vlan","active":1,"autostart":1,"cidr":"10.20.0.10/24","vlan-raw-device":"vmbr0"},
- {"iface":"enp1s0","type":"eth","active":1,"autostart":0},
- {"iface":"enp2s0","type":"eth","active":1,"autostart":0},
- {"iface":"wlp3s0","type":"eth","active":0,"autostart":0}
-]}""")

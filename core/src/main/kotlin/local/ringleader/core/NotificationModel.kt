@@ -36,7 +36,7 @@ internal val notificationIdPattern = Regex("[0-9a-f]{32}")
 
 /**
  * Deterministic identity of one event. [source] is the producer ("watch", "task", "schedule"), [scope] the connection
- * binding digest (or "demo" / "local"), [subject] the thing (a resource, a UPID, a plan) and [occurrence] what tells one
+ * binding digest (or "local"), [subject] the thing (a resource, a UPID, a plan) and [occurrence] what tells one
  * event about that thing from the next (a revision and due time, an outcome, an onset time).
  * The same four values always give the same [id], so a repeated snapshot can never post twice.
  */
@@ -62,7 +62,7 @@ sealed interface NotificationTarget {
     data class Task(val profileId: String?, val binding: String, val upid: String) : NotificationTarget {
         init {
             requireTargetScope(profileId, binding)
-            require(parseServerUpid(upid) != null || (binding == DEMO_WATCH_BINDING && upid.startsWith("demo:") && upid.length <= 200 && upid.none { it.isWhitespace() || it.isISOControl() })) { "The notification task is not usable." }
+            require(parseServerUpid(upid) != null) { "The notification task is not usable." }
         }
     }
     data class ScheduleRun(val planId: String, val runId: String) : NotificationTarget {
@@ -80,7 +80,7 @@ internal fun isCanonicalUuid(value: String): Boolean = runCatching { java.util.U
 /**
  * One stored notification. [title] and [body] are built by RingMASTER from validated fields (names, IDs, node names,
  * fixed outcome words) and bounded by [notificationText]; a server error text, a task log or an exception message is
- * never part of them. [demo] notifications come from Demo mode: they are never saved and never reach the OS.
+ * never part of them.
  */
 data class AppNotification(
     val id: String,
@@ -92,7 +92,6 @@ data class AppNotification(
     val target: NotificationTarget,
     val createdAt: Instant,
     val read: Boolean = false,
-    val demo: Boolean = false,
 ) {
     init {
         require(id.matches(notificationIdPattern) && subjectId.matches(notificationIdPattern)) { "The notification identity is not usable." }
@@ -109,7 +108,6 @@ data class NotificationEvent(
     val title: String,
     val body: String,
     val target: NotificationTarget = NotificationTarget.None,
-    val demo: Boolean = false,
     val native: Boolean = true,
 )
 

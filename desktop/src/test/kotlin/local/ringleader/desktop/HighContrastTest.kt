@@ -2,6 +2,7 @@
 @file:OptIn(androidx.compose.ui.InternalComposeUiApi::class, androidx.compose.ui.ExperimentalComposeUiApi::class)
 package local.ringleader.desktop
 
+import local.ringleader.core.sampleWorkspace
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -183,9 +184,8 @@ class HighContrastTest {
     /** Fleet with the demo data and the Appearance settings, drawn in each kind of high contrast. RINGMASTER_CONTRAST_SHOTS saves the pictures. */
     @Test fun screensDrawOnTheContrastGround() = runSceneTest {
         val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
-        val workspace = Workspace(scope)
+        val workspace = sampleWorkspace(scope)
         try {
-            workspace.exploreDemo()
             delay(800)
             val state = workspace.state.value
             val looks = listOf<Pair<String, () -> Unit>>(

@@ -170,7 +170,7 @@ class GuestInspectionTest {
     }
 
     @Test fun anEmptyRefreshKeepsSectionsThatHaveNotArrived() {
-        val previous = demoInspection(vm, "hour")
+        val previous = sampleInspection(vm, "hour")
         val partial = previous.copy(snapshots = InspectionSection(), backups = InspectionSection(), addresses = InspectionSection())
         val merged = mergeGuestInspection(previous, partial)
         assertEquals("baseline", merged.snapshots.value!!.first().name)

@@ -378,15 +378,3 @@ class LiveGuestInspectionGateway(private val client: PveClient = PveClient()): G
         catch (e: GuestPermissionException) { InspectionSection(error = "Not permitted for this token") }
         catch (e: Exception) { InspectionSection(error = e.message ?: "Unavailable") }
 }
-fun demoInspection(guest: Guest, timeframe: String) = GuestInspection(guest.resource,guest.node,timeframe,
-    InspectionSection(parseHardware("""{"data":{"cores":2,"memory":2048,"ostype":"l26","agent":"1","scsi0":"sample:vm-120-disk-0,size=16G","net0":"virtio=02:00:00:00:00:01,bridge=vmbr0,tag=10,firewall=1","description":"Sample notes","onboot":1,"tags":"demo"}}""")),
-    InspectionSection(listOf(GuestSnapshot("baseline",null,1794000000,"Sample snapshot",false,false),GuestSnapshot("current","baseline",null,"Current sample state",false,true))),
-    InspectionSection(listOf(GuestBackup("sample:backup/example","sample",1794000000,104857600,"Sample backup",true))),
-    InspectionSection((0..59).map { n ->
-        val now = java.time.Instant.now().epochSecond.toDouble(); val wave = kotlin.math.sin(n / 6.0)
-        HistoryPoint(now - (59 - n) * historySeconds(timeframe) / 59.0, mapOf(
-            "maxcpu" to 2.0, "maxmem" to 2147483648.0, "cpu" to (0.12 + 0.08 * wave + (n % 9) / 300.0), "mem" to (1.6e9 + 2.0e8 * wave),
-            "netin" to (18_000.0 + 9_000.0 * kotlin.math.abs(wave)), "netout" to (6_000.0 + 3_000.0 * kotlin.math.abs(wave)),
-            "diskread" to (40_000.0 + 25_000.0 * (n % 5)), "diskwrite" to (22_000.0 + 12_000.0 * (n % 4))))
-    }),
-    InspectionSection(listOf("192.0.2.10 (sample)")))

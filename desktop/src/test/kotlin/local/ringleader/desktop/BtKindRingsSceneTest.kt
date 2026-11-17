@@ -93,7 +93,7 @@ class BtKindRingsSceneTest {
             MaterialTheme(colorScheme=ringColors) { CompositionLocalProvider(LocalReduceMotion provides true) {
                 Surface(Modifier.fillMaxSize(),color=Tech.Canvas) {
                     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
-                        GuestBluetoothTab(WorkspaceState(),workspace,guest,hardware)
+                        GuestRadiosTab(WorkspaceState(),workspace,guest,hardware)
                     }
                 }
             } }
@@ -122,7 +122,7 @@ class BtKindRingsSceneTest {
             picture("guest-metadata.png")
             nodes().first { it.config.getOrNull(SemanticsActions.ScrollBy)!=null }.config[SemanticsActions.ScrollBy].action!!.invoke(0f,800f)
             settle()
-            assertTrue(nodes().any { n->n.config.getOrNull(SemanticsProperties.Text)?.any { t->t.text.startsWith("SCAN INSIDE VM") }==true && n.boundsInWindow.top>=0 && n.boundsInWindow.bottom<=479 },"scan action remains reachable")
+            assertTrue(nodes().any { n->n.config.getOrNull(SemanticsProperties.Text)?.any { t->t.text.startsWith("BLUETOOTH SCAN") }==true && n.boundsInWindow.top>=0 && n.boundsInWindow.bottom<=479 },"scan action remains reachable")
             picture("guest-actions.png")
         } finally {
             scene.close();workspace.close();scope.coroutineContext[kotlinx.coroutines.Job]?.cancel();Appearance.preview(ThemeMode.Dark)

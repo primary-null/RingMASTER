@@ -174,7 +174,7 @@ fun CreateCtWizard(
                 advanced = advanced,
                 onAdvanced = { advanced = it; prefs.advanced = it },
                 canCreate = ready,
-                createLabel = if (session.sample) "Simulate create" else "Create container ${draft.vmid.ifBlank { "…" }}…",
+                createLabel = "Create container ${draft.vmid.ifBlank { "…" }}…",
                 onCreate = {
                     val frozen = safeFreezeCreate { freezeDraft(draft, context) }
                     if (!ready || errors.isNotEmpty() || frozen !is FreezeResult.Ready) {
@@ -190,7 +190,6 @@ fun CreateCtWizard(
                 onResultAction = { if (it == ResultAction.Edit) { dismissedResult = true; current = serverErrors.keys.firstOrNull()?.let(CreateFields::step) ?: current } else onResultAction(it) },
             ) { columns ->
                 preview.problem?.let { Text(it, color = Tech.Red) }
-                if (session.sample) Text("Demo mode. Nothing is sent.", color = Tech.Amber, fontSize = 11.sp)
                 when (current) {
                     CreateFields.GENERAL -> CtGeneralStep(draft, ::update, session, errors, advanced, password, confirmation, sshKeys, fileError, { fileError = it }, onRead, nodes) { node -> wipeEditors(); onNode(node) }
                     CreateFields.TEMPLATE -> CtTemplateStep(draft, ::update, session, context, errors, onRead, onGetMedia?.let { request -> { n,s,k -> mediaBaseline=draft.templateStorage to draft.template;request(n,s,k) } })

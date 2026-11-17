@@ -22,7 +22,6 @@ class SpiceConsoleTest {
         assertEquals(SPICE_NOT_RUNNING, spiceRefusal(live, vm.copy(status = "stopped")))
         assertEquals(SPICE_NOT_RUNNING, spiceRefusal(live, vm.copy(template = true)))
         assertEquals(SPICE_NOT_VM, spiceRefusal(live, vm.copy(kind = "Container")))
-        assertEquals(SPICE_DEMO, spiceRefusal(live.copy(demo = true), vm))
         assertNotNull(spiceRefusal(live.copy(kind = PDM_KIND), vm))
         assertNotNull(spiceRefusal(live.copy(stale = true), vm))
         assertNotNull(spiceRefusal(live.copy(connected = false), vm))

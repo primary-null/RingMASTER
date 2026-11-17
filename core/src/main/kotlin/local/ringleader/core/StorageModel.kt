@@ -24,7 +24,7 @@ import kotlinx.serialization.json.*
 sealed interface StorageVisibility {
     /** The permission list shows this identity sees every volume of the types this storage holds. Show nothing. */
     data object Complete : StorageVisibility
-    /** Permissions not read, not readable, PDM, or demo without a sample dump. */
+    /** Permissions not read, not readable, or PDM. */
     data object Unknown : StorageVisibility
     /** Some content types or some guests' volumes are filtered out. [parts] is never empty. */
     data class Partial(val parts: List<HiddenPart>) : StorageVisibility {

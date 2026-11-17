@@ -79,7 +79,7 @@ class CreateDesktopAcceptanceTest {
             h.click("private-store"); h.key(Key.Enter,ctrl=true); assertEquals(1,captures)
             // Enter chooses inside the popup; it never captures a create.
             h.key(Key.Escape)
-            val outcomes=listOf<CreateResult>(CreateResult.Sending(NewGuestKind.Vm,"node-a",140),CreateResult.Following(NewGuestKind.Vm,"node-a",140,"task"),CreateResult.Simulated(NewGuestKind.Vm,"node-a",140),CreateResult.Rejected(NewGuestKind.Vm,"node-a",140,400,"bad"))
+            val outcomes=listOf<CreateResult>(CreateResult.Sending(NewGuestKind.Vm,"node-a",140),CreateResult.Following(NewGuestKind.Vm,"node-a",140,"task"),CreateResult.Rejected(NewGuestKind.Vm,"node-a",140,400,"bad"))
             for (value in outcomes) {
                 result=value; h.frames()
                 h.key(Key.Enter,ctrl=true); h.key(Key.PageDown,ctrl=true); h.key(Key.Two,alt=true); h.key(Key.Enter)
@@ -148,13 +148,13 @@ class CreateDesktopAcceptanceTest {
 
     @Test fun dirtyEscapeKeepsDraftAndConfirmationStartsOnCancel() = runSceneTest {
         var cancels=0; var creates=0
-        val confirmation=CreateConfirmation(1,DEMO_REMOTE_KEY,"https://private-origin.invalid","private-profile",
+        val confirmation=CreateConfirmation(1,SAMPLE_ADDRESS,"https://private-origin.invalid","private-profile",
             CreateRequest(NewGuestKind.Vm,"private-node",140,"private-name",listOf(CreateParam("vmid",CreateValue.Int(140)))),SecretState())
         var confirm by mutableStateOf(false)
         val scene=ImageComposeScene(960,640,coroutineContext=coroutineContext) {
             MaterialTheme(colorScheme=ringColors) { CompositionLocalProvider(LocalReduceMotion provides true) {
                 CreateWizardFrame(NewGuestKind.Vm,"New VM","private-node","140",listOf(WizardStep("general","General",0,false)),"general",{},emptyList(),false,{},true,"Create VM",{confirm=true},{cancels++},true,null,{}) {}
-                if (confirm) CreateConfirmDialog(confirmation,emptyList(),false,{creates++},{confirm=false})
+                if (confirm) CreateConfirmDialog(confirmation,emptyList(),{creates++},{confirm=false})
             } }
         }
         val h=CreateScene(scene)
@@ -170,7 +170,7 @@ class CreateDesktopAcceptanceTest {
     @Test fun showcaseConcealsConfirmationAndEveryServerResultString() = runSceneTest {
         val before=Appearance.showcase
         Appearance.preview(false,showcase=false)
-        val confirmation=CreateConfirmation(1,DEMO_REMOTE_KEY,"https://private-origin.invalid","private-profile",
+        val confirmation=CreateConfirmation(1,SAMPLE_ADDRESS,"https://private-origin.invalid","private-profile",
             CreateRequest(NewGuestKind.Vm,"private-node",140,"private-name",listOf(CreateParam("vmid",CreateValue.Int(140)))),SecretState())
         val results=listOf<CreateResult>(
             CreateResult.Rejected(NewGuestKind.Vm,"private-node",140,400,"private-error",serverSaid=mapOf("field" to "private-server")),
@@ -181,7 +181,7 @@ class CreateDesktopAcceptanceTest {
             for (result in listOf<CreateResult?>(null)+results) {
                 val scene=ImageComposeScene(960,640,coroutineContext=coroutineContext) {
                     MaterialTheme(colorScheme=ringColors) { CompositionLocalProvider(LocalReduceMotion provides true) {
-                        if (result==null) CreateConfirmDialog(confirmation,listOf(ParamLine("net0","private-bridge")),false,{},{},listOf("private-hint"))
+                        if (result==null) CreateConfirmDialog(confirmation,listOf(ParamLine("net0","private-bridge")),{},{},listOf("private-hint"))
                         else Column { CreateResultView(result) {} }
                     } }
                 }

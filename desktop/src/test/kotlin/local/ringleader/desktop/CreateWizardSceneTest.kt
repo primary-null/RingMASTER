@@ -25,7 +25,7 @@ class CreateWizardSceneTest {
         val out = System.getenv("RINGMASTER_CREATE_SHOTS")?.let { File(it).apply { mkdirs() } }
         val sizes = listOf(960 to 640, 1280 to 800, 1600 to 1000, 2560 to 1440)
         val storage = StorageChoice("demo-node-a", "sample-disks", "dir", setOf("images", "iso", "import"), false, 1024L, 500L*1073741824, "available")
-        val session = demoCreateSession(NewGuestKind.Vm, "demo-node-a", 1, Instant.EPOCH)
+        val session = sampleCreateSession(NewGuestKind.Vm, "demo-node-a", 1, Instant.EPOCH)
         try {
             for (light in listOf(false,true)) for ((w,h) in sizes) for (step in CreateFields.VM_STEPS) for (advanced in listOf(false,true)) {
                 Appearance.preview(light)
@@ -60,8 +60,7 @@ class CreateWizardSceneTest {
             CreateResult.FinishedWithWarnings(NewGuestKind.Vm,"node-a",140,"local-a",2,listOf("WARN: sample warning"),GuestAppearance.NotYet),
             CreateResult.Failed(NewGuestKind.Vm,"node-a",140,"local-a","sample failure",listOf("sample log")),
             CreateResult.Unknown(NewGuestKind.Vm,"node-a",140,null,"The reply was lost."),
-            CreateResult.Rejected(NewGuestKind.Vm,"node-a",140,400,"Invalid field"),
-            CreateResult.Simulated(NewGuestKind.Vm,"node-a",140))
+            CreateResult.Rejected(NewGuestKind.Vm,"node-a",140,400,"Invalid field"))
         for ((i,result) in results.withIndex()) {
             val scene = ImageComposeScene(960,640,coroutineContext = coroutineContext) { MaterialTheme(colorScheme=ringColors) { Column { CreateResultView(result) {} } } }
             try {

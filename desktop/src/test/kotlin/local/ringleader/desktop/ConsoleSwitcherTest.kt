@@ -2,6 +2,7 @@
 @file:OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class, androidx.compose.ui.InternalComposeUiApi::class)
 package local.ringleader.desktop
 
+import local.ringleader.core.sampleWorkspace
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
@@ -109,11 +110,10 @@ class ConsoleSwitcherTest {
     // The scene runs in this test's event loop, so the rail's scroll effect cannot resume on the AWT thread mid-layout (see ConsoleImmersiveTest).
     @Test fun aKeyedConsoleStartsEmptyForTheNextGuest() = runBlocking<Unit> {
         val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
-        val workspace = Workspace(scope)
+        val workspace = sampleWorkspace(scope)
         val seen = mutableListOf<ResourceId>()
         consoleViewBirthProbe = { seen.add(it) }
         try {
-            workspace.exploreDemo()
             workspace.setLive(false)
             val first = workspace.state.value.overview!!.guests.first { it.id == 120 }
             val second = workspace.state.value.overview!!.guests.first { it.id == 130 }

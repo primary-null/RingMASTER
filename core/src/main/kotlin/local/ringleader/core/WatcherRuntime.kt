@@ -75,7 +75,6 @@ class WatcherRuntime(
         var current: WatchSession? = null
         fun end(session: WatchSession) {
             watcher.close(session)
-            if (session.scope.demo) center.dropDemo()
         }
         try {
             combine(workspace.state, profileId) { state, profile -> state to profile }.collect { (state, profile) ->
@@ -93,11 +92,11 @@ class WatcherRuntime(
     }
 
     private fun sessionOf(sessionId: Long, workspace: Workspace, state: WorkspaceState, profileId: String?): WatchSession? {
-        if (!state.connected && !state.demo) return null
+        if (!state.connected) return null
         val scope = watchScopeOf(state, profileId) ?: return null
         // Refuse a snapshot already superseded by a different connection.
         val now = workspace.state.value
-        if (now.connectionEpoch != state.connectionEpoch || scope.demo != state.demo) return null
+        if (now.connectionEpoch != state.connectionEpoch) return null
         return WatchSession(scope, sessionId, state.connectionEpoch)
     }
 

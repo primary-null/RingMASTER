@@ -46,5 +46,5 @@ class HistoryTest {
   assertEquals("dd MMM HH:mm",historyReadoutPattern(historySeconds("month")))
   assertEquals("dd MMM yy HH:mm",historyReadoutPattern(historySeconds("year")))
  }
- @Test fun demoWindows() { historyTimeframes.forEach { t -> historyConsolidations.forEach { cf -> val p=demoNodeHistory(t,cf); assertEquals(historySeconds(t),p.last().time-p.first().time,.01); assertNotNull(p.first().values["pressurecpusome"]) } } }
+ @Test fun demoWindows() { historyTimeframes.forEach { t -> historyConsolidations.forEach { cf -> val p=sampleNodeHistory(t,cf); assertEquals(historySeconds(t),p.last().time-p.first().time,.01); assertNotNull(p.first().values["pressurecpusome"]) } } }
 }

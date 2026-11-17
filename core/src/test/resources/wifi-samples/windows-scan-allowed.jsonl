@@ -1,0 +1,23 @@
+{"t":"adapter","id":"{00000000-0000-0000-0000-0000000000A1}","name":"Example Wi-Fi 6E Wireless LAN Card","address":"020000000021","status":"Up","state":"connected","radio":"on","hwRadio":"on","airplane":false,"rxMbps":866.7,"txMbps":866.7,"driver":"1.0.0.1","pnp":"PCI\\VEN_8086&DEV_2725&SUBSYS_00000000&REV_1A\\0&00000000","pci":"0000:03:00.0"}
+{"t":"link","ms":1500,"adapter":"{00000000-0000-0000-0000-0000000000A1}","connected":true,"channel":36,"rssi":-52}
+{"t":"ap","ms":4300,"adapter":"{00000000-0000-0000-0000-0000000000A1}","ssid":"Example Home","bssid":"02:00:00:00:01:00","rssi":-52.0,"khz":5180000,"phy":10,"auth":"RsnaPsk","enc":"Ccmp"}
+{"t":"ap","ms":4300,"adapter":"{00000000-0000-0000-0000-0000000000A1}","ssid":"Example Home","bssid":"02:00:00:00:01:01","rssi":-63.0,"khz":2437000,"phy":7,"auth":"RsnaPsk","enc":"Ccmp"}
+{"t":"ap","ms":4300,"adapter":"{00000000-0000-0000-0000-0000000000A1}","ssid":"Example Home","bssid":"02:00:00:00:01:02","rssi":-71.0,"khz":6135000,"phy":10,"auth":"Wpa3Sae","enc":"Ccmp"}
+{"t":"ap","ms":4300,"adapter":"{00000000-0000-0000-0000-0000000000A1}","ssid":"Sample Guest","bssid":"02:00:00:00:02:00","rssi":-78.0,"khz":2462000,"phy":6,"auth":"Open80211","enc":"None"}
+{"t":"ap","ms":4300,"adapter":"{00000000-0000-0000-0000-0000000000A1}","ssid":"","bssid":"02:00:00:00:04:00","rssi":-87.0,"khz":2412000,"phy":6,"auth":"RsnaPsk","enc":"Ccmp"}
+{"t":"ap","ms":4300,"adapter":"{00000000-0000-0000-0000-0000000000A1}","ssid":"Old Router","bssid":"02:00:00:00:05:00","rssi":-82.0,"khz":2422000,"phy":6,"auth":"Open80211","enc":"Wep"}
+{"t":"ap","ms":4300,"adapter":"{00000000-0000-0000-0000-0000000000A1}","ssid":"Sample Office","bssid":"02:00:00:00:03:00","rssi":-77.0,"khz":5745000,"phy":8,"auth":"Rsna","enc":"Ccmp"}
+{"t":"ap","ms":4300,"adapter":"{00000000-0000-0000-0000-0000000000A1}","ssid":"Cafe Enhanced","bssid":"02:00:00:00:06:00","rssi":-69.0,"khz":5220000,"phy":10,"auth":"Owe","enc":"Ccmp"}
+{"t":"link","ms":4310,"adapter":"{00000000-0000-0000-0000-0000000000A1}","connected":true,"channel":36,"rssi":-52,"ssid":"Example Home","bssid":"02:00:00:00:01:00","phy":10,"quality":96,"rxMbps":1200.9,"txMbps":1441.1,"auth":"RsnaPsk","cipher":"Ccmp"}
+{"t":"cycle","ms":4320}
+{"t":"ap","ms":8300,"adapter":"{00000000-0000-0000-0000-0000000000A1}","ssid":"Example Home","bssid":"02:00:00:00:01:00","rssi":-55.0,"khz":5180000,"phy":10,"auth":"RsnaPsk","enc":"Ccmp"}
+{"t":"ap","ms":8300,"adapter":"{00000000-0000-0000-0000-0000000000A1}","ssid":"Example Home","bssid":"02:00:00:00:01:01","rssi":-63.0,"khz":2437000,"phy":7,"auth":"RsnaPsk","enc":"Ccmp"}
+{"t":"ap","ms":8300,"adapter":"{00000000-0000-0000-0000-0000000000A1}","ssid":"Example Home","bssid":"02:00:00:00:01:02","rssi":-71.0,"khz":6135000,"phy":10,"auth":"Wpa3Sae","enc":"Ccmp"}
+{"t":"ap","ms":8300,"adapter":"{00000000-0000-0000-0000-0000000000A1}","ssid":"Sample Guest","bssid":"02:00:00:00:02:00","rssi":-78.0,"khz":2462000,"phy":6,"auth":"Open80211","enc":"None"}
+{"t":"ap","ms":8300,"adapter":"{00000000-0000-0000-0000-0000000000A1}","ssid":"","bssid":"02:00:00:00:04:00","rssi":-87.0,"khz":2412000,"phy":6,"auth":"RsnaPsk","enc":"Ccmp"}
+{"t":"ap","ms":8300,"adapter":"{00000000-0000-0000-0000-0000000000A1}","ssid":"Old Router","bssid":"02:00:00:00:05:00","rssi":-82.0,"khz":2422000,"phy":6,"auth":"Open80211","enc":"Wep"}
+{"t":"ap","ms":8300,"adapter":"{00000000-0000-0000-0000-0000000000A1}","ssid":"Sample Office","bssid":"02:00:00:00:03:00","rssi":-77.0,"khz":5745000,"phy":8,"auth":"Rsna","enc":"Ccmp"}
+{"t":"ap","ms":8300,"adapter":"{00000000-0000-0000-0000-0000000000A1}","ssid":"Cafe Enhanced","bssid":"02:00:00:00:06:00","rssi":-69.0,"khz":5220000,"phy":10,"auth":"Owe","enc":"Ccmp"}
+{"t":"link","ms":8310,"adapter":"{00000000-0000-0000-0000-0000000000A1}","connected":true,"channel":36,"rssi":-52,"ssid":"Example Home","bssid":"02:00:00:00:01:00","phy":10,"quality":96,"rxMbps":1200.9,"txMbps":1441.1,"auth":"RsnaPsk","cipher":"Ccmp"}
+{"t":"cycle","ms":8320}
+{"t":"done","ms":8321}

@@ -67,10 +67,10 @@ class GuestBluetoothTest {
         assertNull(guestBluetoothRefusal(vm, true, hw("enabled=1,type=virtio", "l26")))
     }
 
-    @Test fun workspaceUsesTheLiveGuestAndServesDemoData() = runTest {
+    @Test fun workspaceUsesTheLiveGuest() = runTest {
         val calls = mutableListOf<Pair<Guest, Int>>()
         val bt = object : GuestBluetoothGateway {
-            override suspend fun scan(connection: Connection, guest: Guest, seconds: Int): BtScan { calls += guest to seconds; return demoGuestBluetoothScan(guest) }
+            override suspend fun scan(connection: Connection, guest: Guest, seconds: Int): BtScan { calls += guest to seconds; return sampleGuestBluetoothScan(guest) }
         }
         val moved = vm.copy(node = "pve6")
         val inventory = object : InventoryGateway {
@@ -83,10 +83,5 @@ class GuestBluetoothTest {
         assertEquals("pve6", calls.single().first.node); assertEquals(12, calls.single().second)
         assertFailsWith<IllegalStateException> { w.guestBluetoothScan(vm.copy(id = 999)) }
         w.close()
-        val demo = Workspace(this, gateway = inventory, guestBluetoothGateway = bt)
-        demo.exploreDemo(); runCurrent()
-        assertEquals("Sample data", demo.guestBluetoothScan(demoOverview.guests.first()).note)
-        assertEquals(1, calls.size, "demo never calls the gateway")
-        demo.close()
     }
 }

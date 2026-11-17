@@ -22,7 +22,7 @@ internal fun connectedWorkspace(scope: CoroutineScope, lab: MatrixLab): Workspac
     val ws = Workspace(scope,
         gateway = object : InventoryGateway {
             override suspend fun overview(connection: Connection) = lab.overview
-            override suspend fun details(connection: Connection, guest: Guest) = demoDetails(guest)
+            override suspend fun details(connection: Connection, guest: Guest) = sampleDetails(guest)
         },
         taskGateway = object : TaskGateway { override suspend fun tasks(connection: Connection) = lab.tasks },
         nodeStatusGateway = object : NodeStatusGateway {
@@ -123,7 +123,7 @@ internal fun matrixShots(scope: CoroutineScope, lab: MatrixLab, env: MatrixEnv):
     shots += guestPage("guest-snapshots", lab.vm, "Snapshots")
     shots += guestPage("guest-snapshots-form", lab.vm, "Snapshots") { scene, d -> d.activateRequired(scene, "guest-snapshots-form", "Create snapshot") }
     shots += guestPage("guest-backups", lab.vm, "Backups")
-    shots += guestPage("guest-bluetooth", lab.vm, "Bluetooth")
+    shots += guestPage("guest-bluetooth", lab.vm, "Radios")
     shots += guestPage("guest-actions", lab.vm, "Actions")
     shots += guestPage("guest-ct-summary", lab.container, "Summary")
     shots += guestPage("guest-ct-hardware", lab.container, "Hardware")
@@ -165,7 +165,7 @@ internal fun matrixShots(scope: CoroutineScope, lab: MatrixLab, env: MatrixEnv):
     val localLvm = lab.overview.storage.first { it.id == "local-lvm" && it.node == "pve-east" }
     val storageKey = StorageKey(origin, "pve-east", "local-lvm")
     shots += MatrixShot("storage", "Storage") { e ->
-        val s = e.state().copy(storageSelection = storageKey, storageContent = ReadSection.loaded(StorageContentView(storageKey, null, demoStorageContent(localLvm)), lab.now, sample = true))
+        val s = e.state().copy(storageSelection = storageKey, storageContent = ReadSection.loaded(StorageContentView(storageKey, null, sampleStorageContent(localLvm)), lab.now))
         MatrixWindow("Storage", s, e.idle, e, false) { StoragePage(s, e.idle) }
     }
     shots += MatrixShot("storage-empty", "Storage") { e ->
@@ -177,7 +177,7 @@ internal fun matrixShots(scope: CoroutineScope, lab: MatrixLab, env: MatrixEnv):
         MatrixWindow("Activity", s, e.idle, e, false) { ActivityScreen(s, e.idle, title, {}, {}) }
     }
     shots += MatrixShot("activity-log", "Activity") { e ->
-        val s = e.state().copy(taskLog = demoTaskLog(lab.tasks[5]))
+        val s = e.state().copy(taskLog = sampleTaskLog(lab.tasks[5]))
         MatrixWindow("Activity", s, e.idle, e, false) { ActivityScreen(s, e.idle, title, {}, {}) }
     }
 
@@ -209,8 +209,8 @@ internal fun matrixShots(scope: CoroutineScope, lab: MatrixLab, env: MatrixEnv):
         BtDevice("11:22:33:44:55:07", "Living Room TV", rssi = -84, paired = true, kind = BtKind.Classic, category = "video-display"),
         BtDevice("11:22:33:44:55:08", "Framework Laptop", rssi = -49, paired = true, kind = BtKind.Dual, category = "computer"),
     ), btAt)
-    shots += MatrixShot("bluetooth-results", "Bluetooth") { e -> MatrixWindow("Bluetooth", e.state(), e.idle, e, false) { BtScanView(btScan, scanning = false, platform = "Windows") } }
-    shots += MatrixShot("bluetooth-empty", "Bluetooth") { e -> MatrixWindow("Bluetooth", e.state(), e.idle, e, false) { BluetoothScreen(null) } }
+    shots += MatrixShot("bluetooth-results", "Radios") { e -> MatrixWindow("Radios", e.state(), e.idle, e, false) { BtScanView(btScan, scanning = false, platform = "Windows") } }
+    shots += MatrixShot("bluetooth-empty", "Radios") { e -> MatrixWindow("Radios", e.state(), e.idle, e, false) { BluetoothScreen(null) } }
 
     val vpnSnapshot = run {
         fun peer(n: Int, online: Boolean, exit: Boolean = false) = TailscalePeer("p$n", "host-$n", "host-$n.example.ts.net", if (n % 2 == 0) "linux" else "windows", online, listOf("100.64.0.$n"), exit, false,
@@ -268,7 +268,7 @@ internal fun matrixShots(scope: CoroutineScope, lab: MatrixLab, env: MatrixEnv):
         }
     }
     shots += MatrixShot("hood", "Under the Hood", frames = 10) { e ->
-        CompositionLocalProvider(LocalHoodProbe provides true) { MatrixWindow("Under the Hood", e.state(), e.idle, e, false) { UnderTheHoodScreen(WorkspaceState(demo = true)) } }
+        CompositionLocalProvider(LocalHoodProbe provides true) { MatrixWindow("Under the Hood", e.state(), e.idle, e, false) { UnderTheHoodScreen(WorkspaceState(connected = true, address = SAMPLE_ADDRESS)) } }
     }
 
     // ---- Settings, About and the dialogs ----------------------------------------------------------------------------
@@ -333,8 +333,8 @@ internal fun matrixShots(scope: CoroutineScope, lab: MatrixLab, env: MatrixEnv):
     }
 
     // Real production wizards over core's complete, invented demo choices. Nothing is submitted.
-    fun createState(kind: NewGuestKind) = lab.state(demo = true).copy(
-        creation = demoCreateSession(kind, "pve-east", 1, lab.now),
+    fun createState(kind: NewGuestKind) = lab.state().copy(
+        creation = sampleCreateSession(kind, "pve-east", 1, lab.now),
         connectionEpoch = 1,
     )
     shots += MatrixShot("create-vm", "Fleet") { e ->

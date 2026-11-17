@@ -29,7 +29,7 @@ class ReadHistoryTest {
     private class Fake : InventoryGateway {
         var inventory: suspend (Connection) -> Overview = { error("set inventory") }
         override suspend fun overview(connection: Connection) = inventory(connection)
-        override suspend fun details(connection: Connection, guest: Guest) = demoDetails(guest)
+        override suspend fun details(connection: Connection, guest: Guest) = sampleDetails(guest)
     }
 
     private fun Fake.serving() {
@@ -93,23 +93,6 @@ class ReadHistoryTest {
             assertEquals(HISTORY_STALE, workspace.readHistory(guest, null, "hour", "AVERAGE").error)
             assertEquals(0, reads)
             assertNull(workspace.state.value.chartHistory.value)
-        } finally { workspace.close() }
-    }
-
-    @Test fun demoHistoryDoesNotUseThePageSlot() = runTest {
-        val workspace = workspace()
-        try {
-            workspace.exploreDemo(); runCurrent()
-            val guest = workspace.state.value.overview!!.guests.first()
-            val average = workspace.readHistory(guest, null, "hour", "AVERAGE")
-            val maximum = workspace.readHistory(guest, null, "hour", "MAX")
-            assertEquals(average.value!!.map { it.values["cpu"]!! * 1.25 }, maximum.value!!.map { it.values["cpu"] })
-            assertEquals(average.value!!.map { it.values["maxmem"] }, maximum.value!!.map { it.values["maxmem"] })
-            assertEquals(average.value!!.map { it.values["maxcpu"] }, maximum.value!!.map { it.values["maxcpu"] })
-            val node = workspace.state.value.overview!!.members.first().name
-            assertEquals(120, workspace.readHistory(null, node, "day", "AVERAGE").value!!.size)
-            assertNull(workspace.state.value.chartHistory.value)
-            assertEquals(HISTORY_NOTHING_SELECTED, workspace.readHistory(null, null, "hour", "AVERAGE").error)
         } finally { workspace.close() }
     }
 

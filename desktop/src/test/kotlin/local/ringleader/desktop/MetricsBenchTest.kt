@@ -44,8 +44,8 @@ class MetricsBenchTest {
         if (System.getenv("RINGMASTER_METRICS_BENCH") != "1") return
         val label = System.getenv("RINGMASTER_METRICS_BENCH_LABEL") ?: "run"
         val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
-        val workspace = Workspace(scope)
-        workspace.exploreDemo(); workspace.setLive(false)
+        val workspace = sampleWorkspace(scope)
+        workspace.setLive(false)
         val base = workspace.state.value
         val overview = MetricsFixtures.overview(base.overview!!)
         val start = MetricsFixtures.history(overview)

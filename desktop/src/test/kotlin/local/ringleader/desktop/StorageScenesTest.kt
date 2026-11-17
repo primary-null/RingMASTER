@@ -29,8 +29,7 @@ class StorageScenesTest {
     @Test fun pictures() = runSceneTest {
         val folder = System.getenv("STORAGE_SHOTS") ?: return@runSceneTest
         val scope = CoroutineScope(coroutineContext + SupervisorJob())
-        val workspace = Workspace(scope)
-        workspace.exploreDemo()
+        val workspace = sampleWorkspace(scope).awaitInventory()
         val row = workspace.state.value.overview!!.storage.first()
         workspace.selectStorage(row.node, row.id)
         workspace.loadStorageConfig()

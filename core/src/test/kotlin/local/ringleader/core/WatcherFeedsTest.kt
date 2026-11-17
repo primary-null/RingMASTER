@@ -302,7 +302,7 @@ class WatcherFeedsTest {
     @Test fun taskAdapterReportsOnlySuccessfulReadsAsFresh() {
         val connected = WorkspaceState(connected = true, address = origin)
         assertNull(watchTasksOf(WorkspaceState())); assertNull(watchTasksOf(connected), "the feed was never read (PDM, or Activity not opened)")
-        val submission = PowerSubmission("local-1", origin, "node-a", 104, "VM", "alpha", PowerAction.Start, PowerPhase.Accepted, "Accepted.", simulated = false, checkable = true)
+        val submission = PowerSubmission("local-1", origin, "node-a", 104, "VM", "alpha", PowerAction.Start, PowerPhase.Accepted, "Accepted.", checkable = true)
         val good = connected.copy(tasks = listOf(task(1, "vzdump")), tasksUpdatedAt = t0, submissions = listOf(submission))
         val fresh = watchTasksOf(good) as WatchTaskReading.Fresh
         assertEquals(t0, fresh.readAt); assertEquals(setOf(104), fresh.localGuests)
@@ -322,7 +322,7 @@ class WatcherFeedsTest {
             val guest = Guest(origin, 100, "alpha", "node-a", "VM", status, metrics = GuestListMetrics(cpuFraction = cpu, memoryBytes = 1L shl 30, memoryLimitBytes = 4L shl 30, uptimeSeconds = uptime++))
             return Overview(1, listOf(guest), members = listOf(RecordedMember(origin, "node-a", "online", null, 0.1, 4.0, 1L shl 30, 8L shl 30, 1, 10, uptime)))
         }
-        override suspend fun details(connection: Connection, guest: Guest) = demoDetails(guest)
+        override suspend fun details(connection: Connection, guest: Guest) = sampleDetails(guest)
     }
 
     private class Harness(val test: TestScope, origin: String) {
@@ -388,27 +388,6 @@ class WatcherFeedsTest {
         // Closing the runtime ends the session for the Watcher.
         h.runtime.close(); runCurrent()
         assertEquals(WatchAvailability.NotConnected, h.watched().availability)
-    }
-
-    @Test fun demoModeIsWatchedInMemoryAndLeavesNothingBehind() = runTest {
-        val h = Harness(this, origin)
-        val native = mutableListOf<NativeNotificationRequest>()
-        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { h.center.native.toList(native) }
-        h.runtime.attachWorkspace(1, h.workspace, h.profile)
-        runCurrent()
-        h.workspace.exploreDemo(); runCurrent()
-        val guest = h.workspace.state.value.overview!!.guests.first { it.status == "running" }
-        assertEquals(WatchResult.Ok, h.watcher.watch(WatchScope.Demo, watchResourceOf(guest)!!, guest.name))
-        h.step(20_000)
-        assertEquals(WatchAvailability.Live, h.watched().availability)
-        // A demo event is shown in the window only.
-        assertEquals(PostResult.Posted, h.center.post(NotificationEvent(NotificationIdentity("watch", DEMO_WATCH_BINDING, "x", "y"), NotificationCategory.WatchStress,
-            NotificationSeverity.Warning, "Demo guest is under load", "CPU 99 %", demo = true)))
-        assertTrue(native.isEmpty())
-        h.workspace.disconnect(); runCurrent()
-        assertTrue(h.watcher.state.value.watched.isEmpty(), "demo watches end with the demo")
-        assertTrue(h.center.state.value.items.isEmpty(), "and so do its notifications")
-        assertFalse(Files.exists(h.dir.resolve("watcher.json"))); assertFalse(Files.exists(h.dir.resolve("notifications.json")))
     }
 
     @Test fun schedulerSnapshotsReachTheCenterOnceThroughTheRuntime() = runTest {

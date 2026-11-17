@@ -62,8 +62,7 @@ class ReadmeClipsTest {
 
     private suspend fun CoroutineScope.render(dir: File) {
         val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
-        val workspace = Workspace(scope)
-        workspace.exploreDemo()
+        val workspace = sampleWorkspace(scope)
         workspace.select(workspace.state.value.overview!!.guests.first())
         workspace.inspectGuest("hour")
         delay(1500)
@@ -120,7 +119,8 @@ class ReadmeClipsTest {
         val tasks = jobs.mapIndexed { n, job ->
             val outcome = when { job.seconds == null -> TaskOutcome.Running; job.failed -> TaskOutcome.Unsuccessful; else -> TaskOutcome.Succeeded }
             val start = now.minusSeconds(job.ago)
-            ClusterTask(DEMO_REMOTE_KEY, "demo:readme$n", nodeOf(job.id) ?: "demo-node-b", job.type, job.id, "demo@ringmaster", start,
+            val node = nodeOf(job.id) ?: "demo-node-b"
+            ClusterTask(SAMPLE_ADDRESS, sampleUpid(job.type, job.id, node, n), node, job.type, job.id, "demo@ringmaster", start,
                 job.seconds?.let { start.plusSeconds(it) },
                 when (outcome) { TaskOutcome.Running -> "running"; TaskOutcome.Succeeded -> "OK"; else -> "Backup storage unavailable" }, outcome)
         }

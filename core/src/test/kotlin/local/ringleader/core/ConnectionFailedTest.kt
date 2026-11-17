@@ -24,7 +24,7 @@ class ConnectionFailedTest {
 
     private class Gateway(var read: suspend (Connection) -> Overview) : InventoryGateway {
         override suspend fun overview(connection: Connection) = read(connection)
-        override suspend fun details(connection: Connection, guest: Guest) = demoDetails(guest)
+        override suspend fun details(connection: Connection, guest: Guest) = sampleDetails(guest)
     }
 
     @Test fun aRefusedCertificateOnTheFirstReadIsAFailedConnectionAndSaysWhatToDo() = runTest {
@@ -96,7 +96,7 @@ class ConnectionFailedTest {
         workspace.close()
     }
 
-    @Test fun anOpenConnectionWithALaterErrorAndTheDemoAreNotFailedConnections() = runTest {
+    @Test fun anOpenConnectionWithALaterErrorIsNotAFailedConnection() = runTest {
         val gateway = Gateway { overview }
         val workspace = Workspace(this, gateway)
         workspace.connect(Connection(server, "tester@pve!read", "token-secret", ""))
@@ -106,8 +106,6 @@ class ConnectionFailedTest {
         val stale = workspace.state.value
         assertNotNull(stale.error); assertTrue(stale.stale)
         assertTrue(sessionOpen(stale)); assertFalse(connectionFailed(stale)); assertNull(connectionFailureAdvice(stale))
-        workspace.exploreDemo()
-        assertFalse(connectionFailed(workspace.state.value)); assertEquals("", workspace.state.value.account)
         assertFalse(connectionFailed(WorkspaceState()))
         workspace.close()
     }

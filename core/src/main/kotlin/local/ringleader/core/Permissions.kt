@@ -296,6 +296,11 @@ val FEATURE_REQUIREMENTS: List<FeatureRequirement> = listOf(
         "Any signed-in identity may read the list. It does not need Sys.Audit.",
         alsoNeeds = listOf(listOf(need(PermissionScope.Sdn, "SDN.Audit", "SDN.Use", any = true))),
         alsoNote = "Bridges are left out unless SDN.Audit or SDN.Use is held on that bridge. The list itself still succeeds."),
+    FeatureRequirement("radios", "Radios on nodes and guests", GROUP_TODAY, listOf(need(PermissionScope.Guest, "VM.Audit")),
+        "GET /nodes/{node}/hardware/usb, .../hardware/pci, .../network; GET /cluster/mapping/usb, /cluster/mapping/pci; GET .../pending (VM), .../config (container)",
+        "Guests this identity cannot audit are left out. The node network list is open to any signed-in identity.",
+        alsoNeeds = listOf(listOf(need(PermissionScope.Root, "Sys.Modify"))),
+        alsoNote = "USB adapters are listed only with Sys.Modify on / (PCI needs Sys.Audit or Sys.Modify on /). Without it a USB adapter shows only where a guest names it. Mappings are listed only where Mapping.Audit, Mapping.Use or Mapping.Modify is held on /mapping/usb/{id} or /mapping/pci/{id}."),
     FeatureRequirement("syslog", "System log", GROUP_TODAY, listOf(need(PermissionScope.Node, "Sys.Syslog")),
         "GET /nodes/{node}/syslog",
         "Sys.Audit does not include the log."),
@@ -555,26 +560,3 @@ internal fun releaseBeforeNine(release: String?): Boolean? {
 /** Counts per status, for the table header. */
 fun featureStatusCounts(checks: List<FeatureCheck>): Map<FeatureStatus, Int> =
     FeatureStatus.entries.associateWith { status -> checks.count { it.status == status } }
-
-/** The PVEAuditor role as pve-access-control builds it (the `audit` group of every category), set with Propagate. */
-private const val DEMO_AUDITOR =
-    "\"Sys.Audit\":1,\"VM.Audit\":1,\"VM.GuestAgent.Audit\":1,\"Datastore.Audit\":1,\"Pool.Audit\":1,\"SDN.Audit\":1,\"Mapping.Audit\":1"
-
-/**
- * Handwritten sample for demo mode, shaped like the real response: PVEAuditor on / (so the fixed top-level paths list the
- * auditor set), part of PVEVMUser added on /vms, and three explicit paths without Propagate. A path that is not listed
- * (such as /vms/120 or /mapping/notifications) is answered from its parent. The sample shows every state in the table.
- * It is not a captured response.
- */
-val demoPermissions: PermissionDump = parsePermissions("""{"data":{
- "/":{$DEMO_AUDITOR},
- "/access":{$DEMO_AUDITOR},
- "/nodes":{$DEMO_AUDITOR},
- "/pool":{$DEMO_AUDITOR},
- "/sdn":{$DEMO_AUDITOR},
- "/storage":{$DEMO_AUDITOR},
- "/vms":{$DEMO_AUDITOR,"VM.Console":1,"VM.PowerMgmt":1,"VM.Backup":1,"VM.Config.CDROM":1,"VM.Config.Cloudinit":1},
- "/nodes/demo-node-a":{"Sys.Audit":0,"Sys.Console":0,"Sys.Syslog":0},
- "/storage/shared-data":{"Datastore.Audit":0,"Datastore.AllocateSpace":0},
- "/vms/130":{"VM.Audit":0,"VM.GuestAgent.Audit":0}
-}}""")

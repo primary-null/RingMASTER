@@ -48,8 +48,8 @@ import local.ringleader.core.permissionTargets
  */
 @Composable fun PermissionsPanel(state: WorkspaceState, workspace: Workspace, modifier: Modifier = Modifier, framed: Boolean = true) {
     val section = state.permissions
-    LaunchedEffect(state.connectionEpoch, state.connected, state.demo) {
-        if ((state.connected || state.demo) && section.value == null && !section.loading && section.error == null) workspace.loadPermissions()
+    LaunchedEffect(state.connectionEpoch, state.connected) {
+        if (state.connected && section.value == null && !section.loading && section.error == null) workspace.loadPermissions()
     }
     val direct = state.kind != PDM_KIND
     val checks = remember(section.value?.dump, state.overview, direct) {
@@ -70,7 +70,7 @@ import local.ringleader.core.permissionTargets
                 PermissionIdentity.User -> NeutralTag("User", help = "Read for the user this session signed in as.")
                 else -> {}
             }
-            MiniAction("Refresh", enabled = !section.loading && direct && (state.connected || state.demo)) { workspace.loadPermissions() }
+            MiniAction("Refresh", enabled = !section.loading && direct && state.connected) { workspace.loadPermissions() }
         }
         if (framed && section.value != null) Text(statusSummary(counts), Modifier.padding(top = 2.dp), fontFamily = Tech.Mono, fontSize = 11.sp, color = Tech.Ink)
         ReadNotices(section, Modifier.padding(top = 4.dp))

@@ -27,8 +27,7 @@ class AlertsShotsTest {
         if (System.getenv("RINGMASTER_SCREENSHOTS") != "1") return
         val phase = System.getenv("RINGMASTER_UI_PHASE") ?: "after"
         val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
-        val workspace = Workspace(scope)
-        workspace.exploreDemo()
+        val workspace = sampleWorkspace(scope)
         runBlocking { delay(2500) }
         workspace.select(workspace.state.value.overview!!.guests.first())
         runBlocking { delay(500) }

@@ -140,7 +140,7 @@ class StorageConfirmation internal constructor(val epoch: Long, val origin: Stri
     override fun toString() = "StorageConfirmation(redacted)"
 }
 data class StorageSubmission(val localId: String, val key: StorageKey, val action: StorageAction, val phase: PowerPhase,
-    val detail: String, val simulated: Boolean = false, val checkable: Boolean = false, val upidNode: String? = null,
+    val detail: String, val checkable: Boolean = false, val upidNode: String? = null,
     val warningCount: Int? = null, val bytesSent: Long = 0, val totalBytes: Long? = null, val fieldErrors: Map<String, String> = emptyMap(), val httpStatus: Int? = null, val evidence: StorageSuccessEvidence? = null, val subject: String = "") {
     val remote: String get() = key.remote
     val node: String get() = key.node
@@ -209,8 +209,8 @@ fun storageCapabilities(storage: RecordedStorage): Set<StorageAction> = buildSet
 
 /** Pure state-only submission fence. Source identity is separately checked at capture/send by the coordinator/transport. */
 fun storageRefusal(c: StorageConfirmation, state: WorkspaceState): String? {
-    if(c.epoch != state.connectionEpoch || (!state.demo && c.origin != state.address)) return "The connection changed. Nothing was sent."
-    if((!state.connected && !state.demo) || state.kind == PDM_KIND) return "Open a direct Proxmox VE connection."
+    if(c.epoch != state.connectionEpoch || (c.origin != state.address)) return "The connection changed. Nothing was sent."
+    if((!state.connected) || state.kind == PDM_KIND) return "Open a direct Proxmox VE connection."
     val overview = state.overview ?: return "Wait for the inventory."
     if(state.stale || state.loading || overview.indexStale) return "The inventory is not current."
     if(overview.storage.none { it.remote == c.key.remote && it.node == c.key.node && it.id == c.key.storage }) return STORAGE_NOT_RECORDED

@@ -79,8 +79,8 @@ private fun StorageSceneDriver.setField(label: String, value: String) {
         .config[SemanticsActions.SetText].action!!.invoke(AnnotatedString(value))
 }
 private fun sha256(path: Path) = MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(path)).joinToString("") { "%02x".format(it) }
-private fun demo(scope: CoroutineScope, backup: Boolean = false): Workspace = Workspace(scope).also { w ->
-    w.exploreDemo(); val row = w.state.value.overview!!.storage.first { if (backup) "backup" in it.content.orEmpty() else it.id == "local" }; w.selectStorage(row.node, row.id)
+private suspend fun demo(scope: CoroutineScope, backup: Boolean = false): Workspace = sampleWorkspace(scope).awaitInventory().also { w ->
+    val row = sampleOverview().storage.first { if (backup) "backup" in it.content.orEmpty() else it.id == "local" }; w.selectStorage(row.node, row.id)
 }
 
 /** Counts every dispatch into the scene's event loop. */
@@ -156,21 +156,23 @@ class StorageInteractionTest {
             assertEquals("CANCEL", d.focused()?.label(), "The sole confirmation starts on Cancel")
             assertTrue(d.hasText("Action: Download from URL"))
             assertFalse(d.hasText("Action: UrlDownload"))
-            d.key(Key.Tab); assertEquals("SIMULATE", d.focused()?.label())
+            d.key(Key.Tab); assertEquals("CONFIRM", d.focused()?.label())
             d.key(Key.Tab, shift = true); assertEquals("CANCEL", d.focused()?.label())
             d.key(Key.Escape); d.settle()
-            assertFalse(d.hasText("Simulate storage action")); assertTrue(d.hasText("Download from URL")); assertEquals(0, closed)
+            assertFalse(d.hasText("Action: Download from URL")); assertTrue(d.hasText("Download from URL")); assertEquals(0, closed)
             assertTrue(d.hasText("https://mirror.example.test/fixture.iso"), "Escape on the confirmation returns to the same filled form")
             assertTrue(w.state.value.storageActions.submissions.isEmpty())
-            d.click("Review"); d.settle(); d.key(Key.Tab); assertEquals("SIMULATE", d.focused()?.label())
+            d.click("Review"); d.settle(); d.key(Key.Tab); assertEquals("CONFIRM", d.focused()?.label())
             d.key(Key.Enter); d.settle()
             assertEquals(1, w.state.value.storageActions.submissions.size, "Enter on the focused confirm submits once")
-            assertTrue(d.hasText("Storage action")); assertTrue(d.hasText("Demo · simulated"))
+            assertTrue(d.hasText("Storage action"))
             d.key(Key.Escape); d.settle(); assertEquals(1, closed); assertFalse(open)
+            // A storage takes one action at a time: the second form is offered once the first download has ended.
+            w.awaitState { it.storageActions.submissions.single().phase == PowerPhase.Succeeded }
             // Double activation of one confirmation, before any frame: the captured confirmation is single-use.
             open = true; d.settle()
             d.setText(0, "https://mirror.example.test/second.iso"); d.setText(1, "second.iso"); d.settle(); d.click("Review"); d.settle()
-            val confirm = d.clickable("Simulate").config[SemanticsActions.OnClick].action!!
+            val confirm = d.clickable("Confirm").config[SemanticsActions.OnClick].action!!
             confirm(); confirm(); d.settle()
             assertEquals(2, w.state.value.storageActions.submissions.size, "a second activation of the same confirmation must not send")
         } finally { scene.close(); scope.cancel() }
@@ -315,7 +317,7 @@ class StorageInteractionTest {
             assertTrue(d.hasText(file.fileName.toString()))
             d.click("Compute SHA256"); d.until("the checksum") { d.hasText(sha256(file)) && d.enabled("Compute SHA256") }
             d.click("Review"); d.settle()
-            assertTrue(d.hasText("Simulate storage action")); assertTrue(d.nodes().any { semanticsText(it).contains("sha256") })
+            assertTrue(d.hasText("Action: " + storageActionTitle(StorageAction.Upload))); assertTrue(d.nodes().any { semanticsText(it).contains("sha256") })
             assertTrue(w.state.value.storageActions.submissions.isEmpty())
         } finally { scene.close(); scope.cancel(); Files.deleteIfExists(file) }
     }
@@ -419,7 +421,7 @@ class StorageInteractionTest {
 
     @Test fun closeBackAndResultPathsKeepDraftsAndContainerKeyThenApplyExactMedia() = runSceneTest {
         for (kind in NewGuestKind.entries) {
-            val scope = CoroutineScope(coroutineContext + SupervisorJob()); val w = Workspace(scope); w.exploreDemo()
+            val scope = CoroutineScope(coroutineContext + SupervisorJob()); val w = sampleWorkspace(scope).awaitInventory()
             assertTrue(w.openCreateSession(kind, "demo-node-a")); val session = w.state.value.creation!!
             val scene = storageScene(LOOK.copy(logicalWidth = 1280, logicalHeight = 800), coroutineContext) { val live by w.state.collectAsState(); if (live.creation != null) CreateGuestHost(live, w, "Synthetic profile", {}, onViewLog = {}) }
             val d = StorageSceneDriver(scene, LOOK)
@@ -441,7 +443,7 @@ class StorageInteractionTest {
                 if (vm) { d.setField("URL · fetched by the node", "https://mirror.example.test/fixture.iso"); d.settle(); d.setField("File name", "fixture.iso") }
                 else d.until("catalogue") { d.hasText("sample_1_amd64.tar.zst · architecture unknown") }.also { d.click("sample_1_amd64.tar.zst · architecture unknown") }
                 d.settle(); d.click("Review"); d.settle(); d.key(Key.Escape); d.settle(); assertTrue(d.hasText("Review"))
-                d.click("Review"); d.settle(); d.click("Simulate"); d.settle()
+                d.click("Review"); d.settle(); d.click("Confirm"); d.settle()
                 // In demo the simulated download is terminal at once and its file is in the listing, so Ready closes the
                 // sheet (and the result frame drawn inside it) as soon as the choices refresh. The wizard is the result.
                 d.until("Ready to close the sheet") { !sheetOpen() }
@@ -456,9 +458,11 @@ class StorageInteractionTest {
     }
 
     @Test fun readyNeverOverwritesAChoiceTheUserChangedAfterRequestingMedia() = runSceneTest {
-        val scope = CoroutineScope(coroutineContext + SupervisorJob()); val w = Workspace(scope); w.exploreDemo()
-        assertTrue(w.openCreateSession(NewGuestKind.Vm, "demo-node-a")); val session = w.state.value.creation!!; val context = createContext(w.state.value, session)
-        val rows = session.volumes["local" to "iso"]!!.value!!; assertTrue(rows.size >= 2, "demo needs two ISO images")
+        val scope = CoroutineScope(coroutineContext + SupervisorJob()); val w = sampleWorkspace(scope).awaitInventory()
+        assertTrue(w.openCreateSession(NewGuestKind.Vm, "demo-node-a")); w.readForCreate(CreateRead.Volumes("local", "iso"))
+        val session = w.awaitState { it.creation?.volumes?.get("local" to "iso")?.value != null }.creation!!
+        val context = createContext(w.state.value, session)
+        val rows = session.volumes["local" to "iso"]!!.value!!; assertTrue(rows.size >= 2, "the sample storage needs two ISO images")
         var ready by mutableStateOf<StorageMediaReady?>(null); var observed: VmDraft? = null; var requested = 0
         val scene = storageScene(LOOK.copy(logicalWidth = 1280, logicalHeight = 800), coroutineContext) {
             CreateVmWizard(session, context, listOf(session.node), {}, {}, {}, {}, {}, initialAdvanced = false, onGetMedia = { _, _, _ -> requested++ },
@@ -520,15 +524,15 @@ class StorageInteractionTest {
         val notes = storageScene(LOOK, coroutineContext) { val live by wb.state.collectAsState(); StorageActionDialog(live, wb, live.storageSelection!!, StorageAction.EditNotes, backup, profileLabel = "Synthetic profile", onClose = {}) }
         val dn = StorageSceneDriver(notes, LOOK)
         val key = w.state.value.storageSelection!!
-        val denied = w.state.value.copy(demo = false, permissions = ReadSection(value = PermissionsView(PermissionDump(emptyMap()), PermissionIdentity.Token)))
+        val denied = w.state.value.copy(permissions = ReadSection(value = PermissionsView(PermissionDump(emptyMap()), PermissionIdentity.Token)))
         val tip = storageScene(LOOK, coroutineContext) { StorageFileActions(denied, w, key) }
         val dt = StorageSceneDriver(tip, LOOK)
         try {
             d.settle(); d.setText(0, url); d.setText(1, "canary-file.iso"); d.settle()
             compare("url-form", d, { n -> semanticsText(n) == "${key.node} · ${key.storage}" || n.config.getOrNull(SemanticsProperties.EditableText)?.text?.contains("canary") == true }, "Download from URL")
             d.click("Review"); d.settle()
-            compare("url-confirm", d, { n -> semanticsText(n).let { it.contains("canary") || it.startsWith("Synthetic profile") } }, "Simulate storage action")
-            d.click("Simulate"); d.settle()
+            compare("url-confirm", d, { n -> semanticsText(n).let { it.contains("canary") || it.startsWith("Synthetic profile") } }, storageActionTitle(StorageAction.UrlDownload))
+            d.click("Confirm"); d.settle()
             compare("url-result", d, { n -> semanticsText(n).contains("canary-file.iso") }, "Storage action")
             dn.settle(); dn.setText(0, "canary-backup-note"); dn.settle()
             compare("notes-form", dn, { n -> n.config.getOrNull(SemanticsProperties.EditableText)?.text == "canary-backup-note" }, "Edit backup notes")

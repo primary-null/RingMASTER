@@ -18,7 +18,6 @@ private val pveStorageId = Regex("^[A-Za-z][A-Za-z0-9\\-_.]*[A-Za-z0-9]\\z")
 const val RECORDED_INDEX_ERROR =
     "The recorded node and storage index was not updated because two rows used the same identity. The previous index is unchanged."
 const val LIVE_STATUS_NOT_REQUESTED = "Live status was not requested."
-const val LIVE_STATUS_SAMPLE = "These figures are sample data. Live status was not requested."
 const val NODE_STATUS_NOT_FOUND = "The node status read returned HTTP 404."
 const val NODE_STATUS_REFUSED = "The node status path was refused."
 const val NODE_STATUS_INCOMPLETE = "The node status read was missing a required field."
@@ -51,7 +50,7 @@ data class RecordedMember(
     val uptimeSeconds: Long?,
 ) {
     init {
-        if (remote != DEMO_REMOTE_KEY) require(serverOrigin(remote).toString() == remote) { "The node is missing its connection identity." }
+        require(serverOrigin(remote).toString() == remote) { "The node is missing its connection identity." }
         require(pveNodeNameOrNull(name) != null) { "The node name cannot be recorded." }
     }
 }
@@ -72,7 +71,7 @@ data class RecordedStorage(
     val content: String?,
 ) {
     init {
-        if (remote != DEMO_REMOTE_KEY) require(serverOrigin(remote).toString() == remote) { "The storage row is missing its connection identity." }
+        require(serverOrigin(remote).toString() == remote) { "The storage row is missing its connection identity." }
         require(pveNodeNameOrNull(node) != null) { "The storage node cannot be recorded." }
         require(pveStorageIdOrNull(id) != null) { "The storage id cannot be recorded." }
     }
@@ -175,7 +174,7 @@ fun directNodeStatusPath(connection: Connection, origin: String, node: String, s
 
 /** Offline, unknown, and every other membership build no status path. */
 fun nodeStatusPathForMember(member: RecordedMember): String? {
-    if (member.remote == DEMO_REMOTE_KEY || member.status != "online") return null
+    if (member.status != "online") return null
     val name = pveNodeNameOrNull(member.name) ?: return null
     return "/api2/json/nodes/${encodePathSegment(name)}/status"
 }
@@ -217,14 +216,13 @@ private val forbiddenStorageRead = Regex("^/api2/json/nodes/[^/]+/storage(/[^/]+
 
 fun selectedRecordedMember(state: WorkspaceState): RecordedMember? {
     val name = state.selectedNode ?: return null
-    val remote = if (state.demo) DEMO_REMOTE_KEY else state.address
+    val remote = state.address
     if (remote.isBlank()) return null
     return state.overview?.members?.singleOrNull { it.remote == remote && it.name == name }
 }
 
 /** Null means one live status read is allowed. Any other result must not open HTTP. */
 internal fun nodeStatusRefusal(state: WorkspaceState, member: RecordedMember): String? {
-    if (state.demo || member.remote == DEMO_REMOTE_KEY) return LIVE_STATUS_SAMPLE
     if (state.kind != DIRECT_PVE_KIND || !state.connected || state.address.isBlank() || member.remote != state.address) return LIVE_STATUS_NOT_REQUESTED
     if (state.stale || state.loading || state.overview == null) return LIVE_STATUS_NOT_REQUESTED
     if (state.overview.indexStale || state.overview.indexError != null) return LIVE_STATUS_NOT_REQUESTED

@@ -38,7 +38,7 @@ internal enum class TrayDestination(val label: String, val page: String? = null,
     Connections("Connections", "Desk"), Fleet("Fleet", "Fleet"), Activity("Activity", "Activity"),
     Notifications("Notifications"), Schedules("Schedules", "Schedules"), Storage("Storage", "Storage"),
     Watcher("Watcher", WATCHER_PAGE), Scan("Network scan", "Scan"), Tools("Network tools", "Tools"),
-    Bluetooth("Bluetooth", "Bluetooth"), Vpn("VPN", "VPN"),
+    Radios("Radios", "Radios"), Vpn("VPN", "VPN"),
     Settings("Settings…", settings = SettingsSection.Appearance),
     Updates("Check for updates…", settings = SettingsSection.Updates),
     About("About RingMASTER", settings = SettingsSection.About),
@@ -186,7 +186,7 @@ internal fun createTrayMenu(
     val more = submenu("More shortcuts")
     for (where in listOf(TrayDestination.Connections, TrayDestination.Storage, TrayDestination.Watcher)) more.add(destination(where))
     separator(more.popupMenu)
-    for (where in listOf(TrayDestination.Scan, TrayDestination.Tools, TrayDestination.Bluetooth, TrayDestination.Vpn)) more.add(destination(where))
+    for (where in listOf(TrayDestination.Scan, TrayDestination.Tools, TrayDestination.Radios, TrayDestination.Vpn)) more.add(destination(where))
     menu.add(more)
     separator()
     for (where in listOf(TrayDestination.Settings, TrayDestination.Updates, TrayDestination.About)) menu.add(destination(where))

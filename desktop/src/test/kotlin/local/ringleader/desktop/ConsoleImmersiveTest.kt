@@ -217,7 +217,7 @@ class ConsoleImmersiveTest {
 
     private fun pageState(connected: Boolean): WorkspaceState {
         val guest = Guest(origin, 112, "work", "node", "VM", "running")
-        return WorkspaceState(connected = connected, demo = false, selected = guest, overview = Overview(1, listOf(guest)))
+        return WorkspaceState(connected = connected, selected = guest, overview = Overview(1, listOf(guest)))
     }
 
     private fun scene(workspace: Workspace, immersive: ImmersiveState, connected: Boolean, context: CoroutineContext) =

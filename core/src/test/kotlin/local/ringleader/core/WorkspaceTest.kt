@@ -20,7 +20,7 @@ class WorkspaceTest {
                 Guest(connection.remoteKey, 101, "beta", "node-b", "Container", "stopped"),
             ))
         }
-        var detail: suspend (Connection, Guest) -> GuestDetails = { _, guest -> demoDetails(guest) }
+        var detail: suspend (Connection, Guest) -> GuestDetails = { _, guest -> sampleDetails(guest) }
         override suspend fun overview(connection: Connection) = inventory(connection)
         override suspend fun details(connection: Connection, guest: Guest) = detail(connection, guest)
     }
@@ -75,7 +75,7 @@ class WorkspaceTest {
         val gate = CompletableDeferred<GuestDetails>()
         val fake = Fake().apply {
             inventory = { Overview(2, listOf(first, second)) }
-            detail = { _, guest -> if (guest.id == first.id) withContext(NonCancellable) { gate.await() } else demoDetails(guest) }
+            detail = { _, guest -> if (guest.id == first.id) withContext(NonCancellable) { gate.await() } else sampleDetails(guest) }
         }
         val workspace = Workspace(this, fake)
         workspace.connect(connection()); runCurrent()
@@ -83,7 +83,7 @@ class WorkspaceTest {
         workspace.select(second)
         assertNull(workspace.state.value.details)
         runCurrent()
-        gate.complete(demoDetails(first)); runCurrent()
+        gate.complete(sampleDetails(first)); runCurrent()
         assertEquals(second, workspace.state.value.details!!.guest)
         workspace.close()
     }
@@ -161,15 +161,6 @@ class WorkspaceTest {
         workspace.close()
     }
 
-    @Test fun demoDoesNotAccessNetworkOrRetainPreviousSession() = runTest {
-        val fake = Fake().apply { inventory = { error("Unexpected network request") }; detail = { _, _ -> error("Unexpected network request") } }
-        val workspace = Workspace(this, fake)
-        workspace.exploreDemo(); workspace.select(demoOverview.guests.first()); workspace.refresh(); runCurrent()
-        assertTrue(workspace.state.value.demo)
-        assertNotNull(workspace.state.value.details)
-        workspace.close()
-    }
-
     @Test fun repeatedRefreshDoesNotQueueDuplicateRequests() = runTest {
         val gate = CompletableDeferred<Overview>()
         var calls = 0
@@ -218,7 +209,7 @@ class WorkspaceTest {
             detail = { connection, guest ->
                 check(guest.remote == connection.remoteKey)
                 detailCalls++
-                if (guest.remote == remoteA) withContext(NonCancellable) { gate.await() } else demoDetails(guest)
+                if (guest.remote == remoteA) withContext(NonCancellable) { gate.await() } else sampleDetails(guest)
             }
         }
         val workspace = Workspace(this, fake)
@@ -231,7 +222,7 @@ class WorkspaceTest {
         assertEquals(guestB.resource, workspace.state.value.details!!.guest.resource)
         assertEquals("beta", workspace.state.value.details!!.guest.name)
         assertEquals("node-b", workspace.state.value.details!!.guest.node)
-        gate.complete(demoDetails(guestA)); runCurrent()
+        gate.complete(sampleDetails(guestA)); runCurrent()
         assertEquals(guestB.resource, workspace.state.value.selected!!.resource)
         assertEquals("beta", workspace.state.value.details!!.guest.name)
         assertEquals("node-b", workspace.state.value.details!!.guest.node)

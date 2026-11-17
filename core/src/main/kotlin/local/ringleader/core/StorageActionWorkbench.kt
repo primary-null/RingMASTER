@@ -47,12 +47,10 @@ internal class StorageActionWorkbench(
     private val reads = mutableMapOf<String, Long>()
     private val readJobs = mutableMapOf<String, Job>()
     private var serial = 0L
-    private val demoListings = mutableMapOf<StorageKey, List<StorageVolume>>()
-    fun demoVolumes(key: StorageKey): List<StorageVolume>? = demoListings[key]
     private fun update(f: (StorageActionsState) -> StorageActionsState) = state.update { it.copy(storageActions = f(it.storageActions)) }
     private fun notice(text: String) { update { it.copy(notice = text) } }
     fun cancel() {
-        generation++; captured.clear(); reads.clear(); tasks.clear(); demoListings.clear()
+        generation++; captured.clear(); reads.clear(); tasks.clear()
         readJobs.values.toList().forEach { it.cancel() }; readJobs.clear()
         cancels.values.toList().forEach { it.cancel() }; cancels.clear()
         jobs.values.toList().forEach { it.cancel() }; jobs.clear()
@@ -64,9 +62,9 @@ internal class StorageActionWorkbench(
     }
     private fun refusal(key: StorageKey, request: StorageRequest? = null, own: String? = null): String? {
         val s = state.value
-        if ((!s.connected && !s.demo) || s.kind == PDM_KIND || (!s.demo && connection()?.kind != DIRECT_PVE_KIND)) return "Open a direct Proxmox VE connection."
+        if ((!s.connected) || s.kind == PDM_KIND || (connection()?.kind != DIRECT_PVE_KIND)) return "Open a direct Proxmox VE connection."
         if (s.stale || s.loading || s.overview?.indexStale != false) return "The recorded inventory is not current."
-        if (key.remote != (if(s.demo) DEMO_REMOTE_KEY else connection()?.remoteKey)) return "The connection changed."
+        if (key.remote != (connection()?.remoteKey)) return "The connection changed."
         val row = s.overview.storage.singleOrNull { it.remote == key.remote && it.node == key.node && it.id == key.storage } ?: return STORAGE_NOT_RECORDED
         if (s.overview.members.singleOrNull { it.remote == key.remote && it.name == key.node }?.status != "online") return STORAGE_NODE_NOT_ONLINE
         if (s.storageSelection != key || s.storageContent.loading || s.storageContent.stale || s.storageContent.error != null || s.storageContent.value?.key != key) return "Read the selected storage contents first."
@@ -77,7 +75,7 @@ internal class StorageActionWorkbench(
         if(request.action !in storageCapabilities(row)) return "This storage plugin does not support that file action."
         storageRequestError(request)?.let { return it }
         if(request is StorageRequest.Upload && !request.source.unchanged()) return "The file changed. Choose it again. Nothing was sent."
-        if (request is StorageRequest.TemplateDownload && !s.demo && s.storageActions.catalogues[key.node]?.contains(request.template) != true) return "Read the template catalogue and choose a current entry."
+        if (request is StorageRequest.TemplateDownload && s.storageActions.catalogues[key.node]?.contains(request.template) != true) return "Read the template catalogue and choose a current entry."
         request.volume?.let { v ->
             if (s.storageContent.value.volumes.singleOrNull { it.volid == v.volid } != v) return "The listed target changed. Read it again."
             try { storageVolumePath(key, v.volid) } catch (_: Exception) { return "Invalid listed volume identity." }
@@ -86,7 +84,7 @@ internal class StorageActionWorkbench(
             if (s.storageContent.value.filter != null && s.storageContent.value.filter != it) return "Read this content type or all contents before confirming."
             if (row.pluginType !in setOf("dir", "nfs", "cifs", "cephfs", "btrfs") || it !in row.content.orEmpty().split(',')) return "This storage does not accept that file content."
         }
-        return storageActionGate(request.action, if(s.demo) null else s.permissions.value?.dump, key, request.volume)
+        return storageActionGate(request.action, s.permissions.value?.dump, key, request.volume)
     }
     fun capture(key: StorageKey, r: StorageRequest, label: String): StorageConfirmation? {
         refusal(key, r)?.let { notice(it); return null }
@@ -109,7 +107,7 @@ internal class StorageActionWorkbench(
                 if (r is StorageRequest.EditNotes) "New notes captured (not shown in diagnostics)." else null,
                 if (r is StorageRequest.SetProtection) "Protected: ${r.protect}" else null,
                 if (r is StorageRequest.RemoveVolume) "Remove ${r.volume.volid} permanently. This cannot be undone." else null)
-        val c = StorageConfirmation(s.connectionEpoch, connection()?.address ?: "demo", label, key, r, facts, listing, replaces)
+        val c = StorageConfirmation(s.connectionEpoch, connection()?.address.orEmpty(), label, key, r, facts, listing, replaces)
         captured[c.confirmationId] = c
         return c
     }
@@ -117,7 +115,7 @@ internal class StorageActionWorkbench(
         val s = state.value
         if (captured.remove(c.confirmationId) !== c) { notice("This confirmation was already used or is no longer current."); return false }
         val reason = storageRefusal(c, s) ?: refusal(c.key, c.request)
-        if (c.epoch != s.connectionEpoch || c.origin != (connection()?.address ?: "demo") || reason != null || c.listing != s.storageContent.value?.volumes) { notice(reason ?: "The captured selection changed. Confirm again."); return false }
+        if (c.epoch != s.connectionEpoch || c.origin != (connection()?.address.orEmpty()) || reason != null || c.listing != s.storageContent.value?.volumes) { notice(reason ?: "The captured selection changed. Confirm again."); return false }
         val id = "local-${UUID.randomUUID()}"
         if (!acquire(id)) { notice("An action is already being sent. Nothing else was sent."); return false }
         val token = generation
@@ -134,20 +132,6 @@ internal class StorageActionWorkbench(
             try {
                 if (!live() || refusal(c.key, c.request, id) != null || c.listing != state.value.storageContent.value?.volumes) {
                     publish(PowerPhase.Rejected, "Selection changed before send. Nothing was sent."); return@launch
-                }
-                if (s.demo) {
-                    val old = state.value.storageContent.value!!
-                    val recorded = state.value.overview!!.storage.single { it.remote == c.key.remote && it.node == c.key.node && it.id == c.key.storage }
-                    val allRows = ((demoListings[c.key] ?: demoStorageContent(recorded)) + old.volumes).associateBy { it.volid }.values.toList()
-                    val rows = when(val r = c.request) {
-                        is StorageRequest.RemoveVolume -> allRows.filter { it.volid != r.volume.volid }
-                        is StorageRequest.EditNotes -> allRows.map { if(it.volid == r.volume.volid) it.copy(notes = r.notes.lineSequence().first()) else it }
-                        is StorageRequest.SetProtection -> allRows.map { if(it.volid == r.volume.volid) it.copy(protected = r.protect) else it }
-                        else -> allRows.filter { it.volid != "${c.key.storage}:${c.request.content}/${c.request.fileName}" } + StorageVolume("${c.key.storage}:${c.request.content}/${c.request.fileName}", c.request.content, null, null, null, null, null, null, null, false, null)
-                    }
-                    if(live()) demoListings[c.key] = rows.toList()
-                    if(live()) state.update { it.copy(storageContent = it.storageContent.copy(value = old.copy(volumes = rows.filter { old.filter == null || it.content == old.filter })), storageActions = it.storageActions.copy(submissions = it.storageActions.submissions.map { sub -> if(sub.localId == id) sub.copy(phase = PowerPhase.Simulated, detail = SIMULATED_POWER_DETAIL, simulated = true) else sub })) }
-                    return@launch
                 }
                 val upid = gateway.submit(conn!!, c.key, c.request, { bytes ->
                     if(live()) update { a -> a.copy(submissions = a.submissions.map { if(it.localId == id) it.copy(bytesSent = bytes.coerceIn(0, it.totalBytes ?: 0)) else it }) }
@@ -223,21 +207,21 @@ internal class StorageActionWorkbench(
             readLoading = it.readLoading - channel, readErrors = it.readErrors - channel,
             readStates = it.readStates + (channel to StorageReadStatus(identity))) }
         val reason = refusal(key)
-            ?: if(url != null && (downloadUrlError(url) != null || storageActionGate(StorageAction.UrlDownload, (if(state.value.demo) null else state.value.permissions.value?.dump), key) != null)) "URL metadata request refused." else null
+            ?: if(url != null && (downloadUrlError(url) != null || storageActionGate(StorageAction.UrlDownload, (state.value.permissions.value?.dump), key) != null)) "URL metadata request refused." else null
             ?: if(volid != null && state.value.storageContent.value?.volumes?.none { it.volid == volid && it.content == "backup" } != false) "Choose a listed backup." else null
         if(reason != null) {
             update { it.copy(readErrors = it.readErrors + (channel to reason), readStates = it.readStates + (channel to StorageReadStatus(identity,error=reason))) };return
         }
         val epoch = state.value.connectionEpoch; val gen = generation
-        val demo = state.value.demo; val conn = connection()
+        val conn = connection()
         update { it.copy(readLoading = it.readLoading + channel, readStates = it.readStates + (channel to StorageReadStatus(identity,loading=true))) }
         readJobs[channel] = scope.launch {
             fun live() = generation == gen && state.value.connectionEpoch == epoch && reads[channel] == token && state.value.storageSelection == key
             try {
                 when {
-                    url != null -> { val v = if(demo) UrlMetadata("sample.iso", 1048576, "application/octet-stream") else gateway.metadata(conn!!, key.node, url, verify); if(live()) update { it.copy(metadata = v) } }
-                    volid != null -> { val v = if(demo) state.value.storageContent.value!!.volumes.single { it.volid == volid }.let { StorageAttributes(it.notes, it.protected) } else gateway.attributes(conn!!, key, volid); if(live()) update { it.copy(attributes = v, attributesTarget = key to volid) } }
-                    else -> { val v = if(demo) listOf(AplTemplate("sample_1_amd64.tar.zst", "sample", "1", "lxc")) else gateway.catalogue(conn!!, key.node); if(live()) update { it.copy(catalogues = it.catalogues + (key.node to v.toList())) } }
+                    url != null -> { val v = gateway.metadata(conn!!, key.node, url, verify); if(live()) update { it.copy(metadata = v) } }
+                    volid != null -> { val v = gateway.attributes(conn!!, key, volid); if(live()) update { it.copy(attributes = v, attributesTarget = key to volid) } }
+                    else -> { val v = gateway.catalogue(conn!!, key.node); if(live()) update { it.copy(catalogues = it.catalogues + (key.node to v.toList())) } }
                 }
             } catch(e: SessionExpiredException) { expire(epoch) } catch(e: CancellationException) { throw e } catch (_: Exception) { if(live()) update { it.copy(readErrors = it.readErrors + (channel to "Storage read failed. No action was sent.")) } }
             finally { if(live()) update { it.copy(readLoading = it.readLoading - channel,

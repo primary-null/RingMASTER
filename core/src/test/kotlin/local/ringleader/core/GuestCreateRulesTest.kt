@@ -99,7 +99,7 @@ class GuestCreateRulesTest {
         assertEquals(CreateTaskOutcome.Succeeded, createTaskOutcome(PowerTaskStatus(PowerPhase.Succeeded, "OK")))
         assertEquals(140, parseNextId("""{"data":"140"}""")); assertFailsWith<IllegalArgumentException> { parseNextId("{}") }
         assertEquals("vmbr0", parseBridges("""{"data":[{"iface":"vmbr0","type":"bridge","active":1}]}""").single().name)
-        assertTrue(storageChoices(demoOverview.storage, "demo-node-a", "iso").any { it.id == "local" })
+        assertTrue(storageChoices(sampleOverview().storage, "demo-node-a", "iso").any { it.id == "local" })
         assertTrue(isForbiddenNodeRead("/api2/json/nodes/node-a/storage?content=images&format=1"))
     }
     @Test fun tagRulesUseUserTagAccessNotTagStyle() {

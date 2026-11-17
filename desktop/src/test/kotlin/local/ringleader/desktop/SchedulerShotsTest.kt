@@ -29,8 +29,7 @@ class SchedulerShotsTest {
         val phase = System.getenv("RINGMASTER_UI_PHASE") ?: "scheduler-after"
         val only = System.getenv("RINGMASTER_SHOT_ONLY")
         val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
-        val workspace = Workspace(scope)
-        workspace.exploreDemo()
+        val workspace = sampleWorkspace(scope)
         val state = workspace.state.value
         try {
             for (light in listOf(false, true)) for ((w, h, d, t) in listOf(listOf(960, 640, 1, 1), listOf(1600, 900, 1, 1), listOf(960, 640, 2, 15))) {

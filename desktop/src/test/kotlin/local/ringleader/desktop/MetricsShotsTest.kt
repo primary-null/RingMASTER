@@ -58,8 +58,8 @@ class MetricsShotsTest {
     private suspend fun render(dir: File, only: Set<String>?) {
         val context = currentCoroutineContext()
         val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
-        val workspace = Workspace(scope)
-        workspace.exploreDemo(); workspace.setLive(false)
+        val workspace = sampleWorkspace(scope)
+        workspace.setLive(false)
         workspace.select(workspace.state.value.overview!!.guests.first())
         workspace.inspectGuest("hour")
         delay(1200)
@@ -81,7 +81,7 @@ class MetricsShotsTest {
         val storageRow = overview.storage.first { it.node == "node-bravo" }
         val storageKey = StorageKey(storageRow.remote, storageRow.node, storageRow.id)
         val storageState = fleet.copy(storageSelection = storageKey,
-            storageContent = ReadSection.loaded(StorageContentView(storageKey, null, demoStorageContent(storageRow)), now, sample = true),
+            storageContent = ReadSection.loaded(StorageContentView(storageKey, null, sampleStorageContent(storageRow)), now),
             storageView = fleet.storageView.copy(history = ReadSection.loaded(StorageHistoryView(StorageHistoryRequest(storageKey, "hour", "AVERAGE"), MetricsFixtures.storageHistory(60)), now)))
         val pins = PinStore(sandboxPins())
 

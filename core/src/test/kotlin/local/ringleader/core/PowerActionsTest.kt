@@ -65,7 +65,7 @@ class PowerActionsTest {
         assertEquals("The connection changed. Nothing was sent.", powerRefusal(confirmation, ready.copy(connectionEpoch = 9)))
         assertFalse(actionMatches(guest.copy(status = "paused"), PowerAction.Start))
         assertFalse(actionMatches(guest.copy(template = true, status = "stopped"), PowerAction.Start))
-        assertFalse(liveActionsAvailable(ready.copy(demo = true, connected = false)))
+        assertFalse(liveActionsAvailable(ready.copy(connected = false)))
     }
 
     private fun statusBody(status: String, exitStatus: String?, upid: String = this.upid): String {
@@ -92,7 +92,7 @@ class PowerWorkspaceTest {
             Overview(1, listOf(Guest(connection.remoteKey, 100, "alpha", "node-a", "VM", "running"), Guest(connection.remoteKey, 101, "beta", "node-b", "Container", "stopped")))
         }
         override suspend fun overview(connection: Connection) = inventory(connection)
-        override suspend fun details(connection: Connection, guest: Guest) = demoDetails(guest)
+        override suspend fun details(connection: Connection, guest: Guest) = sampleDetails(guest)
     }
 
     private class Power : PowerGateway {
@@ -266,34 +266,6 @@ class PowerWorkspaceTest {
         assertFalse(workspace.state.value.toString().contains(upid))
         assertFalse(workspace.state.value.toString().contains("test-only-secret"))
         secret.close()
-        workspace.close()
-    }
-
-    @Test fun demoConfirmationStaysLocalAndTaskRefreshDoesNotDropSubmissions() = runTest {
-        var network = 0
-        val inventory = Inventory().apply { inventory = { network++; error("network") } }
-        val power = Power().apply { onSubmit = { _, _ -> network++; error("network") }; onStatus = { _, _ -> network++; error("network") } }
-        val tasks = object : TaskGateway {
-            override suspend fun tasks(connection: Connection): List<ClusterTask> { network++; return emptyList() }
-        }
-        val workspace = Workspace(this, inventory, tasks, power)
-        workspace.exploreDemo(); runCurrent()
-        // Demo guest 130 carries the backup lock, so Start on it is refused; the running VM 120 is used instead.
-        assertTrue(demoOverview.guests.single { it.id == 130 }.lock == "backup")
-        workspace.select(demoOverview.guests.single { it.id == 120 }); runCurrent()
-        val confirmation = workspace.capturePower(PowerAction.Shutdown, "Demonstration")!!
-        assertEquals("Demonstration", confirmation.origin)
-        assertTrue(workspace.submitPower(confirmation)); runCurrent()
-        val simulated = workspace.state.value.submissions.single()
-        assertEquals(PowerPhase.Simulated, simulated.phase)
-        assertEquals(SIMULATED_POWER_DETAIL, simulated.detail)
-        workspace.checkPower(simulated.localId); runCurrent()
-        workspace.select(demoOverview.guests.single { it.id == 120 }); runCurrent()
-        assertEquals(simulated.localId, workspace.state.value.submissions.single().localId)
-        workspace.refreshTasks(); runCurrent()
-        assertEquals(1, workspace.state.value.submissions.size)
-        assertEquals(0, network)
-        assertEquals(0, power.calls)
         workspace.close()
     }
 

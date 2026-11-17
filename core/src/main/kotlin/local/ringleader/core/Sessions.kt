@@ -19,7 +19,6 @@ data class SessionsState(val open: List<OpenSession>, val activeId: Long, val no
 }
 
 const val MAX_OPEN_SESSIONS = 6
-internal const val DEMO_IDENTITY = "demo"
 
 /**
  * The connections that are open at the same time. Each has its own [Workspace] (its own inventory, live refresh,
@@ -48,11 +47,11 @@ class Sessions(private val scope: CoroutineScope, private val newWorkspace: () -
     }
 
     /**
-     * Pick the session a new connection (null for the demo) opens in, bring it into view and attach the desk to it.
+     * Pick the session a new connection opens in, bring it into view and attach the desk to it.
      * @throws IllegalStateException when [MAX_OPEN_SESSIONS] other connections are already open.
      */
-    fun route(connection: Connection?, profileId: String?) {
-        val identity = connection?.let { sessionIdentity(it.kind, it.address, it.tokenId) } ?: DEMO_IDENTITY
+    fun route(connection: Connection, profileId: String?) {
+        val identity = sessionIdentity(connection.kind, connection.address, connection.tokenId)
         val now = mutableState.value
         val target = now.open.firstOrNull { it.identity == identity && isOpen(it) }
             ?: now.active.takeIf { !isOpen(it) }
@@ -146,7 +145,7 @@ class Sessions(private val scope: CoroutineScope, private val newWorkspace: () -
         watchers[session.id] = scope.launch {
             var wasOpen = false
             session.workspace.state.collect { state ->
-                val nowOpen = state.connected || state.demo
+                val nowOpen = state.connected
                 if (wasOpen && !nowOpen) {
                     val current = mutableState.value
                     if (current.open.any { it.id == session.id }) {
@@ -166,11 +165,11 @@ class Sessions(private val scope: CoroutineScope, private val newWorkspace: () -
 
 /**
  * How an open connection trusts its server, for the session card: "Certificate pin", or normal TLS with the store that
- * accepted the certificate ("Normal TLS · trusted by this computer" or "Normal TLS · public certificate"). Null for the
- * demo and when nothing is connected.
+ * accepted the certificate ("Normal TLS · trusted by this computer" or "Normal TLS · public certificate"). Null when
+ * nothing is connected.
  */
 fun connectionTrustLabel(state: WorkspaceState): String? = when {
-    state.demo || !state.connected -> null
+    !state.connected -> null
     state.pinned -> "Certificate pin"
     state.tlsTrust != null -> "Normal TLS · ${state.tlsTrust.label}"
     else -> "Normal TLS"
@@ -179,10 +178,10 @@ fun connectionTrustLabel(state: WorkspaceState): String? = when {
 internal fun sessionIdentity(kind: String, origin: String, user: String) = "$kind|$origin|$user"
 
 /**
- * True for a session worth keeping: the demo, or a connection that has loaded or is still loading. A connection whose
+ * True for a session worth keeping: a connection that has loaded or is still loading. A connection whose
  * first read failed (wrong password, unreachable server) has nothing to show, so the next connection may take its place.
  */
-fun sessionOpen(state: WorkspaceState) = state.demo || (state.connected && !(state.overview == null && state.error != null && !state.loading))
+fun sessionOpen(state: WorkspaceState) = (state.connected && !(state.overview == null && state.error != null && !state.loading))
 
 /**
  * True when a connection has nothing to show and a reason why: the server refused the sign-in and the session closed,

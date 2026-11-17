@@ -36,8 +36,8 @@ class NotificationCenterTest {
     }
 
     private fun event(n: Int = 1, category: NotificationCategory = NotificationCategory.TaskFailure, subject: String = "thing-$n", occurrence: String = "failed",
-        title: String = "Task failed: vzdump", body: String = "101 on node pve-a.", demo: Boolean = false, native: Boolean = true) =
-        NotificationEvent(NotificationIdentity("task", binding, subject, occurrence), category, NotificationSeverity.Error, title, body, demo = demo, native = native)
+        title: String = "Task failed: vzdump", body: String = "101 on node pve-a.", native: Boolean = true) =
+        NotificationEvent(NotificationIdentity("task", binding, subject, occurrence), category, NotificationSeverity.Error, title, body, native = native)
 
     @Test fun queuedDeliveryRechecksPrivacySnoozeAndDismissal() = runTest {
         val rig = Rig(at = t0)
@@ -391,21 +391,4 @@ class NotificationCenterTest {
         assertEquals(foreign, rig.text(), "it stays blocked until restart")
     }
 
-    @Test fun demoEventsStayInMemoryAndNeverReachTheOs() = runTest {
-        val rig = Rig(at = t0)
-        val center = rig.center()
-        val native = mutableListOf<NativeNotificationRequest>()
-        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { center.native.toList(native) }
-        assertEquals(PostResult.Posted, center.post(event(1, demo = true, title = "Demo guest is under load")))
-        assertEquals(PostResult.Duplicate, center.post(event(1, demo = true)))
-        assertTrue(center.state.value.items.single().demo)
-        assertTrue(native.isEmpty())
-        assertFalse(Files.exists(rig.file), "a demo event alone writes nothing")
-        center.post(event(2))
-        assertFalse("Demo guest" in rig.text())
-        assertEquals(1, decodeNotifications(rig.text()).seen.size, "demo identities are not stored")
-        center.dropDemo()
-        assertContentEquals(listOf(false), center.state.value.items.map { it.demo })
-        assertEquals(1, rig.center().state.value.items.size)
-    }
 }

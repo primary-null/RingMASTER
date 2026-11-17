@@ -14,7 +14,7 @@ import kotlin.test.*
 class CreateVmInteractionTest {
     @Test fun windowsArmStorageMediaFlagsAndNodeChangesReachDraft() = runSceneTest {
         val storage=StorageChoice("demo-node-a","sample-disks","dir",setOf("images","iso","import"),false,null,null,"available")
-        var session by mutableStateOf(demoCreateSession(NewGuestKind.Vm,"demo-node-a",1,Instant.EPOCH).copy(cpuFlags=ReadSection(value=listOf(CpuFlagChoice("aes","AES support")))))
+        var session by mutableStateOf(sampleCreateSession(NewGuestKind.Vm,"demo-node-a",1,Instant.EPOCH).copy(cpuFlags=ReadSection(value=listOf(CpuFlagChoice("aes","AES support")))))
         var seen: VmDraft?=null
         val reads=mutableListOf<CreateRead>()
         var osCalls=0; var archCalls=0; var storageCalls=0; var busCalls=0; var freezes=0

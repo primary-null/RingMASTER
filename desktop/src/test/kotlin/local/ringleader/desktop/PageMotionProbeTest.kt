@@ -35,8 +35,7 @@ class PageMotionProbeTest {
         val phase = System.getenv("RINGMASTER_UI_PHASE") ?: "after"
         val out = File("../artifacts/ui/$phase/motion").apply { mkdirs() }
         val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
-        val workspace = Workspace(scope)
-        workspace.exploreDemo()
+        val workspace = sampleWorkspace(scope)
         runBlocking { delay(2500) }
         val report = StringBuilder("# Page change probe (offscreen CPU raster, 1600x900, 16 ms steps)\n\n")
         report.append("Each row: one warm-up pass of every case first, then $REPS runs interleaved old/new. Times are per rendered frame over the 16 frames after the change.\n\n")

@@ -87,7 +87,7 @@ class U1LayoutFixRegressionTest {
         System.setProperty("user.home",root.toString())
         try {
             for(kind in listOf(NewGuestKind.Vm,NewGuestKind.Container)) for(step in if(kind==NewGuestKind.Vm) CreateFields.VM_STEPS else CreateFields.CT_STEPS) {
-                val session=demoCreateSession(kind,"demo-node-a",1,Instant.EPOCH)
+                val session=sampleCreateSession(kind,"demo-node-a",1,Instant.EPOCH)
                 val scene=ImageComposeScene(1366,728,Density(2f,1.5f),coroutineContext=coroutineContext) {
                     MaterialTheme(colorScheme=ringColors) { Surface(color=Tech.Canvas,contentColor=Tech.Ink) {
                         if(kind==NewGuestKind.Vm) CreateVmWizard(session,CreateContext(),listOf(session.node),{},{},{},{},{},initialStep=step,initialAdvanced=true,preferences=CreateWizardPreferences.memory())
@@ -97,7 +97,7 @@ class U1LayoutFixRegressionTest {
                 try { MatrixDriver().frames(scene,5)
                     whole(scene,"Cancel",1366,728)
                     whole(scene,"Next",1366,728)
-                    val title = text(scene,if(kind==NewGuestKind.Vm) "New VM \u00b7 Demo \u00b7 sample lists" else "Create container")
+                    val title = text(scene,if(kind==NewGuestKind.Vm) "New VM" else "Create container")
                     assertTrue(title.boundsInRoot.height < 80, "Create title wraps")
                     System.getenv("U1_LAYOUT_FIX_SHOTS")?.let { out -> java.io.File(out,"create-$kind-$step.png").apply { parentFile.mkdirs() }.writeBytes(scene.render(500_000_000).use { it.encodeToData()!!.use { d -> d.bytes } }) }
                 } finally { scene.close() }

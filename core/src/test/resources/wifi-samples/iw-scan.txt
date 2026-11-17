@@ -1,0 +1,176 @@
+BSS 02:00:00:00:01:00(on wlp3s0) -- associated
+	last seen: 3187.120s [boottime]
+	TSF: 1052633312251 usec (12d, 04:23:53)
+	freq: 5180
+	beacon interval: 100 TUs
+	capability: ESS Privacy SpectrumMgmt RadioMeasure (0x1111)
+	signal: -51.00 dBm
+	last seen: 12 ms ago
+	Information elements from Probe Response frame:
+	SSID: Example Home
+	Supported rates: 6.0* 9.0 12.0* 18.0 24.0* 36.0 48.0 54.0
+	DS Parameter set: channel 36
+	Country: US	Environment: Indoor/Outdoor
+		Channels [36 - 48] @ 23 dBm
+	BSS Load:
+		 * station count: 4
+		 * channel utilisation: 23/255
+		 * available admission capacity: 31250 [*32us]
+	HT capabilities:
+		Capabilities: 0x19ef
+			RX LDPC
+			HT20/HT40
+		HT TX/RX MCS rate indexes supported: 0-15
+	HT operation:
+		 * primary channel: 36
+		 * secondary channel offset: above
+		 * STA channel width: any
+		 * RIFS: 0
+	Extended capabilities:
+		 * Extended Channel Switching
+	VHT capabilities:
+		VHT Capabilities (0x338071b2):
+			Max MPDU length: 11454
+	VHT operation:
+		 * channel width: 1 (80 MHz)
+		 * center freq segment 1: 42
+		 * center freq segment 2: 0
+		 * VHT basic MCS set: 0xfffc
+	RSN:	 * Version: 1
+		 * Group cipher: CCMP
+		 * Pairwise ciphers: CCMP
+		 * Authentication suites: PSK SAE
+		 * Capabilities: 16-PTKSA-RC 1-GTKSA-RC MFP-capable (0x008c)
+	HE capabilities:
+		HE MAC Capabilities (0x010a08000000):
+			+HTC HE Supported
+	HE operation:
+		 * BSS Color: 17
+		 * HE basic MCS set: 0xfffc
+BSS 02:00:00:00:01:01(on wlp3s0)
+	last seen: 3187.120s [boottime]
+	freq: 2437
+	beacon interval: 100 TUs
+	capability: ESS Privacy ShortSlotTime (0x0411)
+	signal: -64.00 dBm
+	SSID: Example Home
+	Supported rates: 1.0* 2.0* 5.5* 11.0* 6.0 9.0 12.0 18.0
+	DS Parameter set: channel 6
+	HT capabilities:
+		Capabilities: 0x1ef
+	HT operation:
+		 * primary channel: 6
+		 * secondary channel offset: above
+		 * STA channel width: any
+	RSN:	 * Version: 1
+		 * Group cipher: CCMP
+		 * Pairwise ciphers: CCMP
+		 * Authentication suites: PSK
+		 * Capabilities: 1-PTKSA-RC 1-GTKSA-RC (0x0000)
+BSS 02:00:00:00:02:00(on wlp3s0)
+	freq: 2462
+	capability: ESS ShortSlotTime (0x0401)
+	signal: -78.00 dBm
+	SSID: Sample Guest: Open
+	Supported rates: 1.0* 2.0* 5.5* 11.0* 6.0 9.0 12.0 18.0
+	Extended supported rates: 24.0 36.0 48.0 54.0
+	DS Parameter set: channel 11
+BSS 02:00:00:00:03:00(on wlp3s0)
+	freq: 5745
+	capability: ESS Privacy SpectrumMgmt (0x0111)
+	signal: -77.00 dBm
+	SSID: Sample Office
+	HT capabilities:
+		Capabilities: 0x19ef
+	HT operation:
+		 * primary channel: 149
+		 * secondary channel offset: above
+		 * STA channel width: any
+	VHT capabilities:
+		VHT Capabilities (0x0f8259b2):
+	VHT operation:
+		 * channel width: 0 (20 or 40 MHz)
+		 * center freq segment 1: 0
+	RSN:	 * Version: 1
+		 * Group cipher: CCMP
+		 * Pairwise ciphers: CCMP
+		 * Authentication suites: IEEE 802.1X
+		 * Capabilities: 1-PTKSA-RC 1-GTKSA-RC (0x0000)
+BSS 02:00:00:00:04:00(on wlp3s0)
+	freq: 2412
+	capability: ESS Privacy ShortSlotTime (0x0411)
+	signal: -87.00 dBm
+	SSID: \x00\x00\x00\x00\x00\x00\x00\x00
+	Supported rates: 1.0* 2.0* 5.5* 11.0* 6.0 9.0 12.0 18.0
+	RSN:	 * Version: 1
+		 * Group cipher: CCMP
+		 * Pairwise ciphers: CCMP
+		 * Authentication suites: PSK
+BSS 02:00:00:00:05:00(on wlp3s0)
+	freq: 2422
+	capability: ESS Privacy ShortSlotTime (0x0411)
+	signal: -82.00 dBm
+	SSID: Old Router
+	Supported rates: 1.0* 2.0* 5.5* 11.0* 6.0 9.0 12.0 18.0
+	DS Parameter set: channel 3
+BSS 02:00:00:00:07:00(on wlp3s0)
+	freq: 5260
+	capability: ESS Privacy SpectrumMgmt (0x0111)
+	signal: -85.00 dBm
+	SSID: Back\x5cslash Net
+	HT capabilities:
+		Capabilities: 0x19ef
+	HT operation:
+		 * primary channel: 52
+		 * secondary channel offset: below
+		 * STA channel width: any
+	WPA:	 * Version: 1
+		 * Group cipher: TKIP
+		 * Pairwise ciphers: TKIP CCMP
+		 * Authentication suites: PSK
+	RSN:	 * Version: 1
+		 * Group cipher: TKIP
+		 * Pairwise ciphers: CCMP
+		 * Authentication suites: PSK
+BSS 02:00:00:00:06:00(on wlp3s0)
+	freq: 5220
+	capability: ESS SpectrumMgmt (0x0101)
+	signal: -69.00 dBm
+	SSID: Cafe Enhanced
+	VHT capabilities:
+		VHT Capabilities (0x0f8259b2):
+	VHT operation:
+		 * channel width: 1 (80 MHz)
+		 * center freq segment 1: 42
+	RSN:	 * Version: 1
+		 * Group cipher: CCMP
+		 * Pairwise ciphers: CCMP
+		 * Authentication suites: OWE
+	HE capabilities:
+		HE MAC Capabilities (0x010a08000000):
+BSS 02:00:00:00:08:00(on wlp3s0)
+	freq: 6135
+	capability: ESS Privacy (0x0011)
+	signal: -73.00 dBm
+	SSID: Example Home
+	RSN:	 * Version: 1
+		 * Group cipher: CCMP
+		 * Pairwise ciphers: CCMP
+		 * Authentication suites: SAE
+	HE capabilities:
+		HE MAC Capabilities (0x010a08000000):
+	HE operation:
+		 * BSS Color: 3
+		 * channel width: 3 (160 MHz)
+	EHT capabilities:
+		EHT MAC Capabilities (0x0000):
+BSS 02:00:00:00:09:00(on wlp3s0)
+	freq: 2452
+	capability: ESS Privacy ShortSlotTime (0x0411)
+	signal: -71.00 dBm
+	SSID: Caf\xc3\xa9 Sample
+	Supported rates: 1.0* 2.0* 5.5* 11.0* 6.0 9.0 12.0 18.0
+	RSN:	 * Version: 1
+		 * Group cipher: CCMP
+		 * Pairwise ciphers: CCMP
+		 * Authentication suites: PSK

@@ -116,9 +116,9 @@ internal fun seriesHistory(series: Series, metric: LiveMetric, node: Boolean): L
 
 /** Hour to year for a node, and for a direct guest that is still in the inventory. Cluster and PDM stay on live samples. */
 internal fun lensServerRanges(state: WorkspaceState, subject: LensSubject, guest: Guest?): Boolean = when (subject) {
-    is LensSubject.StorageSubject -> state.kind != PDM_KIND || state.demo
+    is LensSubject.StorageSubject -> state.kind != PDM_KIND
     is LensSubject.Cluster -> false
-    is LensSubject.NodeSubject -> !(state.kind == PDM_KIND && !state.demo)
+    is LensSubject.NodeSubject -> !(state.kind == PDM_KIND)
     is LensSubject.GuestSubject -> guest != null && guestHasPage(state, guest)
 }
 

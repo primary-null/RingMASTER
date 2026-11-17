@@ -20,13 +20,13 @@ class CreateRealCoreRendersTest {
         Files.createDirectories(output)
         for(kind in NewGuestKind.entries) {
             val gateway=FakeCreateGuestGateway()
-            val workspace=Workspace(this,createGateway=gateway)
-            workspace.exploreDemo();assertTrue(workspace.openCreateSession(kind,"demo-node-a"))
+            val workspace=sampleWorkspace(this,createGateway=gateway).awaitInventory()
+            assertTrue(workspace.openCreateSession(kind,"demo-node-a"))
             val session=workspace.state.value.creation!!
             val context=createContext(workspace.state.value,session)
             assertNotNull(context.choiceNode);assertNotNull(context.volumes);assertNotNull(context.bridges)
-            val vm=defaultVmDraft(session.node,context).copy(vmid="140",name="sample-vm",install=CdDrive(media=CdMedia.Iso("local",demoCreateVolumes.getValue("local" to "iso").first().volid)),nic=VmNic(bridge="vmbr0"))
-            val ct=defaultCtDraft(session.node,context).copy(vmid="140",hostname="sample-ct",template=demoCreateVolumes.getValue("local" to "vztmpl").first().volid,nic=CtNic(bridge="vmbr0"))
+            val vm=defaultVmDraft(session.node,context).copy(vmid="140",name="sample-vm",install=CdDrive(media=CdMedia.Iso("local",sampleCreateVolumes.getValue("local" to "iso").first().volid)),nic=VmNic(bridge="vmbr0"))
+            val ct=defaultCtDraft(session.node,context).copy(vmid="140",hostname="sample-ct",template=sampleCreateVolumes.getValue("local" to "vztmpl").first().volid,nic=CtNic(bridge="vmbr0"))
             if(kind==NewGuestKind.Vm) assertTrue(validateVm(vm,context).isEmpty(),validateVm(vm,context).toString())
             else assertTrue(validateCt(ct,context).isEmpty(),validateCt(ct,context).toString())
             for(light in listOf(false,true)) for((width,height) in listOf(960 to 640,1600 to 1000))

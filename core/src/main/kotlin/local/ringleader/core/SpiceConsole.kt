@@ -11,7 +11,6 @@ import java.net.URI
 
 const val SPICE_NOT_VM = "SPICE consoles are for QEMU VMs."
 const val SPICE_NOT_RUNNING = "Start the VM to open its console."
-const val SPICE_DEMO = "Consoles are not available with sample data."
 const val SPICE_NO_PERMISSION = "This token cannot open consoles (needs VM.Console on the VM)."
 const val SPICE_REQUEST_FAILED = "The server did not issue a SPICE ticket. The VM must be running with a SPICE display."
 const val SPICE_BAD_TICKET = "The server returned an unusable SPICE ticket."

@@ -38,22 +38,14 @@ const val GUEST_BT_AGENT_OFF = "The QEMU guest agent is turned off in this VM's 
 const val GUEST_BT_NEED_DIRECT = "Guest scans need a direct Proxmox VE connection."
 
 /** Proxmox VE `ostype` codes for Windows guests. A BlueZ scan cannot run in those. */
-private val windowsGuestOs = setOf("wxp", "w2k", "w2k3", "w2k8", "wvista", "win7", "win8", "win10", "win11")
+internal val windowsGuestOs = setOf("wxp", "w2k", "w2k3", "w2k8", "wvista", "win7", "win8", "win10", "win11")
 
 /**
  * Why a guest scan must not start, or null when it may.
  * [hardware] null means the VM config has not loaded. A missing or `0` agent option is off.
  * Windows `ostype` values are refused before any guest command is sent.
  */
-fun guestBluetoothRefusal(guest: Guest, directPve: Boolean, hardware: HardwareSummary?): String? = when {
-    guest.kind != "VM" -> "Guest scans need a QEMU VM with the guest agent."
-    guest.status != "running" || guest.template -> GUEST_BT_NOT_RUNNING
-    !directPve -> GUEST_BT_NEED_DIRECT
-    hardware == null -> GUEST_BT_LOADING
-    hardware.fields["ostype"]?.lowercase() in windowsGuestOs -> GUEST_BT_WINDOWS
-    !qemuAgentEnabled(hardware.fields["agent"]) -> GUEST_BT_AGENT_OFF
-    else -> null
-}
+fun guestBluetoothRefusal(guest: Guest, directPve: Boolean, hardware: HardwareSummary?): String? = guestRadioRefusal(guest, directPve, hardware)?.sentence
 
 /** PVE `agent` is `1`, `0`, or `enabled=1` plus comma-separated options. Absent means off. */
 fun qemuAgentEnabled(raw: String?): Boolean {
@@ -67,9 +59,9 @@ data class AgentExecStatus(val exited: Boolean, val exitCode: Int?, val out: Str
 
 internal fun agentExecBody(command: List<String>): ByteArray = buildJsonObject { putJsonArray("command") { command.forEach { add(it) } } }.toString().toByteArray(Charsets.UTF_8)
 fun parseAgentExecPid(body: String): Long =
-    ((Json.parseToJsonElement(body).jsonObject["data"] as? JsonObject)?.get("pid") as? JsonPrimitive)?.longOrNull ?: error(GUEST_BT_AGENT)
+    ((Json.parseToJsonElement(body).jsonObject["data"] as? JsonObject)?.get("pid") as? JsonPrimitive)?.longOrNull ?: throw GuestAgentFailure(GuestRefusal.AgentNotAnswering)
 fun parseAgentExecStatus(body: String): AgentExecStatus {
-    val d = Json.parseToJsonElement(body).jsonObject["data"] as? JsonObject ?: error(GUEST_BT_AGENT)
+    val d = Json.parseToJsonElement(body).jsonObject["data"] as? JsonObject ?: throw GuestAgentFailure(GuestRefusal.AgentNotAnswering)
     fun s(k: String) = (d[k] as? JsonPrimitive)?.contentOrNull.orEmpty()
     fun b(k: String) = (d[k] as? JsonPrimitive)?.let { it.booleanOrNull ?: (it.intOrNull?.let { n -> n != 0 }) } ?: false
     return AgentExecStatus(b("exited"), (d["exitcode"] as? JsonPrimitive)?.intOrNull, s("out-data"), s("err-data"), b("out-truncated"))
@@ -84,10 +76,3 @@ interface GuestBluetoothGateway {
 class LiveGuestBluetoothGateway(private val client: PveClient = PveClient()) : GuestBluetoothGateway {
     override suspend fun scan(connection: Connection, guest: Guest, seconds: Int): BtScan = runInterruptible(Dispatchers.IO) { client.guestBluetoothScan(connection, guest, seconds) }
 }
-
-/** Sample scan for demo mode, so the panel can be explored without a server. */
-fun demoGuestBluetoothScan(guest: Guest) = BtScan(guestBluetoothSource(guest),
-    listOf(BtAdapter("hci0", "${guest.name}-bt", "02:00:00:00:00:10", powered = true)),
-    listOf(BtDevice("02:00:00:00:01:01", "Sample headset", -58, paired = true, connected = false, kind = BtKind.Classic, category = "audio-headset", adapterId = "hci0"),
-        BtDevice("02:00:00:00:01:02", null, -81, kind = BtKind.LowEnergy, adapterId = "hci0")),
-    Instant.now(), "Sample data")

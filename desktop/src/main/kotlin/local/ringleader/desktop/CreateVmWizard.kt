@@ -79,7 +79,7 @@ import local.ringleader.core.*
     val steps = CreateFields.VM_STEPS.map { id -> WizardStep(id, mapOf("os" to "OS", "cpu" to "CPU")[id] ?: id.replaceFirstChar { it.uppercase() }, errors.keys.count { CreateFields.step(it) == id }, when(id) { "general" -> session.nextId.loading || session.pools.loading; "os" -> session.volumes.values.any { it.loading }; "cpu" -> session.cpuModels.loading || session.cpuFlags.loading; "network" -> session.bridges.loading; else -> false }) }
     val preview = safeCreatePreview { parameters(draft, context) }
     val lines = preview.lines + if (start) listOf(ParamLine("start", "1")) else emptyList()
-    CreateWizardFrame(NewGuestKind.Vm, if (session.sample) "New VM \u00b7 Demo \u00b7 sample lists" else "New VM", draft.node, draft.vmid,
+    CreateWizardFrame(NewGuestKind.Vm, "New VM", draft.node, draft.vmid,
         steps, current, { current = it }, lines, advanced, { advanced = it; prefs.advanced = it }, errors.isEmpty() && preview.problem == null && !loading && draft.node == session.node,
         "Create VM ${draft.vmid}\u2026", {
             if (errors.isNotEmpty() || preview.problem != null || loading || draft.node != session.node) return@CreateWizardFrame
@@ -92,7 +92,6 @@ import local.ringleader.core.*
         }) { columns ->
         preview.problem?.let { Text(it, color = Tech.Red) }
         SectionLabel(steps.first { it.id == current }.title)
-        if (session.sample) Text(DEMO_CREATE_SUBTITLE, color = Tech.Amber, fontSize = 11.sp)
         if (note.isNotEmpty()) Text(note, Modifier.identity(), color = Tech.Amber, fontSize = 12.sp)
         @Composable fun field(id: String, label: String, value: String, change: (String) -> VmDraft) {
             TechField(value, { edit(id, change(it)) }, label, Modifier.identity(), error = errors[id])

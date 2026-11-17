@@ -125,11 +125,11 @@ class ProfileDesk(
     /** Test hook. Called with a secret copy after it has been zeroed. */
     internal var onSecretReleased: ((CharArray) -> Unit)? = null
     /**
-     * Called right before a connection opens, with the connection and the saved profile it came from (both null for
-     * the demo). It may [attach] another workspace, so the new connection opens beside the ones already open. It
+     * Called right before a connection opens, with the connection and the saved profile it came from (null when it was
+     * typed and not saved). It may [attach] another workspace, so the new connection opens beside the ones already open. It
      * refuses by throwing [IllegalStateException]; the message is shown on the desk and nothing is opened.
      */
-    var router: ((Connection?, String?) -> Unit)? = null
+    var router: ((Connection, String?) -> Unit)? = null
     /** Called with a profile id when that profile is deleted or its connection details change: other sessions opened from it must close. */
     var profileInvalidated: ((String) -> Unit)? = null
 
@@ -651,17 +651,6 @@ class ProfileDesk(
         } catch (e: IllegalStateException) {
             mutableState.update { it.copy(formError = e.message) }; false
         } finally { connection?.close(); chars.fill('\u0000') }
-    }
-
-    fun exploreDemo(): Boolean {
-        discardSecrets()
-        try { router?.invoke(null, null) } catch (e: IllegalStateException) {
-            mutableState.update { it.copy(formError = e.message) }
-            return false
-        }
-        workspace.exploreDemo()
-        mutableState.update { it.copy(connectedProfileId = null, formError = null, notice = null) }
-        return true
     }
 
     fun disconnect() {

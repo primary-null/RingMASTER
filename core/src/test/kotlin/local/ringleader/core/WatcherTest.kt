@@ -541,30 +541,6 @@ class WatcherTest {
         assertEquals(WatchObservation.WrongRemote, rig.read(members = listOf(RecordedMember("https://other.example.test:8006", "node-a", "online", null, 0.1, 4.0, 1, 2, 1, 2, 3))))
     }
 
-    @Test fun demoAndRealWatchesAreIsolated() {
-        val rig = Rig(); rig.watchVm(); rig.open()
-        val demoVm = WatchResource(WatchKind.VM, vmid = 104)
-        assertEquals(WatchResult.Ok, rig.watcher.watch(WatchScope.Demo, demoVm, "demo-alpha"))
-        val demo = WatchSession(WatchScope.Demo, 7, 1)
-        assertTrue(rig.watcher.open(demo))
-        fun demoRow(cpu: Double) = Guest(DEMO_REMOTE_KEY, 104, "demo-alpha", "demo-node-a", "VM", "running", metrics = GuestListMetrics(cpuFraction = cpu, memoryBytes = gib, memoryLimitBytes = 4 * gib, uptimeSeconds = rig.clock.mono))
-        repeat(2) { rig.read(listOf(demoRow(0.99)), on = demo) }
-        assertTrue(rig.status(demoVm, DEMO_WATCH_BINDING).stressed)
-        assertFalse(rig.status(vm, scope.binding).stressed, "the real VM 104 heard nothing of the demo's VM 104")
-        val event = rig.sink.take().single()
-        assertTrue(event.demo); assertEquals("demo-alpha (104) is under load", event.title)
-        // Demo rows offered to the real session, and real rows to the demo session, are refused.
-        assertEquals(WatchObservation.WrongRemote, rig.read(listOf(demoRow(0.99))))
-        assertEquals(WatchObservation.WrongRemote, rig.read(listOf(rig.guest(cpu = 0.99)), on = demo))
-        // Demo watches are never written and end with the demo.
-        assertFalse("demo" in Files.readString(rig.file).lowercase())
-        rig.watcher.close(demo)
-        assertEquals(listOf(scope.binding), rig.watcher.state.value.watched.map { it.entry.binding })
-        // Real events are not marked demo.
-        rig.stress()
-        assertFalse(rig.sink.events.single().demo)
-    }
-
     // ---- watch list and storage ----
 
     @Test fun watchesOfASavedProfilePersistWithoutAddressAccountOrMetrics() {
@@ -623,8 +599,6 @@ class WatcherTest {
         assertTrue(refused is WatchResult.Error, "a watch that cannot be saved is not silently kept")
         assertTrue(rig.watcher.state.value.watched.isEmpty())
         assertEquals(damaged, Files.readString(rig.file))
-        // Demo and unsaved watches need no file and still work.
-        assertEquals(WatchResult.Ok, rig.watcher.watch(WatchScope.Demo, vm, "demo"))
         // Explicit set-aside keeps the damaged content and starts a new file.
         rig.clock.wall = Instant.parse("2026-11-13T11:00:00Z")
         val aside = rig.watcher.setAsideAndStartEmpty()

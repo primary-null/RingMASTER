@@ -489,7 +489,7 @@ private fun readAuditRows(file: File): LinkedHashMap<String, List<String>> = lin
                                 "Storage" -> "Storage contents"
                                 "Activity" -> "Recent activity"
                                 "Scan" -> "Network scan"
-                                "Bluetooth" -> "Nearby devices"
+                                "Radios" -> "Bluetooth and Wi-Fi"
                                 "VPN" -> "Tunnels and VPN"
                                 "Tools" -> "Network tools"
                                 "Under the Hood" -> "Under the Hood"

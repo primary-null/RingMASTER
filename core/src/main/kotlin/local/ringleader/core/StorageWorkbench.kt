@@ -41,7 +41,7 @@ data class StorageHistoryView(val request: StorageHistoryRequest, val points: Li
  * The storage view's state, one field of [WorkspaceState]. Memory only, dropped with the session like the other read views.
  *
  * - [config]: `GET /storage` through the allowlist. Its failure is not shown as an error on the page; it only means no
- *   disabled cards and no retention facts. A sample in demo.
+ *   disabled cards and no retention facts.
  * - [history]: the history of the storage the page shows, with the request it answers. [historyRequest] is the latest
  *   request, so the page can tell a chart that is loading for this storage from one left over from another.
  */
@@ -93,12 +93,8 @@ internal class StorageWorkbench(
     /** Read the storage configuration. A second call while one runs is ignored; a later call reads it again. */
     fun loadConfig() {
         val now = state.value
-        if (!now.connected && !now.demo) return
+        if (!now.connected) return
         if (now.storageView.config.loading) return
-        if (now.demo) {
-            updateView { it.copy(config = ReadSection.loaded(demoStorageConfig, clock(), sample = true)) }
-            return
-        }
         val current = direct()
         if (current == null) {
             updateView { it.copy(config = ReadSection<List<StorageConfigRow>>().failed(STORAGE_VIEW_DIRECT_ONLY)) }
@@ -131,10 +127,7 @@ internal class StorageWorkbench(
         return null
     }
 
-    private fun recordedDemo(now: WorkspaceState, node: String, storage: String): RecordedStorage? =
-        now.overview?.storage?.singleOrNull { it.remote == DEMO_REMOTE_KEY && it.node == node && it.id == storage }
-
-    private fun remote(now: WorkspaceState): String? = if (now.demo) DEMO_REMOTE_KEY else connection()?.remoteKey
+    private fun remote(now: WorkspaceState): String? = connection()?.remoteKey
 
     /**
      * Read one recorded storage's history into [StorageViewState.history]. The same storage's last series stays on screen,
@@ -143,19 +136,12 @@ internal class StorageWorkbench(
     fun loadHistory(node: String, storage: String, timeframe: String, cf: String) {
         historySuffix(timeframe, cf)
         val now = state.value
-        if (!now.connected && !now.demo) return
+        if (!now.connected) return
         val remote = remote(now) ?: return
         val request = StorageHistoryRequest(StorageKey(remote, node, storage), timeframe, cf)
         historyJob?.cancel()
         val expected = ++historyGeneration
         val previous = now.storageView.history.takeIf { it.value?.request?.key == request.key } ?: ReadSection()
-        if (now.demo) {
-            val row = recordedDemo(now, node, storage)
-            val section = if (row == null) ReadSection<StorageHistoryView>().failed(STORAGE_NOT_RECORDED)
-            else ReadSection.loaded(StorageHistoryView(request, demoStorageHistory(row, timeframe, cf, clock())), clock(), sample = true)
-            updateView { it.copy(historyRequest = request, history = section) }
-            return
-        }
         val refusal = historyRefusal(now, request.key)
         val current = direct()
         if (refusal != null || current == null) {
@@ -178,15 +164,11 @@ internal class StorageWorkbench(
 
     /**
      * One history read for the chart lens. It leaves [StorageViewState.history] alone, so the page behind the lens keeps its
-     * chart. The same refusals apply; the demo returns demo history.
+     * chart. The same refusals apply.
      */
     suspend fun read(node: String, storage: String, timeframe: String, cf: String): InspectionSection<List<HistoryPoint>> {
         historySuffix(timeframe, cf)
         val now = state.value
-        if (now.demo) {
-            val row = recordedDemo(now, node, storage) ?: return InspectionSection(error = STORAGE_NOT_RECORDED)
-            return InspectionSection(demoStorageHistory(row, timeframe, cf, clock()))
-        }
         if (!now.connected) return InspectionSection(error = HISTORY_NOT_CONNECTED)
         val remote = remote(now) ?: return InspectionSection(error = HISTORY_NOT_CONNECTED)
         val refusal = historyRefusal(now, StorageKey(remote, node, storage))

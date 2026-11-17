@@ -27,7 +27,7 @@ class StorageDesktopTest {
     }
     private suspend fun settle(scene:ImageComposeScene) { repeat(5) {scene.render((it+1)*100_000_000L).close();yield()} }
     @Test fun urlCheckIsExplicitAndCancelNeverSendsAndConfirmIsSingleUse()=runSceneTest {
-        val scope=CoroutineScope(coroutineContext+SupervisorJob());val w=Workspace(scope);w.exploreDemo()
+        val scope=CoroutineScope(coroutineContext+SupervisorJob());val w=sampleWorkspace(scope).awaitInventory()
         val row=w.state.value.overview!!.storage.first {"iso" in it.content.orEmpty()};w.selectStorage(row.node,row.id);yield()
         var open by mutableStateOf(true)
         val scene=ImageComposeScene(1200,800,coroutineContext=coroutineContext) {
@@ -43,8 +43,10 @@ class StorageDesktopTest {
             click(scene,"Check URL");settle(scene);assertNotNull(w.state.value.storageActions.metadata)
             click(scene,"Review");settle(scene);assertTrue(w.state.value.storageActions.submissions.isEmpty())
             click(scene,"Cancel");settle(scene);assertTrue(w.state.value.storageActions.submissions.isEmpty())
-            click(scene,"Review");settle(scene);click(scene,"Simulate");settle(scene)
-            assertEquals(1,w.state.value.storageActions.submissions.size);assertEquals(PowerPhase.Simulated,w.state.value.storageActions.submissions.single().phase)
+            click(scene,"Review");settle(scene);click(scene,"Confirm");settle(scene)
+            // The node's task ends a moment after it was accepted; only its end is a result.
+            w.awaitState { it.storageActions.submissions.singleOrNull()?.phase == PowerPhase.Succeeded }
+            assertEquals(1,w.state.value.storageActions.submissions.size);assertEquals(PowerPhase.Succeeded,w.state.value.storageActions.submissions.single().phase)
         } finally {scene.close();scope.cancel()}
     }
     @Test fun hostFileRefusalAndBoundedHashingAndSourceChange(): Unit=runBlocking {
@@ -58,7 +60,7 @@ class StorageDesktopTest {
         } finally {Files.deleteIfExists(p)}
     }
     @Test fun mediaNeverReadyAtAcceptanceMissingListingUnknownOrOldNode() {
-        val key=StorageKey(DEMO_REMOTE_KEY,"node-a","local");val expected="local:iso/fixture.iso"
+        val key=StorageKey(SAMPLE_ADDRESS,"node-a","local");val expected="local:iso/fixture.iso"
         val volume=StorageVolume(expected,"iso",null,1,null,null,null,null,null,false,null)
         val state=WorkspaceState(storageSelection=key,storageContent=ReadSection(value=StorageContentView(key,null,listOf(volume))))
         val accepted=StorageSubmission("local-test",key,StorageAction.UrlDownload,PowerPhase.Accepted,"Sending",subject="fixture.iso")
@@ -72,7 +74,7 @@ class StorageDesktopTest {
         assertFalse(mediaReadyMatches(ready,session.copy(volumes=emptyMap())))
     }
     @Test fun warningAndUnknownLabelsNeverClaimSuccess() {
-        val key=StorageKey(DEMO_REMOTE_KEY,"node-a","local")
+        val key=StorageKey(SAMPLE_ADDRESS,"node-a","local")
         val warning=StorageSubmission("local-test",key,StorageAction.Upload,PowerPhase.Unsuccessful,"safe",warningCount=2)
         assertTrue(storageResultLabel(warning).contains("2 warnings"))
         assertTrue(storageResultLabel(warning.copy(phase=PowerPhase.Unknown,warningCount=null)).startsWith("Unknown"))
@@ -111,7 +113,7 @@ class StorageDesktopTest {
         } finally {ct.close()}
     }
     @Test fun fullNotesRefreshDoesNotOverwriteEdits()=runSceneTest {
-        val scope=CoroutineScope(coroutineContext+SupervisorJob());val w=Workspace(scope);w.exploreDemo()
+        val scope=CoroutineScope(coroutineContext+SupervisorJob());val w=sampleWorkspace(scope).awaitInventory()
         val row=w.state.value.overview!!.storage.first {"backup" in it.content.orEmpty()};w.selectStorage(row.node,row.id);yield()
         val backup=w.state.value.storageContent.value!!.volumes.first {it.content=="backup"}
         val scene=ImageComposeScene(1200,800,coroutineContext=coroutineContext) {
@@ -127,7 +129,7 @@ class StorageDesktopTest {
         }finally{scene.close();scope.cancel()}
     }
     @Test fun browserSyntheticUploadHasNoChooserAndCannotReview()=runSceneTest {
-        val scope=CoroutineScope(coroutineContext+SupervisorJob());val w=Workspace(scope);w.exploreDemo()
+        val scope=CoroutineScope(coroutineContext+SupervisorJob());val w=sampleWorkspace(scope).awaitInventory()
         val row=w.state.value.overview!!.storage.first {it.id=="local"};w.selectStorage(row.node,row.id);yield()
         val p=Files.createTempFile("storage-browser-fixture", ".iso");Files.write(p,byteArrayOf(1))
         val fixture=DesktopUpload(UploadSource.capture(p),"fixture.iso",p)
@@ -143,13 +145,14 @@ class StorageDesktopTest {
         }finally{scene.close();scope.cancel();Files.deleteIfExists(p)}
     }
     @Test fun forceRefreshPreservesCreateGenerationAndRefusesOldNode()=runSceneTest {
-        val scope=CoroutineScope(coroutineContext+SupervisorJob());val w=Workspace(scope);w.exploreDemo()
+        val scope=CoroutineScope(coroutineContext+SupervisorJob());val w=sampleWorkspace(scope).awaitInventory()
         val row=w.state.value.overview!!.storage.first {it.id=="local"};assertTrue(w.openCreateSession(NewGuestKind.Vm,row.node));yield()
         val original=w.state.value.creation!!;w.selectStorage(row.node,row.id);yield()
         assertFalse(w.refreshCreateMedia(original.epoch,original.generation,"old-node",row.id,"iso"))
         assertFalse(w.refreshCreateMedia(original.epoch,original.generation+1,row.node,row.id,"iso"))
         assertTrue(w.refreshCreateMedia(original.epoch,original.generation,row.node,row.id,"iso"))
-        val refreshed=w.state.value.creation!!;assertEquals(original.generation,refreshed.generation);assertEquals(original.epoch,refreshed.epoch)
+        val refreshed=w.awaitState { it.creation?.volumes?.get(row.id to "iso")?.value != null }.creation!!
+        assertEquals(original.generation,refreshed.generation);assertEquals(original.epoch,refreshed.epoch)
         assertEquals(w.state.value.storageContent.value!!.volumes.filter {it.content=="iso"},refreshed.volumes[row.id to "iso"]!!.value)
         scope.cancel()
     }

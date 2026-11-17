@@ -56,10 +56,9 @@ import local.ringleader.core.WatchKind as CoreWatchKind
 
 val LocalAlertsSource = compositionLocalOf<AlertsSource?> { null }
 
-/** How the window names a connection: the saved profile's name, "Demonstration", or a generic word. Never the address. */
+/** How the window names a connection: the saved profile's name, or a generic word. Never the address. */
 internal class ConnectionNames(private val profiles: List<ConnectionProfile>) {
     fun label(profileId: String?, binding: String?): String = when {
-        binding == WatchScope.Demo.binding -> "Demonstration"
         profileId != null -> profiles.firstOrNull { it.id == profileId }?.displayName ?: "Removed profile"
         binding != null -> "Manual connection"
         else -> "RingMASTER"

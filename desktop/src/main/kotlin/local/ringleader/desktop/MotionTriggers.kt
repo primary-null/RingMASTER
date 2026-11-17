@@ -129,7 +129,7 @@ fun momentsBetween(old: MotionFacts?, new: MotionFacts): List<MotionMoment> {
         val source = "submission:${s.id}"
         val earlier = before[s.id]
         if (earlier == null) when (s.phase) {
-            PowerPhase.Accepted, PowerPhase.Simulated, PowerPhase.Unknown -> {
+            PowerPhase.Accepted, PowerPhase.Unknown -> {
                 out += MotionMoment(MomentKind.Started, s.resource, source, s.action)
                 if (s.action == PowerAction.SnapshotCreate) out += MotionMoment(MomentKind.Snapshot, s.resource, source, s.action)
             }

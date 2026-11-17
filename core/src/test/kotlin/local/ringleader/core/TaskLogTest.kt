@@ -113,18 +113,18 @@ class TaskLogTest {
     }
 
     @Test fun demoFixturesCoverBackupStartAndError() {
-        val backup = demoTaskLog(demoTasks.first { it.type == "vzdump" })
+        val backup = sampleTaskLog(sampleTasks().first { it.type == "vzdump" })
         assertTrue(backup.status!!.running)
         assertTrue(backup.lines.any { "50%" in it.text && "640.0 MiB" in it.text })
         assertTrue(backup.lines.none { it.text.contains("UPID:") })
-        assertTrue(demoTaskLogTail(backup.task).any { it.text.contains("100%") })
+        assertTrue(sampleTaskLogTail(backup.task).any { it.text.contains("100%") })
 
-        val started = demoTaskLog(demoTasks.first { it.type == "qmstart" })
+        val started = sampleTaskLog(sampleTasks().first { it.type == "qmstart" })
         assertEquals("OK", started.status!!.exitStatus)
         assertEquals("TASK OK", started.lines.last().text)
-        assertTrue(demoTaskLogTail(started.task).isEmpty())
+        assertTrue(sampleTaskLogTail(started.task).isEmpty())
 
-        val failed = demoTaskLog(demoTasks.first { it.type == "lab-maintenance" })
+        val failed = sampleTaskLog(sampleTasks().first { it.type == "lab-maintenance" })
         assertTrue(failed.lines.last().text.startsWith("TASK ERROR:"))
         assertTrue(failed.lines.any { it.text.startsWith("WARN:") })
         assertFalse(failed.status!!.running)
@@ -152,7 +152,7 @@ class TaskLogWorkspaceTest {
 
     private class QuietInventory : InventoryGateway {
         override suspend fun overview(connection: Connection) = Overview(0, emptyList())
-        override suspend fun details(connection: Connection, guest: Guest) = demoDetails(guest)
+        override suspend fun details(connection: Connection, guest: Guest) = sampleDetails(guest)
     }
 
     private class QuietPdm : PdmReadGateway {
@@ -242,30 +242,6 @@ class TaskLogWorkspaceTest {
         assertEquals(TASK_LOG_DIRECT_ONLY, workspace.state.value.taskLog!!.error)
         assertEquals(0, logs.statusCalls)
         assertEquals(0, logs.pageCalls)
-        workspace.close()
-    }
-
-    @Test fun demoLogStaysLocalAndFinishesTheBackupSample() = runTest {
-        val logs = FakeLog()
-        val workspace = Workspace(this, QuietInventory(), taskLogGateway = logs, pdmGateway = QuietPdm())
-        workspace.exploreDemo()
-        runCurrent()
-        val backup = demoTasks.first { it.type == "vzdump" }
-        workspace.openTaskLog(backup)
-        runCurrent()
-        assertTrue(workspace.state.value.taskLog!!.lines.any { "75%" in it.text })
-        assertEquals(0, logs.statusCalls)
-        repeat(8) { step(TASK_LOG_POLL_MS) }
-        val finished = workspace.state.value.taskLog!!
-        assertEquals("TASK OK", finished.lines.last().text)
-        assertEquals("OK", finished.status!!.exitStatus)
-        assertFalse(finished.status.running)
-        assertEquals(0, logs.pageCalls)
-        workspace.openTaskLog(demoTasks.first { it.type == "lab-maintenance" })
-        runCurrent()
-        assertTrue(workspace.state.value.taskLog!!.lines.last().text.startsWith("TASK ERROR:"))
-        workspace.closeTaskLog()
-        assertNull(workspace.state.value.taskLog)
         workspace.close()
     }
 

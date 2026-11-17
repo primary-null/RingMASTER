@@ -95,7 +95,6 @@ object HoodNetwork {
     private fun reached(s: TickerSession, c: NetworkContext): NetworkFact? {
         val route = s.route
         return when {
-            s.phase == TickerSessionPhase.Demo -> NetworkFact("REACHED", "Demonstration data, no server")
             s.phase == TickerSessionPhase.Failed -> null
             route == null -> NetworkFact("REACHED", if (s.inView) "Being read" else "Not read yet")
             else -> NetworkFact("REACHED", routeLine(route), if (route.kind == RouteKind.Proxy) TickerTone.Warning else TickerTone.Calm)
@@ -103,16 +102,14 @@ object HoodNetwork {
     }
 
     private fun trust(s: TickerSession, c: NetworkContext): NetworkFact? = when {
-        s.phase == TickerSessionPhase.Demo -> null
         s.pinned == true -> NetworkFact("TRUST", "Pinned certificate")
         s.pinned == false -> NetworkFact("TRUST", "Normal TLS")
         else -> null
     }
 
-    private fun signIn(s: TickerSession, c: NetworkContext): NetworkFact? = s.signIn?.takeIf { s.phase != TickerSessionPhase.Demo }?.let { NetworkFact("SIGN-IN", it) }
+    private fun signIn(s: TickerSession, c: NetworkContext): NetworkFact? = s.signIn?.let { NetworkFact("SIGN-IN", it) }
 
     private fun lastRequest(s: TickerSession, c: NetworkContext): NetworkFact? {
-        if (s.phase == TickerSessionPhase.Demo) return null
         val t = c.traffic
         val at = t?.lastAt
         if (t == null || at == null) return NetworkFact("LAST REQUEST", "none seen in 5 min")
@@ -123,7 +120,6 @@ object HoodNetwork {
     }
 
     private fun failures(s: TickerSession, c: NetworkContext): NetworkFact? {
-        if (s.phase == TickerSessionPhase.Demo) return null
         val n = c.traffic?.failures ?: 0
         return NetworkFact("FAILURES", if (n == 0) "none in 5 min" else "$n in 5 min", when { n == 0 -> TickerTone.Calm; n < 3 -> TickerTone.Warning; else -> TickerTone.Error })
     }
@@ -139,7 +135,7 @@ object HoodNetwork {
                 NetworkFact("REFRESH", "Backing off" + (waits?.let { " · waits ${formatSeconds(it)}" } ?: ""), TickerTone.Warning)
             }
             !s.live -> NetworkFact("REFRESH", "Paused")
-            loop != null && next != null && loop.state in setOf("waiting", "demo") -> NetworkFact("REFRESH", "Next read in ${formatSeconds(next)} · every ${formatSeconds(s.liveSeconds.toLong())}")
+            loop != null && next != null && loop.state == "waiting" -> NetworkFact("REFRESH", "Next read in ${formatSeconds(next)} · every ${formatSeconds(s.liveSeconds.toLong())}")
             else -> NetworkFact("REFRESH", "Every ${formatSeconds(s.liveSeconds.toLong())}")
         }
     }

@@ -39,7 +39,7 @@ private fun requirementLabel(id: String): String = FEATURE_REQUIREMENTS.single {
         SectionLabel("Node tools")
         when {
             state.kind == PDM_KIND -> Text(NODE_TOOLS_DIRECT_ONLY, fontSize = 11.sp, lineHeight = 15.sp, color = Tech.Muted)
-            !state.demo && member?.status != "online" -> Text(NODE_TOOLS_NODE_NOT_ONLINE, fontSize = 11.sp, lineHeight = 15.sp, color = Tech.Muted)
+            member?.status != "online" -> Text(NODE_TOOLS_NODE_NOT_ONLINE, fontSize = 11.sp, lineHeight = 15.sp, color = Tech.Muted)
             else -> {
                 TechTabs(NODE_TOOL_TABS, tab, { tab = it })
                 val denied = when (tab) {

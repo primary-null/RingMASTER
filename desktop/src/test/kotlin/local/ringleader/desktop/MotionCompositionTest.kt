@@ -1,6 +1,7 @@
 @file:OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
 package local.ringleader.desktop
 
+import local.ringleader.core.SAMPLE_ADDRESS
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.ImageComposeScene
@@ -48,7 +49,7 @@ class MotionCompositionTest {
     }
 
     @Test fun aScreenJoinsTheBookTheAppProvides() {
-        val state = WorkspaceState(demo = true)
+        val state = WorkspaceState(connected = true, address = SAMPLE_ADDRESS)
         val outer = arrayOfNulls<MotionBook>(1)
         val inner = arrayOfNulls<MotionBook>(1)
         val alone = arrayOfNulls<MotionBook>(1)

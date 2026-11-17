@@ -15,7 +15,7 @@ class ActivityWorkspaceTest {
 
     private class FakeInventory : InventoryGateway {
         var inventory: suspend (Connection) -> Overview = { Overview(1, emptyList()) }
-        var detail: suspend (Connection, Guest) -> GuestDetails = { _, guest -> demoDetails(guest) }
+        var detail: suspend (Connection, Guest) -> GuestDetails = { _, guest -> sampleDetails(guest) }
         override suspend fun overview(connection: Connection) = inventory(connection)
         override suspend fun details(connection: Connection, guest: Guest) = detail(connection, guest)
     }
@@ -165,7 +165,7 @@ class ActivityWorkspaceTest {
         assertNotNull(workspace.state.value.error)
         assertFailsWith<IllegalStateException> { connection.withSecret { it } }
         inventoryGate.complete(Overview(1, listOf(second))); runCurrent()
-        detailGate.complete(demoDetails(first)); runCurrent()
+        detailGate.complete(sampleDetails(first)); runCurrent()
         assertNull(workspace.state.value.overview)
         assertNull(workspace.state.value.details)
         assertNull(workspace.state.value.tasks)
@@ -230,36 +230,6 @@ class ActivityWorkspaceTest {
         assertEquals(listOf(task), workspace.state.value.tasks)
         assertTrue(workspace.state.value.tasksStale)
         workspace.close()
-    }
-
-    @Test fun demoActivityStaysLocalWhenTheSessionChanges() = runTest {
-        var inventoryCalls = 0
-        var allowInventory = true
-        val inventory = FakeInventory().apply {
-            inventory = { check(allowInventory); inventoryCalls++; Overview(1, listOf(first)) }
-            detail = { _, _ -> error("network") }
-        }
-        val tasks = FakeTasks().apply { load = { error("network") } }
-        val workspace = Workspace(this, inventory, tasks)
-        workspace.refreshTasks(); runCurrent()
-        assertEquals(0, tasks.calls)
-        val connection = connection()
-        workspace.connect(connection); runCurrent()
-        allowInventory = false
-        workspace.exploreDemo()
-        workspace.refreshTasks()
-        workspace.refresh()
-        workspace.select(demoOverview.guests.first())
-        runCurrent()
-        assertEquals(0, tasks.calls)
-        assertEquals(1, inventoryCalls)
-        assertTrue(workspace.state.value.demo)
-        assertEquals(demoTasks.map { it.identity }, workspace.state.value.tasks!!.map { it.identity })
-        assertTrue(workspace.state.value.tasks!!.any { it.type == "lab-maintenance" && taskStatusLabel(it) == "Unknown" })
-        assertTrue(workspace.state.value.tasks!!.any { taskStatusLabel(it) == "running" })
-        assertFailsWith<IllegalStateException> { connection.withSecret { it } }
-        workspace.close()
-        assertEquals(WorkspaceState(), workspace.state.value)
     }
 
     @Test fun emptyActivityPublishesAnEmptyList() = runTest {

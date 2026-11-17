@@ -9,7 +9,6 @@ import androidx.compose.ui.unit.dp
 import local.ringleader.core.*
 
 internal fun storageResultLabel(s: StorageSubmission): String = when {
-    s.simulated || s.phase==PowerPhase.Simulated -> "Demo \u00b7 simulated"
     s.warningCount!=null -> "${s.warningCount} warnings \u00b7 check task log"
     s.phase==PowerPhase.Accepted -> if(s.checkable) "Following server task" else "Sending"
     s.phase==PowerPhase.Succeeded -> if(s.evidence==StorageSuccessEvidence.TerminalOk) "Terminal OK" else "Exact attributes read back"
@@ -25,7 +24,7 @@ internal fun storageResultLabel(s: StorageSubmission): String = when {
                 Text("${storageActionTitle(s.action)} \u00b7 ${s.node} \u00b7 ${s.storage} \u00b7 ${s.subject}",Modifier.identity(),color=Tech.Ink)
                 Text(storageResultLabel(s),color=when { s.warningCount!=null -> Tech.Amber; s.phase==PowerPhase.Succeeded -> Tech.Green; s.phase in listOf(PowerPhase.Rejected,PowerPhase.Unsuccessful) -> Tech.Red;else -> Tech.Amber })
                 Text(s.detail,Modifier.identity(),color=Tech.Muted)
-                s.totalBytes?.takeIf { !s.simulated && s.phase!=PowerPhase.Simulated }?.let { total ->
+                s.totalBytes?.let { total ->
                     if(s.phase==PowerPhase.Accepted) TechProgress(fraction=if(total>0) s.bytesSent.toFloat()/total else null)
                     // Only after every byte has gone does the wait move to the server task.
                     val waiting=if(s.phase==PowerPhase.Accepted && s.bytesSent>=total) " \u00b7 awaiting server task completion" else ""
@@ -55,7 +54,7 @@ internal fun storageResultLabel(s: StorageSubmission): String = when {
     }.filter {it!=StorageAction.Upload || !browser}
     FlowRow(horizontalArrangement=Arrangement.spacedBy(6.dp)) {
         actions.forEach { a ->
-            val refusal=storageActionGate(a,if(state.demo) null else state.permissions.value?.dump,key,volume)
+            val refusal=storageActionGate(a,state.permissions.value?.dump,key,volume)
                 ?: if(a==StorageAction.RemoveVolume && volume?.protected==true) "Protected. Remove protection first." else null
             HelpTip(refusal ?: storageActionTitle(a),identity=refusal!=null) { // refusals name the storage path
                 MiniAction(if(a==StorageAction.SetProtection) if(volume?.protected==true) "Unprotect" else "Protect" else storageActionTitle(a),

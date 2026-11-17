@@ -30,7 +30,7 @@ class UnderTheHoodFocusTest {
         val scene = ImageComposeScene(1280, 720, coroutineContext = context) {
             MaterialTheme(colorScheme = ringColors) {
                 CompositionLocalProvider(LocalReduceMotion provides reduce, LocalHoodProbe provides true, LocalPageFocus provides focus, LocalTickerActivity provides activity?.let { a -> { a } }) {
-                    Surface(Modifier.fillMaxSize(), color = Tech.Canvas, contentColor = Tech.Ink) { Box(Modifier.padding(16.dp)) { UnderTheHoodScreen(WorkspaceState(demo = true)) } }
+                    Surface(Modifier.fillMaxSize(), color = Tech.Canvas, contentColor = Tech.Ink) { Box(Modifier.padding(16.dp)) { UnderTheHoodScreen(WorkspaceState(connected = true, address = SAMPLE_ADDRESS)) } }
                 }
             }
         }

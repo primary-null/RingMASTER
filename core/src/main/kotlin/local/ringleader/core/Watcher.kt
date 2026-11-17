@@ -103,8 +103,8 @@ class Watcher(
 
     /**
      * Starts watching [resource] of [scope]. Watches of a saved profile are written to `watcher.json` first; when that
-     * fails nothing is added and the message says so. Demo watches and watches of a connection that is not a saved
-     * profile last until RingMASTER quits (Demo: until the demo ends).
+     * fails nothing is added and the message says so. Watches of a connection that is not a saved profile last until
+     * RingMASTER quits.
      */
     fun watch(scope: WatchScope, resource: WatchResource, name: String): WatchResult = synchronized(lock) {
         if (!loaded) return WatchResult.Error("The watch list is not loaded yet.")
@@ -112,7 +112,7 @@ class Watcher(
         if (key in tracks) return WatchResult.Ok
         if (tracks.size >= MAX_WATCHED) return WatchResult.Error("At most $MAX_WATCHED resources can be watched. Stop watching one first.")
         val entry = WatchEntry(scope.profileId, scope.binding, resource, notificationText(name, 128), clock.now())
-        if (!scope.demo && scope.profileId != null) save(savedEntries() + entry)?.let { return WatchResult.Error(it) }
+        if (scope.profileId != null) save(savedEntries() + entry)?.let { return WatchResult.Error(it) }
         tracks[key] = Track(entry)
         publish()
         WatchResult.Ok
@@ -185,8 +185,7 @@ class Watcher(
         if (sessions[binding]?.session != session) { remember(session); return@synchronized }
         sessions.remove(binding)
         retire(session)
-        if (session.scope.demo) tracks.keys.filter { it.first == binding }.forEach { tracks.remove(it) }
-        else tracks.values.filter { it.entry.binding == binding }.forEach { it.breakContinuity() }
+        tracks.values.filter { it.entry.binding == binding }.forEach { it.breakContinuity() }
         publish()
     }
 
@@ -303,7 +302,7 @@ class Watcher(
         while (list.size > 32) list.removeFirst()
     }
 
-    private fun savedEntries(): List<WatchEntry> = tracks.values.map { it.entry }.filter { it.profileId != null && it.binding != DEMO_WATCH_BINDING }
+    private fun savedEntries(): List<WatchEntry> = tracks.values.map { it.entry }.filter { it.profileId != null }
 
     /** Null when saved; otherwise the message, with the problem kept for the state. */
     private fun save(entries: List<WatchEntry>): String? = try {
@@ -444,7 +443,7 @@ class Watcher(
 
     private fun watchEvent(scope: WatchScope, track: Track, occurrence: String, category: NotificationCategory, severity: NotificationSeverity, title: String, body: String) =
         NotificationEvent(NotificationIdentity("watch", scope.binding, track.entry.resource.key, occurrence), category, severity, title, body,
-            NotificationTarget.Resource(scope.profileId, scope.binding, track.entry.resource), demo = scope.demo)
+            NotificationTarget.Resource(scope.profileId, scope.binding, track.entry.resource))
 
     /** Caller holds [lock]. */
     private fun publish() {
@@ -495,7 +494,7 @@ internal fun taskEvents(scope: WatchScope, task: ClusterTask, previous: TaskOutc
     val warnings = taskHasWarnings(task)
     val target = runCatching { NotificationTarget.Task(scope.profileId, scope.binding, task.upid) }.getOrDefault(NotificationTarget.None)
     fun event(kind: String, category: NotificationCategory, severity: NotificationSeverity, title: String, body: String) =
-        NotificationEvent(NotificationIdentity("task", scope.binding, task.upid, kind), category, severity, title, body, target, demo = scope.demo)
+        NotificationEvent(NotificationIdentity("task", scope.binding, task.upid, kind), category, severity, title, body, target)
     val out = mutableListOf<NotificationEvent>()
     if (task.outcome == TaskOutcome.Unsuccessful && previous != TaskOutcome.Unsuccessful) {
         out += if (type == "vzdump") event("failed", NotificationCategory.BackupFailure, NotificationSeverity.Error, "Backup failed", "${taskSubject(task)}. Open Activity for the task's status.")

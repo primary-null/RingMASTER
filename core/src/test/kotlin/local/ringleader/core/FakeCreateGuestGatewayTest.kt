@@ -19,9 +19,9 @@ class FakeCreateGuestGatewayTest {
 
     @Test fun listsLoadFailAndComeBackEmpty() = runTest {
         val fake = FakeCreateGuestGateway()
-        assertEquals(NextIdReply.Free(DEMO_CREATE_NEXT_ID), fake.nextId(connection, null))
+        assertEquals(NextIdReply.Free(SAMPLE_CREATE_NEXT_ID), fake.nextId(connection, null))
         assertEquals(NextIdReply.Free(150), fake.nextId(connection, 150))
-        assertEquals(demoCreateBridges, fake.bridges(connection, "node-a"))
+        assertEquals(sampleCreateBridges, fake.bridges(connection, "node-a"))
         assertEquals(3, fake.volumes(connection, "node-a", "local", "iso").size)
         assertEquals(emptyList(), fake.volumes(connection, "node-a", "other", "iso"))
 

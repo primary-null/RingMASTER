@@ -18,7 +18,7 @@ class ConsoleWorkspaceTest {
 
     private class Inventory(var guests: List<Guest>) : InventoryGateway {
         override suspend fun overview(connection: Connection) = Overview(1, guests)
-        override suspend fun details(connection: Connection, guest: Guest) = demoDetails(guest)
+        override suspend fun details(connection: Connection, guest: Guest) = sampleDetails(guest)
     }
 
     private class Vnc : VncConsoleGateway {

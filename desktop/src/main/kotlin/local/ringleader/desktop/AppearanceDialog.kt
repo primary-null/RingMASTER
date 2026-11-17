@@ -155,7 +155,7 @@ import kotlinx.coroutines.withContext
         TechSwitch(Appearance.showcase, { Appearance.chooseShowcase(it) })
         Column(Modifier.weight(1f)) {
             Text("Blur names, IDs and addresses", fontSize = 13.sp)
-            Caption("For demos, recordings and screenshots. Hover a value to peek. Ctrl+Shift+B toggles it anywhere.")
+            Caption("For presentations, recordings and screenshots. Hover a value to peek. Ctrl+Shift+B toggles it anywhere.")
         }
     }
     Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {

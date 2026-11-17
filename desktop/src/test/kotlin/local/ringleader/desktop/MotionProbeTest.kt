@@ -52,13 +52,13 @@ class MotionProbeTest {
     private val density = 2f
     private val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
     private val workspace by lazy { Workspace(scope) }
-    private val vm120 = ResourceId(DEMO_REMOTE_KEY, "", "VM", 120)
+    private val vm120 = ResourceId(SAMPLE_ADDRESS, "", "VM", 120)
 
     private fun guests(status120: String) = listOf(
-        Guest(DEMO_REMOTE_KEY, 120, "debian-workbench", "demo-node-a", "VM", status120, metrics = if (status120 == "running") GuestListMetrics(cpuFraction = .12, memoryBytes = 1L shl 30, memoryLimitBytes = 4L shl 30, uptimeSeconds = 7200) else GuestListMetrics(memoryLimitBytes = 4L shl 30)),
-        Guest(DEMO_REMOTE_KEY, 121, "web-services", "demo-node-a", "Container", "running", metrics = GuestListMetrics(cpuFraction = .31, memoryBytes = 1L shl 29, memoryLimitBytes = 2L shl 30, uptimeSeconds = 90000)),
-        Guest(DEMO_REMOTE_KEY, 130, "backup-lab", "demo-node-b", "VM", "stopped"),
-        Guest(DEMO_REMOTE_KEY, 140, "metrics", "demo-node-b", "VM", "running", metrics = GuestListMetrics(cpuFraction = .05, memoryBytes = 1L shl 29, memoryLimitBytes = 2L shl 30, uptimeSeconds = 600)),
+        Guest(SAMPLE_ADDRESS, 120, "debian-workbench", "demo-node-a", "VM", status120, metrics = if (status120 == "running") GuestListMetrics(cpuFraction = .12, memoryBytes = 1L shl 30, memoryLimitBytes = 4L shl 30, uptimeSeconds = 7200) else GuestListMetrics(memoryLimitBytes = 4L shl 30)),
+        Guest(SAMPLE_ADDRESS, 121, "web-services", "demo-node-a", "Container", "running", metrics = GuestListMetrics(cpuFraction = .31, memoryBytes = 1L shl 29, memoryLimitBytes = 2L shl 30, uptimeSeconds = 90000)),
+        Guest(SAMPLE_ADDRESS, 130, "backup-lab", "demo-node-b", "VM", "stopped"),
+        Guest(SAMPLE_ADDRESS, 140, "metrics", "demo-node-b", "VM", "running", metrics = GuestListMetrics(cpuFraction = .05, memoryBytes = 1L shl 29, memoryLimitBytes = 2L shl 30, uptimeSeconds = 600)),
     )
 
     private fun still(): ConsoleStill {
@@ -75,15 +75,15 @@ class MotionProbeTest {
     private fun sub(id: String, resource: ResourceId, action: PowerAction, phase: PowerPhase, detail: String? = null) = PowerSubmission(
         "local-$id", resource.remote, if (resource.vmid == 120 || resource.vmid == 121) "demo-node-a" else "demo-node-b", resource.vmid, resource.kind,
         guests("running").first { it.id == resource.vmid }.name, action, phase,
-        detail ?: when (phase) { PowerPhase.Succeeded -> "Stopped with exit status OK."; PowerPhase.Accepted -> "The server accepted this action. It is not finished."; PowerPhase.Simulated -> SIMULATED_POWER_DETAIL; else -> "command failed: exit code 1" },
-        phase == PowerPhase.Simulated, phase == PowerPhase.Accepted,
+        detail ?: when (phase) { PowerPhase.Succeeded -> "Stopped with exit status OK."; PowerPhase.Accepted -> "The server accepted this action. It is not finished."; else -> "command failed: exit code 1" },
+        phase == PowerPhase.Accepted,
     )
 
     private fun base(status120: String, submissions: List<PowerSubmission> = emptyList(), tasks: List<ClusterTask>? = null, selected: Boolean = true, stills: Boolean = false): WorkspaceState {
         val all = guests(status120)
         return WorkspaceState(
-            connected = true, demo = true, connectionEpoch = 1, updatedAt = Instant.now(),
-            overview = demoOverview.copy(guests = all, nodes = 2), selected = if (selected) all.first() else null,
+            connected = true, connectionEpoch = 1, updatedAt = Instant.now(),
+            overview = sampleOverview().copy(guests = all, nodes = 2), selected = if (selected) all.first() else null,
             submissions = submissions, tasks = tasks,
             consoleStills = if (stills) mapOf(all.first().resource to still()) else emptyMap(),
         )
@@ -169,8 +169,7 @@ class MotionProbeTest {
             MotionTier.entries.forEach { tier ->
                 val t = tier.name.lowercase()
                 fun scene(name: String, block: () -> Unit) = runCatching(block).onFailure { println("$name $t failed: $it"); it.printStackTrace() }
-                scene("spark") { spark(dir, tier, t, simulated = false) }
-                scene("spark-demo") { spark(dir, tier, t, simulated = true) }
+                scene("spark") { spark(dir, tier, t) }
                 scene("breathing") { breathing(dir, tier, t) }
                 scene("success") { success(dir, tier, t) }
                 scene("failure") { failure(dir, tier, t) }
@@ -187,7 +186,7 @@ class MotionProbeTest {
 
     // ---- a. spark: Send button to the guest's status dot -------------------------------------------------------------------
 
-    private fun spark(dir: File, tier: MotionTier, t: String, simulated: Boolean) {
+    private fun spark(dir: File, tier: MotionTier, t: String) {
         val state = mutableStateOf(base("stopped"))
         Rig(tier, 1280, 520, fleet(state)).use { rig ->
             rig.settle()
@@ -196,12 +195,11 @@ class MotionProbeTest {
             val button = Rect(Offset(dot.x - px(330f).toFloat(), dot.y + px(34f).toFloat()), androidx.compose.ui.geometry.Size(px(120f).toFloat(), px(32f).toFloat()))
             rig.sparks[0]!!.ignite(RmMotion(tier), button, listOf(RowAnchor(vm120), TagAnchor(vm120)), hot = false) {}
             var posted = false
-            val phase = if (simulated) PowerPhase.Simulated else PowerPhase.Accepted
+            val phase = PowerPhase.Accepted
             val left = (button.left - px(40f)).toInt()
             val crop = rect(left, dot.y - px(70f), (dot.x + px(150f)) - left, px(150f))
-            strip(File(dir, "spark${if (simulated) "-demo" else ""}-$t.png"), rig, listOf(0, 32, 64, 96, 128, 160, 192, 224, 256, 320, 400, 520, 700, 1000), crop,
-                if (simulated) "SPARK, demo mode ($t): Simulate -> the dot pops once, nothing breathes (a simulated action never runs). Submission lands at +64ms."
-                else "SPARK ($t): Send -> the spark leaves the button for the guest's status dot, the dot pops, then breathes (Accepted, not finished). Submission lands at +64ms.", 1f, 2) { ms ->
+            strip(File(dir, "spark-$t.png"), rig, listOf(0, 32, 64, 96, 128, 160, 192, 224, 256, 320, 400, 520, 700, 1000), crop,
+                "SPARK ($t): Send -> the spark leaves the button for the guest's status dot, the dot pops, then breathes (Accepted, not finished). Submission lands at +64ms.", 1f, 2) { ms ->
                 if (!posted && ms >= 64) { posted = true; state.value = base("stopped", submissions = listOf(sub("1", vm120, PowerAction.Start, phase))) }
             }
         }
@@ -337,7 +335,7 @@ class MotionProbeTest {
 
     private fun progress(dir: File, tier: MotionTier, t: String) {
         val now = Instant.now()
-        val task = ClusterTask(DEMO_REMOTE_KEY, "demo:vzdump:121", "demo-node-a", "vzdump", "121", "demo@ringmaster", now.minusSeconds(95), null, "running", TaskOutcome.Running)
+        val task = ClusterTask(SAMPLE_ADDRESS, sampleUpid("vzdump", "121"), "demo-node-a", "vzdump", "121", "demo@ringmaster", now.minusSeconds(95), null, "running", TaskOutcome.Running)
         fun log(percent: Int) = TaskLogState(task, listOf(TaskLogLine(1, "INFO: starting new backup job"), TaskLogLine(2, "INFO: Starting Backup of VM 121 (lxc)"), TaskLogLine(3, "INFO: ${percent}%: ${percent * 12} MiB")), 3,
             TaskLogStatus("running", null, task.startedAt, null, 8801, "vzdump", "121", "demo@ringmaster", "demo-node-a"))
         fun state(percent: Int) = base("running", selected = false, tasks = listOf(task)).copy(taskLog = log(percent))

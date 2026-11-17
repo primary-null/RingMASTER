@@ -1,0 +1,75 @@
+RINGMASTER-RADIO 1 probe 32c0f1c8b8484f13
+32c0f1c8b8484f13	tools	nmcli	iw	rfkill	bluetoothctl	hciconfig	hcitool	btmgmt
+32c0f1c8b8484f13	uid	1000
+32c0f1c8b8484f13	rfkill	name=phy0 	type=wlan 	soft=0 	hard=0 
+32c0f1c8b8484f13	rfkill	name=hci0 	type=bluetooth 	soft=1 	hard=0 
+32c0f1c8b8484f13	bt	id=hci0	driver=btusb	bus=usb	pci=	vendor=13d3 	device=3585 	product=Wireless_Device 	maker=MediaTek Inc. 
+32c0f1c8b8484f13	wifi	id=wlp3s0	driver=iwlwifi	bus=pci	pci=0000:03:00.0	vendor=0x8086 	device=0x2725 	product=	maker=	phy=phy0	mac=02:00:00:00:00:01 	operstate=up 	carrier=1 
+32c0f1c8b8484f13	wifiphy	id=phy1	driver=	bus=	pci=	vendor=	device=	product=	maker=	phy=phy1
+32c0f1c8b8484f13	begin	bluetoothctl-list
+Controller 02:00:00:00:00:10 sample-host [default]
+
+32c0f1c8b8484f13	end	bluetoothctl-list
+32c0f1c8b8484f13	begin	bluetoothctl-show 02:00:00:00:00:10
+Controller 02:00:00:00:00:10 (public)
+	Name: sample-host
+	Alias: Sample Host
+	Class: 0x007c0104
+	Powered: yes
+	PowerState: on
+	Discoverable: no
+	DiscoverableTimeout: 0x000000b4
+	Pairable: yes
+	UUID: Generic Attribute Profile (00001801-0000-1000-8000-00805f9b34fb)
+	Modalias: usb:v13D3p3585d0001
+	Discovering: no
+	Roles: central
+	Roles: peripheral
+Advertising Features:
+	ActiveInstances: 0x00 (0)
+
+32c0f1c8b8484f13	end	bluetoothctl-show 02:00:00:00:00:10
+32c0f1c8b8484f13	begin	hciconfig
+hci0:	Type: Primary  Bus: USB
+	BD Address: 02:00:00:00:00:10  ACL MTU: 1021:4  SCO MTU: 96:6
+	UP RUNNING 
+	RX bytes:1234 acl:0 sco:0 events:73 errors:0
+	TX bytes:4321 acl:0 sco:0 commands:61 errors:0
+	Features: 0xff 0xfe 0xcf 0xfe 0xdb 0xff 0x7b 0x87
+	Link mode: PERIPHERAL ACCEPT 
+	Name: 'sample-host'
+	Class: 0x6c0104
+	HCI Version: 5.2 (0xb)  Revision: 0x1a01
+	Manufacturer: MediaTek, Inc. (70)
+
+32c0f1c8b8484f13	end	hciconfig
+32c0f1c8b8484f13	begin	hcitool-dev
+Devices:
+	hci0	02:00:00:00:00:10
+
+32c0f1c8b8484f13	end	hcitool-dev
+32c0f1c8b8484f13	begin	btmgmt-info
+Index list with 1 item
+hci0:	Primary controller
+	addr 02:00:00:00:00:10 version 11 manufacturer 70 class 0x6c0104
+	supported settings: powered connectable fast-connectable discoverable bondable link-security ssp br/edr hs le advertising secure-conn debug-keys privacy static-addr phy-configuration
+	current settings: powered bondable ssp br/edr le secure-conn
+	name sample-host
+	short name 
+
+32c0f1c8b8484f13	end	btmgmt-info
+32c0f1c8b8484f13	begin	iw-link wlp3s0
+Connected to 02:00:00:00:01:00 (on wlp3s0)
+	SSID: Example Home
+	freq: 5180
+	RX: 123456789 bytes (98765 packets)
+	TX: 12345678 bytes (87654 packets)
+	signal: -51 dBm
+	rx bitrate: 1200.9 MBit/s 80MHz HE-MCS 10 HE-NSS 2 HE-GI 0 HE-DCM 0
+	tx bitrate: 1441.1 MBit/s 80MHz HE-MCS 11 HE-NSS 2 HE-GI 0 HE-DCM 0
+	bss flags:	short-slot-time
+	dtim period:	2
+	beacon int:	100
+
+32c0f1c8b8484f13	end	iw-link wlp3s0
+32c0f1c8b8484f13	done

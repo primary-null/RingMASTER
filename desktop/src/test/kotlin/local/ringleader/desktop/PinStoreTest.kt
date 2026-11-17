@@ -1,5 +1,6 @@
 package local.ringleader.desktop
 
+import local.ringleader.core.sampleUpid
 import java.nio.file.Files
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -8,16 +9,19 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import local.ringleader.core.ClusterTask
-import local.ringleader.core.DEMO_REMOTE_KEY
+import local.ringleader.core.SAMPLE_ADDRESS
 import local.ringleader.core.Guest
 import local.ringleader.core.PowerAction
 import local.ringleader.core.PowerPhase
 import local.ringleader.core.PowerSubmission
 import local.ringleader.core.TaskOutcome
 
+/** A second connection's key, to show that pins of one connection are not another's. */
+private const val OTHER_CONNECTION = "other-connection"
+
 class PinStoreTest {
-    private val guest = Guest(DEMO_REMOTE_KEY, 120, "debian-workbench", "demo-node-a", "VM", "running")
-    private val other = Guest(DEMO_REMOTE_KEY, 121, "adguard", "demo-node-a", "Container", "stopped", scope = "lab")
+    private val guest = Guest(SAMPLE_ADDRESS, 120, "debian-workbench", "demo-node-a", "VM", "running")
+    private val other = Guest(SAMPLE_ADDRESS, 121, "adguard", "demo-node-a", "Container", "stopped", scope = "lab")
     private val profileA = "11111111-1111-1111-1111-111111111111"
     private val profileB = "22222222-2222-2222-2222-222222222222"
     private val origin = "https://pve.example.test:8006"
@@ -49,17 +53,17 @@ class PinStoreTest {
         val text = "{ this is not json"
         Files.writeString(file, text)
         val store = PinStore(file)
-        assertEquals(emptyList(), store.list(PIN_CONNECTION_DEMO))
+        assertEquals(emptyList(), store.list(OTHER_CONNECTION))
         assertTrue(SaveStatus.problem!!.contains("left unchanged"))
-        store.toggleGuest(PIN_CONNECTION_DEMO, guest)
-        assertEquals("pins.json could not be read. The file was left unchanged.", store.addService(PIN_CONNECTION_DEMO, guest, "UI", "http://192.0.2.8"))
+        store.toggleGuest(OTHER_CONNECTION, guest)
+        assertEquals("pins.json could not be read. The file was left unchanged.", store.addService(OTHER_CONNECTION, guest, "UI", "http://192.0.2.8"))
         assertEquals(text, Files.readString(file))
-        assertEquals(emptyList(), store.list(PIN_CONNECTION_DEMO))
+        assertEquals(emptyList(), store.list(OTHER_CONNECTION))
         val unsupported = Files.createTempDirectory("ringmaster-pins").resolve("pins.json")
         Files.writeString(unsupported, """{"connections":{}}""")
         val blocked = PinStore(unsupported)
         assertTrue(SaveStatus.problem!!.contains("unsupported version"))
-        blocked.toggleGuest(PIN_CONNECTION_DEMO, guest)
+        blocked.toggleGuest(OTHER_CONNECTION, guest)
         assertEquals("""{"connections":{}}""", Files.readString(unsupported))
         SaveStatus.dismiss()
     }
@@ -95,32 +99,32 @@ class PinStoreTest {
         assertNull(serviceNameError("AdGuard UI"))
         val file = Files.createTempDirectory("ringmaster-pins").resolve("pins.json")
         Files.writeString(file, """
-            {"version":1,"connections":{"$PIN_CONNECTION_DEMO":[
+            {"version":1,"connections":{"$OTHER_CONNECTION":[
               {"id":"11111111-1111-1111-1111-111111111111","guestKind":"VM","vmid":120,"scope":"","guestName":"secret","target":"service","serviceName":"UI","serviceUrl":"http://user:pass@192.0.2.1"},
               {"id":"22222222-2222-2222-2222-222222222222","guestKind":"VM","vmid":121,"scope":"","guestName":"ok","target":"guest"}
             ]}}
         """.trimIndent())
         val store = PinStore(file)
-        assertEquals(listOf(PIN_GUEST), store.list(PIN_CONNECTION_DEMO).map { it.target })
-        assertNotNull(store.addService(PIN_CONNECTION_DEMO, guest, "UI", "http://root:pw@192.0.2.8"))
-        assertEquals(1, store.list(PIN_CONNECTION_DEMO).size)
-        assertNull(store.addService(PIN_CONNECTION_DEMO, guest, "UI", "http://192.0.2.8:3000"))
-        assertNotNull(store.addService(PIN_CONNECTION_DEMO, guest, "UI", "http://192.0.2.8:3000"))
+        assertEquals(listOf(PIN_GUEST), store.list(OTHER_CONNECTION).map { it.target })
+        assertNotNull(store.addService(OTHER_CONNECTION, guest, "UI", "http://root:pw@192.0.2.8"))
+        assertEquals(1, store.list(OTHER_CONNECTION).size)
+        assertNull(store.addService(OTHER_CONNECTION, guest, "UI", "http://192.0.2.8:3000"))
+        assertNotNull(store.addService(OTHER_CONNECTION, guest, "UI", "http://192.0.2.8:3000"))
         assertFalse(Files.readString(file).contains("token"))
-        assertNotNull(store.addService(PIN_CONNECTION_DEMO, guest, "UI", "http://192.0.2.8/?token=secret"))
+        assertNotNull(store.addService(OTHER_CONNECTION, guest, "UI", "http://192.0.2.8/?token=secret"))
         assertFalse(Files.readString(file).contains("token"))
     }
 
     @Test fun unknownRowsSurviveARewrite() {
         val file = Files.createTempDirectory("ringmaster-pins").resolve("pins.json")
-        val text = """{"version":1,"theme":"lab","connections":{"$PIN_CONNECTION_DEMO":[
+        val text = """{"version":1,"theme":"lab","connections":{"$OTHER_CONNECTION":[
             {"id":"11111111-1111-1111-1111-111111111111","guestKind":"VM","vmid":120,"scope":"","guestName":"debian-workbench","target":"guest","note":"keep-me"},
             {"mystery":true}
         ],"bad\nkey":"leave-me"}}"""
         Files.writeString(file, text)
         val store = PinStore(file)
-        assertEquals(listOf(PIN_GUEST), store.list(PIN_CONNECTION_DEMO).map { it.target })
-        store.toggleView(PIN_CONNECTION_DEMO, guest, "Hardware")
+        assertEquals(listOf(PIN_GUEST), store.list(OTHER_CONNECTION).map { it.target })
+        store.toggleView(OTHER_CONNECTION, guest, "Hardware")
         val written = Files.readString(file)
         assertTrue(written.contains("\"theme\""))
         assertTrue(written.contains("keep-me"))
@@ -128,21 +132,20 @@ class PinStoreTest {
         assertTrue(written.contains("leave-me"))
         assertTrue(written.contains("Hardware"))
         val again = PinStore(file)
-        assertEquals(listOf(PIN_GUEST, PIN_VIEW), again.list(PIN_CONNECTION_DEMO).map { it.target })
+        assertEquals(listOf(PIN_GUEST, PIN_VIEW), again.list(OTHER_CONNECTION).map { it.target })
     }
 
     @Test fun demoPinsStayApartFromRealConnections() {
         val store = PinStore(Files.createTempDirectory("ringmaster-pins").resolve("pins.json"))
         val real = Guest(origin, 130, "backup-lab", "node-a", "VM", "stopped")
-        store.toggleGuest(PIN_CONNECTION_DEMO, guest)
-        store.toggleView(PIN_CONNECTION_DEMO, guest, "Actions")
+        store.toggleGuest(OTHER_CONNECTION, guest)
+        store.toggleView(OTHER_CONNECTION, guest, "Actions")
         store.toggleGuest(origin, real)
-        assertEquals(listOf(120, 120), store.list(PIN_CONNECTION_DEMO).map { it.vmid })
+        assertEquals(listOf(120, 120), store.list(OTHER_CONNECTION).map { it.vmid })
         assertEquals(listOf(130), store.list(origin).map { it.vmid })
         assertTrue(store.list(profileA).isEmpty())
-        assertEquals(PIN_CONNECTION_DEMO, pinConnectionKey(demo = true, profileId = profileA, origin = origin))
-        assertEquals(profileA, pinConnectionKey(demo = false, profileId = profileA, origin = origin))
-        assertEquals(origin, pinConnectionKey(demo = false, profileId = null, origin = origin))
+        assertEquals(profileA, pinConnectionKey(profileId = profileA, origin = origin))
+        assertEquals(origin, pinConnectionKey(profileId = null, origin = origin))
     }
 
     @Test fun originPinsMoveOntoTheProfile() {
@@ -175,19 +178,17 @@ class PinStoreTest {
         assertTrue(store.list(origin).isEmpty())
     }
 
-    @Test fun demoAndEqualKeysDoNothing() {
+    @Test fun equalAndBlankKeysDoNothing() {
         val file = Files.createTempDirectory("ringmaster-pins").resolve("pins.json")
         val empty = PinStore(file)
         empty.adoptOriginPins(origin, profileA)
         assertFalse(Files.exists(file))
         val store = PinStore(file)
         store.toggleGuest(origin, guest)
-        store.toggleGuest(PIN_CONNECTION_DEMO, other)
+        store.toggleGuest(OTHER_CONNECTION, other)
         val before = store.byConnection
         store.adoptOriginPins(origin, origin)
         store.adoptOriginPins(" $origin ", origin)
-        store.adoptOriginPins(PIN_CONNECTION_DEMO, profileA)
-        store.adoptOriginPins(origin, PIN_CONNECTION_DEMO)
         store.adoptOriginPins("   ", profileA)
         store.adoptOriginPins(origin, "")
         assertEquals(before, store.byConnection)
@@ -197,23 +198,22 @@ class PinStoreTest {
     @Test fun pinConnectionKeyDoesNotMigrate() {
         val store = PinStore(Files.createTempDirectory("ringmaster-pins").resolve("pins.json"))
         store.toggleGuest(origin, guest)
-        val key = pinConnectionKey(demo = false, profileId = profileA, origin = origin)
+        val key = pinConnectionKey(profileId = profileA, origin = origin)
         assertEquals(profileA, key)
         assertTrue(store.list(key!!).isEmpty())
         assertEquals(listOf(120), store.list(origin).map { it.vmid })
-        assertEquals(origin, pinConnectionKey(demo = false, profileId = null, origin = " $origin "))
-        assertEquals(PIN_CONNECTION_DEMO, pinConnectionKey(demo = true, profileId = profileA, origin = origin))
+        assertEquals(origin, pinConnectionKey(profileId = null, origin = " $origin "))
     }
 
     @Test fun livenessFollowsTheGuestTaskAndSubmission() {
         val tasks = listOf(task(120, TaskOutcome.Running), task(121, TaskOutcome.Succeeded))
-        val waiting = PowerSubmission("local-pin", DEMO_REMOTE_KEY, "demo-node-a", 122, "VM", "build", PowerAction.Start, PowerPhase.Accepted, "Waiting.", false, true)
+        val waiting = PowerSubmission("local-pin", SAMPLE_ADDRESS, "demo-node-a", 122, "VM", "build", PowerAction.Start, PowerPhase.Accepted, "Waiting.", checkable = true)
         assertEquals(PinLiveness.Busy, pinLiveness(guest, tasks, emptyList()))
         assertEquals(PinLiveness.Stopped, pinLiveness(other.copy(scope = ""), tasks, emptyList()))
         assertEquals(PinLiveness.Running, pinLiveness(guest.copy(id = 121), tasks, emptyList()))
         assertEquals(PinLiveness.Busy, pinLiveness(guest.copy(id = 122), emptyList(), listOf(waiting)))
         assertEquals(PinLiveness.Missing, pinLiveness(null, tasks, emptyList()))
-        val console = task(120, TaskOutcome.Running).copy(type = "vncproxy", upid = "demo:vnc120")
+        val console = task(120, TaskOutcome.Running).copy(type = "vncproxy", upid = sampleUpid("vncproxy", "120"))
         assertEquals(PinLiveness.Running, pinLiveness(guest, listOf(console), emptyList()))
         assertEquals(PinLiveness.Busy, pinLiveness(guest, tasks, emptyList(), stale = true))
         assertEquals(PinLiveness.Stale, pinLiveness(guest, listOf(console), emptyList(), stale = true))
@@ -225,7 +225,7 @@ class PinStoreTest {
     }
 
     private fun task(vmid: Int, outcome: TaskOutcome) = ClusterTask(
-        DEMO_REMOTE_KEY, "demo:pin$vmid", "demo-node-a", "qmstart", vmid.toString(), "demo@ringmaster",
+        SAMPLE_ADDRESS, sampleUpid("qmstart", vmid.toString()), "demo-node-a", "qmstart", vmid.toString(), "demo@ringmaster",
         java.time.Instant.parse("2026-11-09T12:00:00Z"),
         if (outcome == TaskOutcome.Running) null else java.time.Instant.parse("2026-11-09T12:01:00Z"),
         when (outcome) { TaskOutcome.Running -> "running"; TaskOutcome.Succeeded -> "OK"; else -> "failed" },

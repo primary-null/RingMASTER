@@ -91,9 +91,9 @@ class StorageActionWorkbenchTest {
         override suspend fun submit(connection: Connection,key: StorageKey,request: StorageRequest,progress: (Long)->Unit,cancel: UploadCancel): String? { sends++; return submitter() }
         override suspend fun status(connection: Connection,node: String,upid: String): PowerTaskStatus { statusNode=node; return statusResult }
     }
-    private fun ready(demo: Boolean = false): WorkspaceState {
-        val k = if(demo) key.copy(remote=DEMO_REMOTE_KEY) else key
-        return WorkspaceState(connected=!demo, demo=demo, address=key.remote, connectionEpoch=1, storageSelection=k,
+    private fun ready(): WorkspaceState {
+        val k = key
+        return WorkspaceState(connected=true, address=key.remote, connectionEpoch=1, storageSelection=k,
             overview=Overview(1,emptyList(),members=listOf(RecordedMember(k.remote,k.node,"online",null,null,null,null,null,null,null,null)),storage=listOf(RecordedStorage(k.remote,k.node,k.storage,false,1,10,"available","dir","iso,vztmpl,backup"))),
             storageContent=ReadSection(value=StorageContentView(k,null,listOf(row))))
     }
@@ -147,14 +147,6 @@ class StorageActionWorkbenchTest {
         state.value=ready(); val deferred=CompletableDeferred<String?>(); g.submitter={withContext(NonCancellable){deferred.await()}}
         assertTrue(w.submit(assertNotNull(w.capture(key,StorageRequest.SetProtection(row,true),"test")))); runCurrent()
         w.cancel(); state.value=ready().copy(connectionEpoch=2); deferred.complete(null); runCurrent(); assertTrue(state.value.storageActions.submissions.isEmpty()); conn.close()
-    }
-    @Test fun explicitMetadataReadAndDemoMutationsUseNoGateway() = runTest {
-        val state=MutableStateFlow(ready(true)); val g=Gateway(); val k=key.copy(remote=DEMO_REMOTE_KEY)
-        val w=StorageActionWorkbench(this,state,g,{null},{true},{},{},{})
-        assertEquals(0,g.reads); w.read(k,url="https://example.test/a?secret=yes"); runCurrent(); assertNotNull(state.value.storageActions.metadata)
-        val reqs=listOf(StorageRequest.TemplateDownload(AplTemplate("test_1.tar.zst","test","1","lxc")),StorageRequest.UrlDownload("https://example.test/a","iso","a.iso"),StorageRequest.EditNotes(row,"notes"),StorageRequest.SetProtection(row,true),StorageRequest.RemoveVolume(row))
-        for(r in reqs) { state.value=ready(true); assertTrue(w.submit(assertNotNull(w.capture(k,r,"demo")))); runCurrent(); assertEquals(PowerPhase.Simulated,state.value.storageActions.submissions.first().phase) }
-        assertEquals(0,g.sends); assertEquals(0,g.reads); w.cancel()
     }
     @Test fun uploadFollowsWorkerNodeAndMapsExactLogWithoutExposingUpidInSubmission() = runTest {
         val p=Files.createTempFile("storage-worker", ".iso"); Files.write(p,byteArrayOf(1))
@@ -225,17 +217,6 @@ class StorageActionWorkbenchTest {
         assertNull(w.capture(other,StorageRequest.SetProtection(row,false),"test")); assertEquals(1,g.sends); w.cancel(); conn.close()
     }
 
-    @Test fun demoUploadDoesNotReadFileBytesOrCallGatewayAndPendingBlocksCapture() = runTest {
-        val p=Files.createTempFile("storage-demo", ".iso"); Files.write(p,byteArrayOf(1,2))
-        try {
-            val state=MutableStateFlow(ready(true)); val g=Gateway(); val k=key.copy(remote=DEMO_REMOTE_KEY)
-            val w=StorageActionWorkbench(this,state,g,{null},{true},{},{},{})
-            val r=StorageRequest.Upload(UploadSource.capture(p),"iso","a.iso")
-            val c=assertNotNull(w.capture(k,r,"demo")); assertTrue(w.submit(c)); assertNull(w.capture(k,r,"demo")); runCurrent()
-            assertEquals(PowerPhase.Simulated,state.value.storageActions.submissions.first().phase); assertEquals(0,g.sends); assertEquals(0,g.reads)
-            assertTrue(state.value.storageContent.value!!.volumes.any { it.volid=="local:iso/a.iso" }); w.cancel()
-        } finally { Files.deleteIfExists(p) }
-    }
     @Test fun expiredMutationPublishesUncertaintyAndPropagatesTheCapturedEpoch() = runTest {
         val state=MutableStateFlow(ready()); val g=Gateway().apply { submitter={throw SessionExpiredException()} }
         val conn=Connection(key.remote,"test@pve!api","fixture",""); var expired:Long?=null

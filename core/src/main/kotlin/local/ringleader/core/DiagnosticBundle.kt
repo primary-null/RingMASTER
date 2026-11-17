@@ -23,7 +23,7 @@ import kotlinx.serialization.json.*
  */
 data class DiagnosticSessionInfo(
     val address: String,
-    /** "API token", "Password" or "Demo": the type only, never the user or token name. */
+    /** "API token" or "Password": the type only, never the user or token name. */
     val authKind: String,
     val connected: Boolean,
     val overviewLoaded: Boolean,

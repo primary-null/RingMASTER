@@ -87,7 +87,6 @@ internal fun guestSshAddresses(state: WorkspaceState, guest: Guest): List<String
 
 /** Beside the node inspector's Shell action: Open SSH when the node is a Tailscale SSH peer, else nothing. */
 @Composable fun NodeSshButton(state: WorkspaceState, node: String) {
-    if (state.demo) return
     val (addresses, host) = nodeSshInputs(state, node)
     val a = rememberSshAvailability(addresses, node, host) as? SshAvailability.Ready ?: return
     SshButton(a, "root", "node:${state.address}:$node")
@@ -95,20 +94,17 @@ internal fun guestSshAddresses(state: WorkspaceState, guest: Guest): List<String
 
 /** Under the node inspector's action row: why there is no Open SSH, when there is something to say. */
 @Composable fun NodeSshNote(state: WorkspaceState, node: String) {
-    if (state.demo) return
     val (addresses, host) = nodeSshInputs(state, node)
     SshNote(rememberSshAvailability(addresses, node, host))
 }
 
 /** Beside the guest page's Console action. */
 @Composable fun GuestSshButton(state: WorkspaceState, guest: Guest) {
-    if (state.demo) return
     val a = rememberSshAvailability(guestSshAddresses(state, guest), null, null) as? SshAvailability.Ready ?: return
     SshButton(a, "", "guest:${state.address}:${guest.resource}")
 }
 
 @Composable fun GuestSshNote(state: WorkspaceState, guest: Guest) {
-    if (state.demo) return
     SshNote(rememberSshAvailability(guestSshAddresses(state, guest), null, null))
 }
 

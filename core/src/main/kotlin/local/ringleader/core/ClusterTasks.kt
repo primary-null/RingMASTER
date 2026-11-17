@@ -47,13 +47,9 @@ data class ClusterTask(
         require(subjectId.none { it.isISOControl() } && user.none { it.isISOControl() }) { "The server returned an invalid task record." }
         require(statusText?.none { it.isISOControl() } != false) { "The server returned an invalid task record." }
         require(outcome == classifyTask(statusText, endedAt)) { "The server returned an invalid task record." }
-        if (remote == DEMO_REMOTE_KEY) {
-            require(upid.startsWith("demo:") && upid.none { it.isWhitespace() || it.isISOControl() }) { "The server returned an invalid task record." }
-        } else {
-            require(serverOrigin(remote).toString() == remote) { "The task is missing its connection identity." }
-            val parts = parseUpid(upid) ?: throw IllegalArgumentException("The server returned an invalid task record.")
-            require(parts.node == node) { "The server returned an invalid task record." }
-        }
+        require(serverOrigin(remote).toString() == remote) { "The task is missing its connection identity." }
+        val parts = parseUpid(upid) ?: throw IllegalArgumentException("The server returned an invalid task record.")
+        require(parts.node == node) { "The server returned an invalid task record." }
     }
 }
 
@@ -171,13 +167,3 @@ private fun JsonObject.epoch(key: String): Instant? {
 }
 
 private fun invalidTask(): Nothing = throw IllegalArgumentException("The server returned an invalid task record.")
-
-private fun demoTask(upid: String, node: String, type: String, subjectId: String, startedAt: Instant, endedAt: Instant?, statusText: String?) =
-    ClusterTask(DEMO_REMOTE_KEY, upid, node, type, subjectId, "demo@ringmaster", startedAt, endedAt, statusText, classifyTask(statusText, endedAt))
-
-/** Labeled local sample tasks. They are never requested from a server. */
-val demoTasks: List<ClusterTask> = listOf(
-    demoTask("demo:vzdump:121", "demo-node-a", "vzdump", "121", Instant.parse("2026-11-07T15:04:00Z"), null, "running"),
-    demoTask("demo:qmstart:120", "demo-node-a", "qmstart", "120", Instant.parse("2026-11-07T15:00:00Z"), Instant.parse("2026-11-07T15:00:12Z"), "OK"),
-    demoTask("demo:lab-maintenance:130", "demo-node-b", "lab-maintenance", "130", Instant.parse("2026-11-07T14:00:00Z"), null, null),
-)

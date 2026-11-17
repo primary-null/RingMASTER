@@ -1,0 +1,11 @@
+hci0:	Type: Primary  Bus: USB
+	BD Address: 02:00:00:00:00:10  ACL MTU: 1021:4  SCO MTU: 96:6
+	UP RUNNING 
+	RX bytes:1234 acl:0 sco:0 events:73 errors:0
+	TX bytes:4321 acl:0 sco:0 commands:61 errors:0
+	Features: 0xff 0xfe 0xcf 0xfe 0xdb 0xff 0x7b 0x87
+	Link mode: PERIPHERAL ACCEPT 
+	Name: 'sample-host'
+	Class: 0x6c0104
+	HCI Version: 5.2 (0xb)  Revision: 0x1a01
+	Manufacturer: MediaTek, Inc. (70)

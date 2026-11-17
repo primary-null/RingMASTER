@@ -35,7 +35,7 @@ class StorageWorkbenchTest {
 
     private class Inventory(var build: (Connection) -> Overview) : InventoryGateway {
         override suspend fun overview(connection: Connection) = build(connection)
-        override suspend fun details(connection: Connection, guest: Guest) = demoDetails(guest)
+        override suspend fun details(connection: Connection, guest: Guest) = sampleDetails(guest)
     }
 
     private class QuietPdm : PdmReadGateway {
@@ -87,7 +87,6 @@ class StorageWorkbenchTest {
         val section = workspace.view().config
         assertEquals(listOf("local"), section.value!!.map { it.storage })
         assertEquals(now, section.updatedAt)
-        assertFalse(section.sample)
         workspace.loadStorageConfig(); runCurrent()
         assertEquals(2, storage.configCalls, "A later call reads it again")
         workspace.close()
@@ -273,27 +272,6 @@ class StorageWorkbenchTest {
         assertEquals(HISTORY_DIRECT_ONLY, workspace.view().history.error)
         assertEquals(HISTORY_DIRECT_ONLY, workspace.readStorageHistory("node-a", "local", "hour", "AVERAGE").error)
         assertEquals(0, storage.calls)
-        workspace.close()
-    }
-
-    @Test fun theDemoShowsLabelledSamplesAndSendsNothing() = runTest {
-        val storage = Storage()
-        val workspace = newWorkspace(storage)
-        workspace.exploreDemo(); workspace.setLive(false); runCurrent()
-        workspace.loadStorageConfig(); runCurrent()
-        assertEquals(demoStorageConfig, workspace.view().config.value)
-        assertTrue(workspace.view().config.sample)
-        workspace.loadStorageHistory("demo-node-a", "local-lvm", "day", "AVERAGE"); runCurrent()
-        val history = workspace.view().history
-        assertTrue(history.sample)
-        assertEquals(StorageKey(DEMO_REMOTE_KEY, "demo-node-a", "local-lvm"), history.value!!.request.key)
-        assertEquals(demoStorageHistory(demoOverview.storage.first { it.id == "local-lvm" }, "day", "AVERAGE", now), history.value!!.points)
-        assertEquals(120, workspace.readStorageHistory("demo-node-b", "shared-data", "hour", "MAX").value!!.size)
-        workspace.loadStorageHistory("demo-node-a", "nowhere"); runCurrent()
-        assertEquals(STORAGE_NOT_RECORDED, workspace.view().history.error)
-        assertEquals(0, storage.calls)
-        workspace.disconnect()
-        assertEquals(StorageViewState(), workspace.view())
         workspace.close()
     }
 

@@ -63,7 +63,7 @@ class KeepConsoleFrameTest {
         } finally { workspace.close(); runCurrent() }
     }
 
-    @Test fun demoStoppedContainerScopeAndABadSizeDoNothing() = runTest {
+    @Test fun stoppedContainerScopeAndABadSizeDoNothing() = runTest {
         val workspace = Workspace(this)
         workspace.encodeHere()
         try {
@@ -72,12 +72,6 @@ class KeepConsoleFrameTest {
             workspace.keepConsoleFrame(guest(3, scope = "lab"), 4, 4, red())
             workspace.keepConsoleFrame(guest(4), 0, 4, red())
             workspace.keepConsoleFrame(guest(5), 4, 4, IntArray(3))
-            runCurrent()
-            assertTrue(workspace.state.value.consoleStills.isEmpty())
-            workspace.exploreDemo()
-            workspace.setLive(false)
-            val demoGuest = workspace.state.value.overview!!.guests.first { it.id == 120 }
-            workspace.keepConsoleFrame(demoGuest, 4, 4, red())
             runCurrent()
             assertTrue(workspace.state.value.consoleStills.isEmpty())
         } finally { workspace.close(); runCurrent() }

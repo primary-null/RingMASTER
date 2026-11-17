@@ -91,7 +91,7 @@ internal object MetricsFixtures {
     fun overview(base: Overview): Overview {
         val guests = specs.mapIndexed { n, s ->
             val running = s.status == "running"
-            Guest(DEMO_REMOTE_KEY, id(n), s.name, s.node, s.kind, s.status, template = s.template, tags = s.tags,
+            Guest(SAMPLE_ADDRESS, id(n), s.name, s.node, s.kind, s.status, template = s.template, tags = s.tags,
                 lock = if (s.name == "backup-agent") "backup" else null,
                 metrics = GuestListMetrics(cpuFraction = if (running) s.cpu else null, maxCpu = if (s.maxGib >= 8) 8.0 else 2.0,
                     memoryBytes = if (running) (s.memGib * GIB).toLong() else null, memoryLimitBytes = s.maxGib * GIB,
@@ -101,14 +101,14 @@ internal object MetricsFixtures {
         }
         val members = nodes.map { name ->
             val (cpu, mem, max) = nodeLoad.getValue(name)
-            RecordedMember(DEMO_REMOTE_KEY, name, "online", null, cpu, if (name == "node-charlie") 16.0 else 64.0,
+            RecordedMember(SAMPLE_ADDRESS, name, "online", null, cpu, if (name == "node-charlie") 16.0 else 64.0,
                 (mem * GIB).toLong(), max * GIB, (40 * GIB), 98 * GIB, 86_400L * 23)
         }
         val storage = listOf(
-            RecordedStorage(DEMO_REMOTE_KEY, "node-alpha", "local", false, 34 * GIB, 100 * GIB, "available", "dir", "iso,vztmpl,backup,snippets"),
-            RecordedStorage(DEMO_REMOTE_KEY, "node-alpha", "local-lvm", false, 610 * GIB, 900 * GIB, "available", "lvmthin", "images,rootdir"),
-            RecordedStorage(DEMO_REMOTE_KEY, "node-bravo", "local-lvm", false, 862 * GIB, 900 * GIB, "available", "lvmthin", "images,rootdir"),
-            RecordedStorage(DEMO_REMOTE_KEY, "node-charlie", "local-lvm", false, 120 * GIB, 900 * GIB, "available", "lvmthin", "images,rootdir"),
+            RecordedStorage(SAMPLE_ADDRESS, "node-alpha", "local", false, 34 * GIB, 100 * GIB, "available", "dir", "iso,vztmpl,backup,snippets"),
+            RecordedStorage(SAMPLE_ADDRESS, "node-alpha", "local-lvm", false, 610 * GIB, 900 * GIB, "available", "lvmthin", "images,rootdir"),
+            RecordedStorage(SAMPLE_ADDRESS, "node-bravo", "local-lvm", false, 862 * GIB, 900 * GIB, "available", "lvmthin", "images,rootdir"),
+            RecordedStorage(SAMPLE_ADDRESS, "node-charlie", "local-lvm", false, 120 * GIB, 900 * GIB, "available", "lvmthin", "images,rootdir"),
         )
         return base.copy(nodes = 3, guests = guests, members = members, storage = storage)
     }

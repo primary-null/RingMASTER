@@ -150,7 +150,7 @@ class KeyMemoryTest {
         val root = temp()
         val gateway = object : InventoryGateway {
             override suspend fun overview(connection: Connection) = Overview(0, emptyList())
-            override suspend fun details(connection: Connection, guest: Guest) = demoDetails(guest)
+            override suspend fun details(connection: Connection, guest: Guest) = sampleDetails(guest)
         }
         val workspace = Workspace(this, gateway)
         return Triple(ProfileDesk(workspace, ProfileStore(root.resolve("profiles.json"))), workspace, root)

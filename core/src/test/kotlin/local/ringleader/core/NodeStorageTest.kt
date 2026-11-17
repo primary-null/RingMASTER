@@ -410,7 +410,7 @@ class NodeStorageTest {
         workspace.close()
     }
 
-    @Test fun refreshDoesNotFanOutAndOfflineDemoOrForeignNamesDoNotRequestStatus() = runTest {
+    @Test fun refreshDoesNotFanOutAndOfflineOrForeignNamesDoNotRequestStatus() = runTest {
         val fake = Fake()
         fake.inventory = { onlineOverview() }
         fake.handler = { _, _, node, _ -> fake.count++; live(node) }
@@ -433,17 +433,6 @@ class NodeStorageTest {
         assertEquals(1, fake.count)
         assertEquals(LIVE_STATUS_NOT_REQUESTED, workspace.state.value.nodeStatusNote)
         assertNull(workspace.state.value.nodeStatus)
-        workspace.exploreDemo()
-        workspace.selectMember("demo-node-a"); runCurrent()
-        workspace.refresh(); runCurrent()
-        assertEquals(1, fake.count)
-        assertEquals(LIVE_STATUS_SAMPLE, workspace.state.value.nodeStatusNote)
-        assertNull(workspace.state.value.nodeStatus)
-        assertEquals(DEMO_REMOTE_KEY, demoOverview.members.first().remote)
-        assertNull(nodeStatusPathForMember(demoOverview.members.first()))
-        assertFails { serverOrigin("demo-node-a") }
-        assertFails { serverOrigin("demo-node-b") }
-        assertNull(sharedStorageReport(demoOverview.storage).summedBytes)
         workspace.close()
     }
 
@@ -486,7 +475,7 @@ class NodeStorageTest {
         var inventory: suspend (Connection) -> Overview = { Overview(0, emptyList()) }
         var handler: suspend (Connection, String, String, String) -> NodeLiveStatus = { _, _, node, _ -> NodeLiveStatus(node, 0.5, 10, 20, 3, 30, 9, null) }
         override suspend fun overview(connection: Connection) = inventory(connection)
-        override suspend fun details(connection: Connection, guest: Guest) = demoDetails(guest)
+        override suspend fun details(connection: Connection, guest: Guest) = sampleDetails(guest)
         override suspend fun status(connection: Connection, origin: String, node: String, scope: String) = handler(connection, origin, node, scope)
     }
 

@@ -10,7 +10,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.*
-import local.ringleader.core.DEMO_REMOTE_KEY
 import local.ringleader.core.Guest
 
 @Composable fun LocalEngineProof(guest: Guest) {
@@ -24,7 +23,7 @@ import local.ringleader.core.Guest
     Column(Modifier.fillMaxSize().padding(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         SectionLabel("Local engine proof")
         Text("${guest.kind.uppercase()} ${guest.id} · ${guest.name.ifBlank { "Guest ${guest.id}" }}", fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
-        Text("Route ${guest.node} · ${if (guest.remote == DEMO_REMOTE_KEY) "Sample data" else guest.remote}",
+        Text("Route ${guest.node} · ${guest.remote}",
             fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = Tech.Muted)
         Text("This is a local keyboard echo inside RingMASTER. It is not a live console, shell, or guest display. Nothing is sent to the guest. The engine starts only when you ask, and the first start can download Chromium into your user cache.")
         val current = browser

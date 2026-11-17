@@ -1,0 +1,9 @@
+*:02\:00\:00\:00\:01\:00:Example Home:Infra:36:5180 MHz:1201 Mbit/s:82:WPA2 WPA3:wlp3s0:80 MHz
+ :02\:00\:00\:00\:01\:01:Example Home:Infra:6:2437 MHz:270 Mbit/s:64:WPA2 WPA3:wlp3s0:40 MHz
+ :02\:00\:00\:00\:01\:02:Example Home:Infra:37:6135 MHz:2882 Mbit/s:45:WPA3:wlp3s0:160 MHz
+ :02\:00\:00\:00\:02\:00:Sample Guest\: Open:Infra:11:2462 MHz:130 Mbit/s:41:--:wlp3s0:20 MHz
+ :02\:00\:00\:00\:03\:00:Sample Office:Infra:149:5745 MHz:540 Mbit/s:38:WPA2 802.1X:wlp3s0:40 MHz
+ :02\:00\:00\:00\:04\:00::Infra:1:2412 MHz:65 Mbit/s:22:WPA2:wlp3s0:20 MHz
+ :02\:00\:00\:00\:05\:00:Old Router:Infra:3:2422 MHz:54 Mbit/s:30:WEP:wlp3s0:20 MHz
+ :02\:00\:00\:00\:06\:00:Cafe Enhanced:Infra:44:5220 MHz:866 Mbit/s:51:OWE:wlp3s0:80 MHz
+ :02\:00\:00\:00\:07\:00:Back\\slash Net:Infra:52:5260 MHz:433 Mbit/s:35:WPA1 WPA2:wlp3s0:40 MHz

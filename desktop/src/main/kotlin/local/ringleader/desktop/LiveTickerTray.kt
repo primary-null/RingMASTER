@@ -121,14 +121,14 @@ internal object TickerPlacement {
      *    covers the least.
      *  - Tools: the top right, where only the far ends of the Host and Count fields lie under it. The foot is the newest lines of the log,
      *    and a log line is short, so the middle of the foot (not the right of it, where toasts stack) is where the lines are.
-     *  - Bluetooth: the foot of the device table, which is empty below its few rows (at the left the foot of the legend is text).
+     *  - Radios: the foot of the Bluetooth view's device table, which is empty below its few rows (at the left the foot of the legend is text).
      *  - Watcher: the foot of the page, below the last rows.
      */
     private fun wideAnchor(page: String) = when (page) {
         "Desk", "Fleet", WATCHER_PAGE -> BottomStart
         "Storage" -> TopEndBesideRefresh
         "Activity" -> TopEndBesideButtons
-        "Bluetooth" -> BottomCenter
+        "Radios" -> BottomCenter
         else -> TopEnd
     }
 
@@ -140,7 +140,7 @@ internal object TickerPlacement {
      */
     private fun compactAnchor(page: String) = when (page) {
         "Activity" -> BottomStart
-        "Bluetooth" -> TopEnd
+        "Radios" -> TopEnd
         else -> wideAnchor(page)
     }
 

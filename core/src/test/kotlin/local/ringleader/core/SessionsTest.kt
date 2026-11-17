@@ -67,21 +67,6 @@ class SessionsTest {
         } finally { f.close() }
     }
 
-    @Test fun theDemoOpensBesideAConnectionAndOnlyOnce() = runTest {
-        val f = fixture()
-        try {
-            f.connect(first); runCurrent()
-            assertTrue(f.desk.exploreDemo()); runCurrent()
-            assertEquals(2, f.state.open.size)
-            assertTrue(f.state.active.workspace.state.value.demo)
-            assertTrue(f.state.open.first().workspace.state.value.connected)
-            f.sessions.show(f.state.open.first().id)
-            assertTrue(f.desk.exploreDemo())
-            assertEquals(2, f.state.open.size)
-            assertTrue(f.state.active.workspace.state.value.demo)
-        } finally { f.close() }
-    }
-
     @Test fun aFailedFirstReadDoesNotKeepASession() = runTest {
         val f = fixture()
         try {
@@ -200,7 +185,6 @@ class SessionsTest {
             assertEquals("$MAX_OPEN_SESSIONS connections are open. Disconnect one before opening another.", f.desk.state.value.formError)
             assertTrue(f.desk.hasManualSecret(), "the typed secret is still there for a retry")
             assertEquals(MAX_OPEN_SESSIONS, f.state.open.size); assertEquals(inView, f.state.activeId)
-            assertFalse(f.desk.exploreDemo())
         } finally { f.close() }
     }
 
@@ -227,6 +211,6 @@ class SessionsTest {
             if (connection.address == fail) throw java.io.IOException("unreachable")
             return Overview(1, listOf(Guest(connection.remoteKey, 100, "alpha", "node-a", "VM", "running")))
         }
-        override suspend fun details(connection: Connection, guest: Guest) = demoDetails(guest)
+        override suspend fun details(connection: Connection, guest: Guest) = sampleDetails(guest)
     }
 }

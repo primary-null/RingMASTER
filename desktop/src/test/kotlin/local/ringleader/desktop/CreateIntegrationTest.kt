@@ -18,7 +18,7 @@ class CreateIntegrationTest {
     private fun holders() = CreateSecrets(SecretChars.copyOf(java.nio.CharBuffer.wrap(charArrayOf('a','b','c'))))
     @Test fun pendingReplacementCancelAndOneShotConfirmWipe() {
         val pending = PendingCreate()
-        val c = CreateConfirmation(1, DEMO_REMOTE_KEY, "Demo", "Demo", CreateRequest(NewGuestKind.Container, "demo-node-a", 140, "fixture", listOf(CreateParam("vmid",CreateValue.Int(140)))), SecretState(true))
+        val c = CreateConfirmation(1, SAMPLE_ADDRESS, "Demo", "Demo", CreateRequest(NewGuestKind.Container, "demo-node-a", 140, "fixture", listOf(CreateParam("vmid",CreateValue.Int(140)))), SecretState(true))
         val first = holders(); pending.replace(c, first)
         val second = holders(); pending.replace(c, second); assertTrue(first.password!!.closed)
         pending.close(); assertTrue(second.password!!.closed); assertNull(pending.confirmation)
@@ -53,7 +53,7 @@ class CreateIntegrationTest {
     @Test fun transferredHoldersLiveUntilTheWorkspaceOwnsTheirSend() {
         val pending = PendingCreate(); val secrets = holders()
         val request = CreateRequest(NewGuestKind.Container,"demo-node-a",140,"fixture",listOf(CreateParam("vmid",CreateValue.Int(140))))
-        pending.replace(CreateConfirmation(1,DEMO_REMOTE_KEY,"Demo","Demo",request,secrets.state),secrets)
+        pending.replace(CreateConfirmation(1,SAMPLE_ADDRESS,"Demo","Demo",request,secrets.state),secrets)
         var sending: CreateSecrets? = null
         assertTrue(pending.confirm { _, transferred -> sending = transferred; true })
         pending.close(); assertFalse(secrets.password!!.closed)
@@ -74,7 +74,7 @@ class CreateIntegrationTest {
         try {
             val file = dir.resolve("preferences")
             for (prefs in listOf(CreateWizardPreferences.memory(),CreateWizardPreferences.stored(MotionPreferences(file)))) {
-                val session = demoCreateSession(NewGuestKind.Container,"docs-node",1,java.time.Instant.EPOCH)
+                val session = sampleCreateSession(NewGuestKind.Container,"docs-node",1,java.time.Instant.EPOCH)
                 val scene = ImageComposeScene(1200,800,coroutineContext=coroutineContext) {
                     MaterialTheme(colorScheme=ringColors) { CreateCtWizard(session,ctSceneContext,ctSceneDraft,{_,s->s.close()},{},preferences=prefs) }
                 }
@@ -88,7 +88,7 @@ class CreateIntegrationTest {
     }
     @Test fun mediaRequestKeepsTheChosenStorageForBothWizards() = runSceneTest {
         for (kind in NewGuestKind.entries) {
-            val session = demoCreateSession(kind,"docs-node",1,java.time.Instant.EPOCH).copy(volumes=emptyMap())
+            val session = sampleCreateSession(kind,"docs-node",1,java.time.Instant.EPOCH).copy(volumes=emptyMap())
             val context = ctSceneContext.copy(storages=ctSceneContext.storages.map { it.copy(content=it.content+"iso"+"images") })
             var destination: Triple<String,String,String>? = null
             val navigate: (String,String,String)->Unit = { n,s,k -> destination=Triple(n,s,k) }
@@ -109,8 +109,8 @@ class CreateIntegrationTest {
 
     @Test fun inPlaceMediaPreservesTheCreateSessionDraftAndContainerKeyBuffer() = runSceneTest {
         for(kind in NewGuestKind.entries) {
-            val workspace=Workspace(this,createGateway=FakeCreateGuestGateway())
-            workspace.exploreDemo();assertTrue(workspace.openCreateSession(kind,"demo-node-a"))
+            val workspace=sampleWorkspace(this,createGateway=FakeCreateGuestGateway()).awaitInventory()
+            assertTrue(workspace.openCreateSession(kind,"demo-node-a"))
             val session=workspace.state.value.creation!!
             val scene=ImageComposeScene(1600,1000,coroutineContext=coroutineContext) {
                 val state by workspace.state.collectAsState()
@@ -135,7 +135,7 @@ class CreateIntegrationTest {
 
     @Test fun contextRefreshPreservesEditedContainerDraft() = runSceneTest {
         var context by mutableStateOf(ctSceneContext)
-        val session = demoCreateSession(NewGuestKind.Container,"docs-node",1,java.time.Instant.EPOCH)
+        val session = sampleCreateSession(NewGuestKind.Container,"docs-node",1,java.time.Instant.EPOCH)
         var seen: CtDraft? = null
         val scene=ImageComposeScene(1600,1000,coroutineContext=coroutineContext) {
             MaterialTheme(colorScheme=ringColors) { CreateCtWizard(session,context,defaultCtDraft(session.node,context),{_,s->s.close()},{},onDraftChange={seen=it},preferences=CreateWizardPreferences.memory()) }
@@ -151,7 +151,7 @@ class CreateIntegrationTest {
 
     @Test fun existingVolumePickerReadsOneSelectedStorageAndAcceptsOnlyReturnedContent() = runSceneTest {
         for (content in listOf("images","rootdir")) {
-            var session by mutableStateOf(demoCreateSession(NewGuestKind.Container,"docs-node",1,java.time.Instant.EPOCH).copy(volumes=emptyMap()))
+            var session by mutableStateOf(sampleCreateSession(NewGuestKind.Container,"docs-node",1,java.time.Instant.EPOCH).copy(volumes=emptyMap()))
             var volume by mutableStateOf("archive:")
             val reads=mutableListOf<CreateRead>()
             val context=ctSceneContext.copy(storages=ctSceneContext.storages.map { it.copy(content=it.content+content) })
@@ -163,7 +163,7 @@ class CreateIntegrationTest {
             val h=CreateScene(scene)
             try {
                 h.frames(); assertEquals(listOf<CreateRead>(CreateRead.Volumes("archive",content)),reads)
-                val fixture=demoCreateVolumes.getValue("local" to "iso").first().copy(volid="archive:existing-volume",content=content)
+                val fixture=sampleCreateVolumes.getValue("local" to "iso").first().copy(volid="archive:existing-volume",content=content)
                 session=session.copy(volumes=mapOf(("archive" to content) to ReadSection.loaded(listOf(fixture,fixture.copy(volid="other:wrong-storage")),java.time.Instant.EPOCH)))
                 h.frames();h.click("Choose\u2026")
                 assertFalse(h.nodes().any { it.config.getOrNull(SemanticsProperties.Text)?.any { t->t.text=="other:wrong-storage" }==true })
@@ -248,8 +248,8 @@ class CreateIntegrationTest {
     }
     @Test fun invalidIntermediateDraftsNeverCrashTheirParameterPreview() = runSceneTest {
         for(kind in NewGuestKind.entries) {
-            val workspace=Workspace(this,createGateway=FakeCreateGuestGateway())
-            workspace.exploreDemo();workspace.openCreateSession(kind,"demo-node-a")
+            val workspace=sampleWorkspace(this,createGateway=FakeCreateGuestGateway()).awaitInventory()
+            workspace.openCreateSession(kind,"demo-node-a")
             val scene=ImageComposeScene(1600,1000,coroutineContext=coroutineContext) {
                 val state by workspace.state.collectAsState()
                 MaterialTheme(colorScheme=ringColors) { CreateGuestHost(state,workspace,"Demo",{},onViewLog={}) }
@@ -264,11 +264,11 @@ class CreateIntegrationTest {
             } finally { scene.close();workspace.close() }
         }
     }
-    @Test fun vmAndContainerUseRealDemoCoreThroughConfirmation() = runSceneTest {
+    @Test fun vmAndContainerGoThroughConfirmationToExactlyOneSubmission() = runSceneTest {
         for (kind in NewGuestKind.entries) {
             val gateway = FakeCreateGuestGateway()
-            val workspace = Workspace(this, createGateway = gateway)
-            workspace.exploreDemo(); assertTrue(workspace.openCreateSession(kind, "demo-node-a"))
+            val workspace = sampleWorkspace(this, createGateway = gateway).awaitInventory()
+            assertTrue(workspace.openCreateSession(kind, "demo-node-a"))
             val scene = ImageComposeScene(1600,1000,coroutineContext = coroutineContext) {
                 val state by workspace.state.collectAsState()
                 MaterialTheme(colorScheme = ringColors) { CreateGuestHost(state,workspace,"Demo",{},onViewLog={}) }
@@ -290,14 +290,14 @@ class CreateIntegrationTest {
                 click(scene, if(kind == NewGuestKind.Vm) "7  Network" else "6  Network"); frame()
                 click(scene,"Choose\u2026"); frame()
                 click(scene,"vmbr0",contains=true); frame()
-                click(scene, if(kind == NewGuestKind.Vm) "CREATE VM 140" else "SIMULATE CREATE",contains=true)
+                click(scene, if(kind == NewGuestKind.Vm) "CREATE VM 140" else "CREATE CONTAINER 140",contains=true)
                 frame()
                 assertNotNull(allNodes(scene).firstOrNull { it.config.getOrNull(SemanticsProperties.Text)?.any { t -> t.text.contains("Create ${kind.guestKind} 140") } == true }, allNodes(scene).flatMap { it.config.getOrNull(SemanticsProperties.Text).orEmpty() }.joinToString(" | ") { it.text })
-                // Dialog confirm button has the exact same label in both demo flows.
-                click(scene,"SIMULATE CREATE",last=true); frame()
-                assertIs<CreateResult.Simulated>(workspace.state.value.creation!!.result)
+                // The dialog's confirm button has the same label for both kinds. One click sends exactly one create.
+                click(scene,"CREATE",last=true); frame()
+                assertNotNull(workspace.state.value.creation!!.result, "the wizard shows what became of the create")
                 assertEquals(1,workspace.state.value.submissions.size)
-                assertTrue(gateway.calls.isEmpty()); assertTrue(gateway.submits.isEmpty())
+                assertEquals(1,gateway.submits.size)
             } finally { scene.close(); workspace.close() }
         }
     }

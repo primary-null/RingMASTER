@@ -31,6 +31,22 @@ object Trace {
     private val requestCounts = IntArray(60)
     private val errorCounts = IntArray(60)
     private val revision = MutableStateFlow(0L)
+    private const val HTTP_REFUSED = 403
+    private val askingThread = ThreadLocal.withInitial { false }
+
+    /**
+     * Runs [block], a read that asks what this account may see. If the server refuses it (403), that is an answer: it is
+     * recorded as information and not counted as an error. The mark holds for the calling thread only.
+     */
+    fun <T> asking(block: () -> T): T {
+        val before = askingThread.get()
+        askingThread.set(true)
+        try {
+            return block()
+        } finally {
+            askingThread.set(before)
+        }
+    }
     val changes: StateFlow<Long> = revision.asStateFlow()
     val liveLoop = MutableStateFlow(TraceLiveLoop())
     fun snapshot(): List<TraceEvent> = synchronized(lock) { events.values.toList() }
@@ -91,7 +107,19 @@ object Trace {
                 ended = true; active.remove(id)
                 emit(event.source, "end", event.summary, event.detail + if (error != null) mapOf("error" to error.javaClass.simpleName) else emptyMap(),
                     (System.nanoTime() - started) / 1_000_000, bytesIn ?: incoming, bytesOut ?: outgoing, status,
-                    if (error != null || status != null && (status >= 400 || status in 1..99 && event.source in setOf(TraceSource.Tools, TraceSource.Vpn, TraceSource.Console))) TraceOutcome.Error else if (status != null && status != 0 && status !in 200..399) TraceOutcome.Warn else TraceOutcome.Ok, id, event.correlation)
+                    outcomeOf(status, error), id, event.correlation)
+            }
+        }
+        /** What a finished span counts as. A refusal the caller asked for (see [asking]) is an answer, not a fault. */
+        private fun outcomeOf(status: Int?, error: Throwable?): TraceOutcome {
+            if (status == HTTP_REFUSED && askingThread.get()) return TraceOutcome.Info
+            // For a process the status is its exit code, where anything but 0 is a failure.
+            val process = event.source in setOf(TraceSource.Tools, TraceSource.Vpn, TraceSource.Console)
+            val failed = error != null || status != null && (status >= 400 || status in 1..99 && process)
+            return when {
+                failed -> TraceOutcome.Error
+                status != null && status != 0 && status !in 200..399 -> TraceOutcome.Warn
+                else -> TraceOutcome.Ok
             }
         }
         /** Process spans: only exit 0 is success, so an exit code is never read as an HTTP status. */
@@ -124,18 +152,4 @@ object Trace {
         e.durationMs?.let { put("durationMs",it) }; e.bytesIn?.let { put("bytesIn",it) }; e.bytesOut?.let { put("bytesOut",it) }
         e.status?.let { put("status",it) }; e.spanId?.let { put("spanId",it) }; e.correlation?.let { put("correlation",Redact.text(it)) }
     }.toString()
-    /** Owned by the caller's scope: cancel on leaving demo mode. No real I/O. */
-    fun demo(scope: CoroutineScope): Job = scope.launch {
-        var tick=0
-        val session=begin(TraceSource.Console,"VNC · demo guest",mapOf("demo" to "true"),session=true)
-        try { while (isActive) {
-            val span=begin(TraceSource.PveApi, "GET /cluster/resources",mapOf("demo" to "true"))
-            delay(41); span.end(status=200,bytesIn=18432)
-            emit(TraceSource.Task,"poll","Task polling · running",mapOf("demo" to "true"))
-            session.bytes(42000,120); session.frame()
-            liveLoop.value=TraceLiveLoop("demo",Instant.now().plusSeconds(2),2000)
-            if (++tick%7==0) emit(TraceSource.LiveLoop,"backoff","Refresh delayed · demo",mapOf("demo" to "true"),outcome=TraceOutcome.Warn)
-            delay(1959)
-        } } finally { session.end(); if(liveLoop.value.state=="demo") liveLoop.value=TraceLiveLoop() }
-    }
 }

@@ -29,7 +29,7 @@ import local.ringleader.core.NewGuestKind
 import local.ringleader.core.ParamLine
 import local.ringleader.core.SecretState
 import local.ringleader.core.StorageChoice
-import local.ringleader.core.demoCreateSession
+import local.ringleader.core.sampleCreateSession
 import org.jetbrains.skia.EncodedImageFormat
 import java.nio.file.Files
 import java.time.Instant
@@ -111,7 +111,7 @@ private fun kotlinx.coroutines.CoroutineScope.ctScene(width: Int, height: Int, s
         }
     }
 
-private val ctSceneSession = demoCreateSession(NewGuestKind.Container, "docs-node", 7L, Instant.parse("2026-11-12T12:00:00Z"))
+private val ctSceneSession = sampleCreateSession(NewGuestKind.Container, "docs-node", 7L, Instant.parse("2026-11-12T12:00:00Z"))
 
 internal val ctSceneContext = CreateContext(
     release = 9,
@@ -126,10 +126,10 @@ internal val ctSceneContext = CreateContext(
     nodeMemoryBytes = 64L shl 30,
     nodeMemoryUsedBytes = 21L shl 30,
     choiceNode = "docs-node",
-    volumes = local.ringleader.core.demoCreateVolumes,
-    bridges = local.ringleader.core.demoCreateBridges,
-    cpuModels = local.ringleader.core.demoCreateCpuModels,
-    cpuFlags = local.ringleader.core.demoCreateCpuFlags,
+    volumes = local.ringleader.core.sampleCreateVolumes,
+    bridges = local.ringleader.core.sampleCreateBridges,
+    cpuModels = local.ringleader.core.sampleCreateCpuModels,
+    cpuFlags = local.ringleader.core.sampleCreateCpuFlags,
 )
 
 internal val ctSceneDraft = CtDraft(

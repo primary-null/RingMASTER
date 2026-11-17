@@ -193,7 +193,7 @@ import local.ringleader.core.writeOwnerOnlyText
                 clipboard.setText(AnnotatedString(taskLogText(log.lines)))
             }
             if (!LocalAppHost.current.web) MiniAction("Save…", enabled = log.lines.isNotEmpty()) { saveTaskLog(log.lines, log.dropped) }
-            WebUiAction(if (state.demo || state.kind == local.ringleader.core.PDM_KIND) null else local.ringleader.core.PveWebUi.task(state.address, log.task.node, log.task.type, log.task.subjectId))
+            WebUiAction(if (state.kind == local.ringleader.core.PDM_KIND) null else local.ringleader.core.PveWebUi.task(state.address, log.task.node, log.task.type, log.task.subjectId))
             Spacer(Modifier.weight(1f))
             if (log.loading) TechBusy()
         }

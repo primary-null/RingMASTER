@@ -106,7 +106,6 @@ internal fun guestHasPage(state: WorkspaceState, guest: Guest): Boolean = state.
     var proofResource by remember { mutableStateOf<ResourceId?>(null) }
     var pendingPower by remember { mutableStateOf<PowerConfirmation?>(null) }
     val profileLabel = when {
-        state.demo -> "Demonstration"
         sessionTitle != null -> sessionTitle.substringBefore(" · ").ifBlank { "Saved connection" }
         else -> "Manual connection"
     }
@@ -148,7 +147,7 @@ internal fun guestHasPage(state: WorkspaceState, guest: Guest): Boolean = state.
     val openGuest: (Guest) -> Unit = { guest ->
         if (state.selected?.resource != guest.resource) workspace.select(guest)
         if (guestHasPage(state, guest)) {
-            detailTab = guestOpenTab(guest, state.demo)
+            detailTab = guestOpenTab(guest)
             tabNonce = System.nanoTime()
             detailResource = guest.resource
             detailOpen = true
@@ -170,7 +169,7 @@ internal fun guestHasPage(state: WorkspaceState, guest: Guest): Boolean = state.
     pendingPower?.let { confirmation ->
         val destructive = powerActionDestructive(confirmation.action)
         val listed = state.overview?.guests?.firstOrNull { it.resource == confirmation.resource }
-        val commit = powerCommitLabel(confirmation.action).let { if (state.demo) "Simulate ${it.lowercase()}" else it }
+        val commit = powerCommitLabel(confirmation.action).let { it }
         val send: () -> Unit = {
             val from = sendButton[0]?.takeIf { it.isAttached }?.boundsInWindow()
             pendingPower = null
@@ -216,7 +215,6 @@ internal fun guestHasPage(state: WorkspaceState, guest: Guest): Boolean = state.
                 else -> {}
             }
             if (powerActionUsesHa(listed, confirmation.action)) Text(HA_ROUTING_NOTE, color = Tech.Amber, fontSize = 13.sp, lineHeight = 20.sp)
-            if (state.demo) Text(SIMULATED_POWER_DETAIL, color = Tech.Amber, fontSize = 13.sp)
         }
     }
     // The guest page and the list share one transition host: opening a guest crossfades in from the right, going back from
@@ -237,9 +235,10 @@ internal fun guestHasPage(state: WorkspaceState, guest: Guest): Boolean = state.
         // A connection that never got its first inventory (refused sign-in, refused certificate, server not reached) has no
         // telemetry to show: the failure card below is the whole page, and the reason is said there, once.
         val failed = connectionFailed(state)
-        if ((state.connected || state.demo) && !failed) TelemetryStrip(state, workspace, onDisconnect, short = short)
+        if (state.connected && !failed) TelemetryStrip(state, workspace, onDisconnect, short = short)
+        if (state.connected && !failed && !short && state.overview != null) RadiosStrip()
         if (state.loading) TechProgress()
-        state.error?.takeIf { !failed && (state.connected || state.demo || state.overview != null) }?.let { Text(it, color = Tech.Red, fontSize = 13.sp) }
+        state.error?.takeIf { !failed && (state.connected || state.overview != null) }?.let { Text(it, color = Tech.Red, fontSize = 13.sp) }
         if (state.connected && state.lostPowerResults.isNotEmpty()) LostPowerResults(state, workspace)
         val overview = state.overview
         if (overview == null) {
@@ -289,7 +288,7 @@ internal fun guestHasPage(state: WorkspaceState, guest: Guest): Boolean = state.
                 } else {
                     Text("Open your infrastructure workspace", fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
                     Spacer(Modifier.height(12.dp))
-                    Text("Connect to a Proxmox server to inspect its guests, or explore the demo.", color = Tech.Muted)
+                    Text("Connect to a Proxmox server to inspect its guests.", color = Tech.Muted)
                     Spacer(Modifier.height(18.dp))
                     TechAction("Desk", active = true, onClick = onConnect)
                 }
@@ -470,8 +469,8 @@ internal class RowClicks(private val window: Long = doubleClickMillis()) {
     }
 }
 
-/** The tab a double-clicked guest opens on: the console while it runs, the summary otherwise. The demo has no consoles. */
-internal fun guestOpenTab(guest: Guest, demo: Boolean = false) = if (guest.status == "running" && !guest.template && !demo) "Console" else "Summary"
+/** The tab a double-clicked guest opens on: the console while it runs, the summary otherwise. */
+internal fun guestOpenTab(guest: Guest) = if (guest.status == "running" && !guest.template) "Console" else "Summary"
 
 /** Shared column widths so header and rows line up. Wider lists get wider CPU and memory cells and a network column. */
 private data class Cols(val tile: Dp = 22.dp, val id: Dp = 40.dp, val cpu: Dp = 138.dp, val mem: Dp = 132.dp, val net: Dp = 0.dp, val disk: Dp = 0.dp, val up: Dp = 66.dp, val status: Dp = 84.dp, val gap: Dp = 12.dp,
@@ -667,6 +666,7 @@ private fun guestLockMark(guest: Guest): GuestMark? {
                     }
                 }
                 if (stale) Text("STALE", fontSize = 9.sp, fontFamily = Tech.Mono, color = Tech.Amber)
+                GuestRadioMark(guest)
                 val chips = (if (guest.template) minOf(2, TableCols.chips) else TableCols.chips).coerceAtLeast(if (guestPriorityMarks(guest).isNotEmpty()) 1 else 0)
                 GuestMarks(guest, chips) { hidden ->
                     HelpTip(hidden.joinToString(", ")) { Text("+${hidden.size}", fontSize = 9.sp, color = Tech.Muted, fontFamily = Tech.Mono, maxLines = 1) }
@@ -731,6 +731,7 @@ private fun guestLockMark(guest: Guest): GuestMark? {
                         Text(guest.name.ifBlank { "Guest ${guest.id}" }, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.identity())
                     }
                 }
+                GuestRadioMark(guest)
                 ActivityStatusTag(guest.status.ifBlank { "unknown" }, guest.status == "running", guest.resource, anchor = TagAnchor(guest.resource))
             }
             Text(listOfNotNull("${guest.kind.uppercase()} ${guest.id}", guest.node.ifBlank { "unknown node" }, guest.scope.takeIf { it.isNotEmpty() }?.let { "PDM remote $it" }).joinToString("  ·  "),
@@ -792,7 +793,6 @@ private fun guestLockMark(guest: Guest): GuestMark? {
                     }
                 }
             }
-            if (state.demo) Text("SAMPLE DETAILS", fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = Tech.Amber)
             state.overview?.remotes?.firstOrNull { it.scope == guest.scope && it.stale }?.let { remote ->
                 Text("Stale remote data. ${remote.error.orEmpty()}", color = Tech.Amber, fontSize = Tech.Label, maxLines = 3, overflow = TextOverflow.Ellipsis)
             }
@@ -925,16 +925,15 @@ private fun guestLockMark(guest: Guest): GuestMark? {
         FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp), itemVerticalAlignment = Alignment.CenterVertically) {
             if (liveNodeReadAvailable(state)) MiniAction("Refresh", primary = true, enabled = !state.nodeStatusLoading, onClick = workspace::refreshNodeStatus)
             Spacer(Modifier.weight(1f))
-            if (state.kind != PDM_KIND && !state.demo && member.status == "online") MiniAction("Shell") { shell = true }
+            if (state.kind != PDM_KIND && member.status == "online") MiniAction("Shell") { shell = true }
             // SSH through Tailscale, only for a node that is itself a tailnet machine publishing host keys (the SSH contract).
             NodeSshButton(state, member.name)
-            WebUiAction(if (state.demo || state.kind == PDM_KIND) null else PveWebUi.node(state.address, member.name))
+            WebUiAction(if (state.kind == PDM_KIND) null else PveWebUi.node(state.address, member.name))
             WatchNodeButton(member.name)
             MiniAction("Close", onClick = workspace::clearMember)
         }
         NodeSshNote(state, member.name)
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) { CreateGuestActions(state, workspace, member.name) }
-        if (state.demo) Text(RECORDED_SAMPLE_CAPTION, fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = Tech.Amber)
         HorizontalDivider(color = Tech.Edge)
         val nodeSeries = state.history.nodes[member.name]
         val sample = nodeSeries?.samples?.lastOrNull()
@@ -945,6 +944,7 @@ private fun guestLockMark(guest: Guest): GuestMark? {
             ArcGauge(cpuNow, "CPU", member.maxCpu?.let { "${it.toInt()} cores" }, modifier = Modifier.opensLens { nodeLens(member.name, LiveMetric.Cpu) }, series = nodeSeries, metric = { it.cpu })
             ArcGauge(memoryFraction(used, capacity), "Memory", if ((capacity ?: 0L) > 0L) "${gib(used)} / ${gib(capacity)} GiB" else null, modifier = Modifier.opensLens { nodeLens(member.name, LiveMetric.Memory) }, series = nodeSeries, metric = { memoryFraction(it.mem, it.memMax) }, thresholds = MetricThresholds.Capacity)
         }
+        NodeRadiosPanel(member.name)
         HistoryGroup(state, workspace, member.name)
         LaunchedEffect(member.name, state.connectionEpoch) { workspace.loadNodeNetwork(member.name) }
         Spacer(Modifier.height(6.dp))
@@ -992,7 +992,7 @@ private fun guestLockMark(guest: Guest): GuestMark? {
         }
         HorizontalDivider(color = Tech.Edge)
         if (state.nodeStatusLoading) TechProgress()
-        state.nodeStatusNote?.let { Text(it, color = if (state.demo) Tech.Amber else Tech.Muted, fontSize = Tech.Label, maxLines = 4, overflow = TextOverflow.Ellipsis) }
+        state.nodeStatusNote?.let { Text(it, color = Tech.Muted, fontSize = Tech.Label, maxLines = 4, overflow = TextOverflow.Ellipsis) }
         if (state.nodeStatusStale) Text("The last live status for this node is stale.", color = Tech.Amber, fontSize = Tech.Label, maxLines = 2, overflow = TextOverflow.Ellipsis)
         state.nodeStatusError?.let { Text(it, color = Tech.Red, fontSize = Tech.Label, maxLines = 4, overflow = TextOverflow.Ellipsis) }
         state.nodeStatus?.takeIf { it.node == member.name }?.let { live ->
@@ -1014,7 +1014,7 @@ private fun guestLockMark(guest: Guest): GuestMark? {
         Text("Power actions are not available for a PDM guest.", color = Tech.Muted, fontSize = Tech.Label)
         return
     }
-    val actionsAvailable = liveActionsAvailable(state) || (state.demo && state.overview != null && !state.loading && !state.stale)
+    val actionsAvailable = liveActionsAvailable(state)
     val outcome = state.submissions.firstOrNull { it.remote == guest.remote && it.vmid == guest.id && it.kind == guest.kind }
     when {
         guest.template -> Text("Templates have no power action.", color = Tech.Muted, fontSize = Tech.Label)

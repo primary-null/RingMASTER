@@ -61,10 +61,9 @@ class NativeAlertBridgeTest {
     }
 
     @Test fun backgroundObservationIsOptInAndPreservesManualPause() = runBlocking {
-        val sessions = Sessions(this) { Workspace(this) }
+        val sessions = Sessions(this) { sampleWorkspace(this) }
         try {
             val workspace = sessions.state.value.active.workspace
-            workspace.exploreDemo()
             configureAlertReads(sessions, true, false, true, false)
             assertFalse(workspace.state.value.live)
             configureAlertReads(sessions, true, true, true, false)

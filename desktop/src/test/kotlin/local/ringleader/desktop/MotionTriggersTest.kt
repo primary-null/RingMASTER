@@ -1,5 +1,7 @@
 package local.ringleader.desktop
 
+import local.ringleader.core.sampleUpid
+import local.ringleader.core.sampleOverview
 import java.time.Instant
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -10,7 +12,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import local.ringleader.core.ClusterTask
-import local.ringleader.core.DEMO_REMOTE_KEY
+import local.ringleader.core.SAMPLE_ADDRESS
 import local.ringleader.core.PowerAction
 import local.ringleader.core.PowerPhase
 import local.ringleader.core.PowerSubmission
@@ -20,21 +22,21 @@ import local.ringleader.core.TaskLogLine
 import local.ringleader.core.TaskOutcome
 import local.ringleader.core.WorkspaceState
 import local.ringleader.core.classifyTask
-import local.ringleader.core.demoOverview
+import local.ringleader.core.sampleOverview
 import local.ringleader.core.GuestListMetrics
 
 /** Pure tests: which moments fire between two states, and never because a refresh redrew the list. */
 class MotionTriggersTest {
-    private val vm120 = ResourceId(DEMO_REMOTE_KEY, "", "VM", 120)
-    private val ct121 = ResourceId(DEMO_REMOTE_KEY, "", "Container", 121)
-    private val vm130 = ResourceId(DEMO_REMOTE_KEY, "", "VM", 130)
+    private val vm120 = ResourceId(SAMPLE_ADDRESS, "", "VM", 120)
+    private val ct121 = ResourceId(SAMPLE_ADDRESS, "", "Container", 121)
+    private val vm130 = ResourceId(SAMPLE_ADDRESS, "", "VM", 130)
 
     private fun sub(id: String, resource: ResourceId, action: PowerAction, phase: PowerPhase) = SubmissionFact(id, resource, action, phase)
     private fun facts(
         subs: List<SubmissionFact> = emptyList(), tasks: Map<TaskIdentity, TaskFact> = emptyMap(),
         status: Map<ResourceId, String> = mapOf(vm120 to "stopped", ct121 to "running", vm130 to "stopped"), epoch: Long = 1,
     ) = MotionFacts(epoch, subs, tasks, status)
-    private fun task(upid: String) = TaskIdentity(DEMO_REMOTE_KEY, "demo:$upid")
+    private fun task(upid: String) = TaskIdentity(SAMPLE_ADDRESS, "demo:$upid")
     private fun kinds(old: MotionFacts?, new: MotionFacts) = momentsBetween(old, new).map { it.kind to it.resource }
 
     // ---- nothing fires without a real change --------------------------------------------------------------------
@@ -46,8 +48,8 @@ class MotionTriggersTest {
     }
 
     @Test fun aRefreshThatOnlyMovesNumbersFiresNothing() {
-        val guests = demoOverview.guests
-        fun state(cpu: Double) = WorkspaceState(connected = true, demo = true, connectionEpoch = 7, overview = demoOverview.copy(guests = guests.map { it.copy(metrics = GuestListMetrics(cpuFraction = cpu, memoryBytes = (cpu * 1e9).toLong())) }))
+        val guests = sampleOverview().guests
+        fun state(cpu: Double) = WorkspaceState(connected = true, connectionEpoch = 7, overview = sampleOverview().copy(guests = guests.map { it.copy(metrics = GuestListMetrics(cpuFraction = cpu, memoryBytes = (cpu * 1e9).toLong())) }))
         val first = motionFacts(state(.10)); val second = motionFacts(state(.37))
         assertEquals(first, second, "metrics are not part of the facts")
         assertTrue(momentsBetween(first, second).isEmpty())
@@ -59,9 +61,9 @@ class MotionTriggersTest {
 
     // ---- submissions ----------------------------------------------------------------------------------------------
 
-    @Test fun aNewAcceptedOrSimulatedSubmissionStartsAMoment() {
+    @Test fun aNewAcceptedSubmissionStartsAMoment() {
         val before = facts()
-        listOf(PowerPhase.Accepted, PowerPhase.Simulated, PowerPhase.Unknown).forEach { phase ->
+        listOf(PowerPhase.Accepted, PowerPhase.Unknown).forEach { phase ->
             assertEquals(listOf(MomentKind.Started to vm120), kinds(before, facts(subs = listOf(sub("local-1", vm120, PowerAction.Start, phase)))), "$phase")
         }
     }
@@ -135,7 +137,7 @@ class MotionTriggersTest {
         val unasked = facts()
         assertTrue(momentsBetween(unasked, unasked.copy(guestStatus = unasked.guestStatus + (vm120 to "running"))).isEmpty(), "someone else started it")
         assertTrue(momentsBetween(facts(), facts().copy(guestStatus = facts().guestStatus - vm130)).isEmpty(), "a guest disappearing is not a moment")
-        assertTrue(momentsBetween(facts(), facts().copy(guestStatus = facts().guestStatus + (ResourceId(DEMO_REMOTE_KEY, "", "VM", 999) to "running"))).isEmpty(), "a new guest is not a moment")
+        assertTrue(momentsBetween(facts(), facts().copy(guestStatus = facts().guestStatus + (ResourceId(SAMPLE_ADDRESS, "", "VM", 999) to "running"))).isEmpty(), "a new guest is not a moment")
     }
 
     @Test fun aSuccessAndTheArrivalOfTheSameGuestAreAnnouncedOnce() {
@@ -154,7 +156,6 @@ class MotionTriggersTest {
         val accepted = facts(subs = listOf(sub("local-1", vm120, PowerAction.Start, PowerPhase.Accepted)))
         assertEquals(GuestActivity(true, PowerAction.Start, false), guestActivities(accepted)[vm120])
         assertEquals(true, guestActivities(facts(subs = listOf(sub("local-1", vm120, PowerAction.Reboot, PowerPhase.Unknown))))[vm120]?.inFlight, "unknown counts")
-        assertNull(guestActivities(facts(subs = listOf(sub("local-1", vm120, PowerAction.Start, PowerPhase.Simulated))))[vm120], "a simulated action is never in flight")
         assertNull(guestActivities(facts(subs = listOf(sub("local-1", vm120, PowerAction.Start, PowerPhase.Succeeded))))[vm120], "still once it succeeded")
         val task = facts(tasks = mapOf(task("a") to TaskFact(ct121, "vzdump", TaskOutcome.Running)))
         assertEquals(true, guestActivities(task)[ct121]?.inFlight)
@@ -185,19 +186,19 @@ class MotionTriggersTest {
         val upid = "UPID:demo-node-a:0000BEEF:0000AAAA:00000001:qmstart:120:demo@ringmaster:"
         val ended = Instant.parse("2026-11-07T15:00:12Z")
         val tasks = listOf(
-            ClusterTask(DEMO_REMOTE_KEY, "demo:qmstart:120", "demo-node-a", "qmstart", "120", "demo@ringmaster", ended.minusSeconds(12), ended, "OK", classifyTask("OK", ended).also { assertEquals(TaskOutcome.Succeeded, it) }),
-            ClusterTask(DEMO_REMOTE_KEY, "demo:vzdump:121", "demo-node-a", "vzdump", "121", "demo@ringmaster", ended.minusSeconds(60), null, "running", TaskOutcome.Running),
-            ClusterTask(DEMO_REMOTE_KEY, "demo:hastart:7", "demo-node-a", "hastart", "7", "demo@ringmaster", ended, null, null, TaskOutcome.Unknown),
+            ClusterTask(SAMPLE_ADDRESS, sampleUpid("qmstart", "120"), "demo-node-a", "qmstart", "120", "demo@ringmaster", ended.minusSeconds(12), ended, "OK", classifyTask("OK", ended).also { assertEquals(TaskOutcome.Succeeded, it) }),
+            ClusterTask(SAMPLE_ADDRESS, sampleUpid("vzdump", "121"), "demo-node-a", "vzdump", "121", "demo@ringmaster", ended.minusSeconds(60), null, "running", TaskOutcome.Running),
+            ClusterTask(SAMPLE_ADDRESS, sampleUpid("hastart", "7"), "demo-node-a", "hastart", "7", "demo@ringmaster", ended, null, null, TaskOutcome.Unknown),
         )
-        val submission = PowerSubmission("local-abc", DEMO_REMOTE_KEY, "demo-node-a", 120, "VM", "debian-workbench", PowerAction.Start, PowerPhase.Accepted, "The server accepted this action. It is not finished.", false, true)
-        val f = motionFacts(WorkspaceState(connected = true, demo = true, connectionEpoch = 3, overview = demoOverview, tasks = tasks, submissions = listOf(submission)))
+        val submission = PowerSubmission("local-abc", SAMPLE_ADDRESS, "demo-node-a", 120, "VM", "debian-workbench", PowerAction.Start, PowerPhase.Accepted, "The server accepted this action. It is not finished.", checkable = true)
+        val f = motionFacts(WorkspaceState(connected = true, connectionEpoch = 3, overview = sampleOverview(), tasks = tasks, submissions = listOf(submission)))
         assertEquals(3L, f.epoch)
         assertEquals(listOf(SubmissionFact("local-abc", vm120, PowerAction.Start, PowerPhase.Accepted)), f.submissions)
-        assertEquals(vm120, f.tasks[TaskIdentity(DEMO_REMOTE_KEY, "demo:qmstart:120")]?.resource, "qm… is a VM")
-        assertEquals(ct121, f.tasks[TaskIdentity(DEMO_REMOTE_KEY, "demo:vzdump:121")]?.resource, "vzdump takes the kind from the guest list")
-        assertNull(f.tasks[TaskIdentity(DEMO_REMOTE_KEY, "demo:hastart:7")]?.resource, "a subject that is no guest")
+        assertEquals(vm120, f.tasks[TaskIdentity(SAMPLE_ADDRESS, sampleUpid("qmstart", "120"))]?.resource, "qm… is a VM")
+        assertEquals(ct121, f.tasks[TaskIdentity(SAMPLE_ADDRESS, sampleUpid("vzdump", "121"))]?.resource, "vzdump takes the kind from the guest list")
+        assertNull(f.tasks[TaskIdentity(SAMPLE_ADDRESS, sampleUpid("hastart", "7"))]?.resource, "a subject that is no guest")
         assertEquals("running", f.guestStatus[vm130.copy(vmid = 121, kind = "Container")])
-        assertEquals(setOf("submission:local-abc", "task:demo:vzdump:121"), inFlightSources(f))
+        assertEquals(setOf("submission:local-abc", "task:" + sampleUpid("vzdump", "121")), inFlightSources(f))
         assertTrue(upid.startsWith("UPID:"))
     }
 

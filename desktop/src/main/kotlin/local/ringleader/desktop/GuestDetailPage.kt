@@ -31,10 +31,12 @@ internal var guestHeaderProbe: (() -> Unit)? = null
 
 @Composable fun GuestDetailPage(state: WorkspaceState, workspace: Workspace, onBack: () -> Unit, onAction: (PowerAction, SnapshotRequest?) -> Unit, initialTab: String = "Summary", initialScroll: Int = 0, tabNonce: Long = 0, pins: PinStore? = null, connectionKey: String? = null, onSwitchGuest: ((Guest) -> Unit)? = null) {
     val guest = state.selected ?: return
-    val tabs = if (guest.kind == "VM") listOf("Summary","Console","Hardware","Snapshots","Backups","Bluetooth","Actions") else listOf("Summary","Console","Hardware","Snapshots","Backups","Actions")
-    var tab by remember { mutableStateOf(if (initialTab in tabs) initialTab else "Summary") }
+    val tabs = listOf("Summary","Console","Hardware","Snapshots","Backups","Radios","Actions")
+    // "Bluetooth" was this tab's name before it became Radios; an old pin or link still lands on it.
+    val asked = if (initialTab == "Bluetooth") "Radios" else initialTab
+    var tab by remember { mutableStateOf(if (asked in tabs) asked else "Summary") }
     LaunchedEffect(tabs) { if (tab !in tabs) tab = "Summary" }
-    LaunchedEffect(tabNonce) { if (tabNonce != 0L) tab = if (initialTab in tabs) initialTab else "Summary" }
+    LaunchedEffect(tabNonce) { if (tabNonce != 0L) tab = if (asked in tabs) asked else "Summary" }
     var pinMenu by remember { mutableStateOf(false) }
     var serviceDialog by remember { mutableStateOf(false) }
     var name by remember { mutableStateOf("") }
@@ -66,8 +68,8 @@ internal var guestHeaderProbe: (() -> Unit)? = null
     val immersive = LocalImmersive.current
     val consoleImmersive = immersive?.active == true && tab == "Console"
     val overlayClicks = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
-    // A dropped connection leaves immersive. Demo is not a connection, so it does not.
-    LaunchedEffect(state.connected, state.demo) { if (!state.connected && !state.demo) immersive?.exit() }
+    // A dropped connection leaves immersive.
+    LaunchedEffect(state.connected) { if (!state.connected) immersive?.exit() }
     LaunchedEffect(consoleImmersive) { if (!consoleImmersive) guestsOpen = false }
     // The guests list takes the keyboard back from the console when it opens (the terminal's bar does not clear focus
     // as the VNC toolbar does), so Escape and the filter field reach the list rather than the guest.
@@ -146,18 +148,17 @@ internal var guestHeaderProbe: (() -> Unit)? = null
             var arrival by remember { mutableStateOf<Any>(guest.resource) }
             SideEffect { if (tab != "Console" && arrival != guest.resource) arrival = guest.resource }
             ArrivalAction("Console", arrival) { tab = "Console" }
-            WebUiAction(if (state.demo || state.kind == PDM_KIND || guest.scope.isNotEmpty()) null else PveWebUi.guest(state.address, guest.kind, guest.id))
+            WebUiAction(if (state.kind == PDM_KIND || guest.scope.isNotEmpty()) null else PveWebUi.guest(state.address, guest.kind, guest.id))
             GuestSshButton(state, guest)
             HelpTip("Refresh") { MiniAction("↻", enabled = !state.inspectionLoading, width = 30.dp) { workspace.inspectGuest() } }
         }
         GuestSshNote(state, guest)
-        if (serviceDialog && pins != null && connectionKey != null) PinServiceDialog(guest, report, state.demo, { serviceDialog = false }) { serviceName, url ->
+        if (serviceDialog && pins != null && connectionKey != null) PinServiceDialog(guest, report, { serviceDialog = false }) { serviceName, url ->
             val error = pins.addService(connectionKey, guest, serviceName, url)
             if (error == null) serviceDialog = false
             error
         }
         SpiceConsoleMessage(guest)
-        if(state.demo) Text("SAMPLE DATA · SIMULATED ACTIONS",color = Tech.Amber,fontFamily=Tech.Mono,fontSize=10.sp,letterSpacing=1.sp)
         if(state.stale) Text("Inventory is stale. Sync in Fleet before actions.",color = Tech.Amber)
         // The loading bar is drawn over the tab strip's bottom edge. As a row of its own it pushed everything below down
         // by its height and the gap while a guest's details loaded, and back afterwards, so every switch in the console
@@ -192,7 +193,7 @@ internal var guestHeaderProbe: (() -> Unit)? = null
                 val cap = live.samples.lastOrNull()?.memMax ?: state.details?.memoryLimitBytes ?: guest.metrics?.memoryLimitBytes
                 if (runningGuest && guest.kind == "VM") LaunchedEffect(guest.resource) { autoCaptureConsoleStill(state, workspace, guest) }
                 if (runningGuest) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-                    if (guest.kind == "VM" && state.kind != PDM_KIND && !state.demo) ConsoleStillCard(state, workspace, guest, 300.dp, onOpenConsole = { tab = "Console" })
+                    if (guest.kind == "VM" && state.kind != PDM_KIND) ConsoleStillCard(state, workspace, guest, 300.dp, onOpenConsole = { tab = "Console" })
                     ArcGauge(cpuNow, "CPU", state.details?.cpus?.let { "$it vCPU" }, modifier = Modifier.opensLens { guestLens(guest, LiveMetric.Cpu) }, series = live, metric = { it.cpu })
                     ArcGauge(if (runningGuest) memoryFraction(mem, cap) else null, "Memory", "${iec(mem?.toDouble())} / ${iec(cap?.toDouble())}", modifier = Modifier.opensLens { guestLens(guest, LiveMetric.Memory) }, series = live, metric = { memoryFraction(it.mem, it.memMax) }, thresholds = MetricThresholds.Capacity)
                     Sparkline(live, Modifier.opensLens { guestLens(guest, LiveMetric.Cpu) }.weight(1f).height(56.dp), scaleKind = AxisKind.Fraction, guides = listOf(MetricThresholds.Load.attention, MetricThresholds.Load.critical), peak = true, stale = state.stale)
@@ -317,7 +318,7 @@ internal var guestHeaderProbe: (() -> Unit)? = null
                     }
                 }
             }
-            "Bluetooth" -> GuestBluetoothTab(state, workspace, guest, report?.hardware?.value)
+            "Radios" -> GuestRadiosTab(state, workspace, guest, report?.hardware?.value)
             "Console" -> Row(Modifier.fillMaxWidth().weight(1f), horizontalArrangement = Arrangement.spacedBy(if (consoleImmersive) 0.dp else 8.dp)) {
                 if (onSwitchGuest != null && !consoleImmersive) ConsoleSwitcher(state, guest, switcher, onSwitchGuest, Modifier.fillMaxHeight())
                 // The weight lives on this box: key() does not keep the row's scope, so the console cannot take it itself.
@@ -440,12 +441,12 @@ internal fun nicExtras(p: Map<String, String>): String = listOfNotNull(
  * Pin a service for this guest. The form (PinServiceForm.kt) guesses the address from the guest's notes, name and tags,
  * and can look at the guest's ports on request. Not offered with sample data or in browser mode.
  */
-@Composable private fun PinServiceDialog(guest: Guest, report: GuestInspection?, demo: Boolean, onDismiss: () -> Unit, onPin: (String, String) -> String?) {
+@Composable private fun PinServiceDialog(guest: Guest, report: GuestInspection?, onDismiss: () -> Unit, onPin: (String, String) -> String?) {
     val hosts = report?.addresses?.value.orEmpty().mapNotNull(::reportedHost).distinct()
     val hints = remember(guest.name, guest.tags, report?.hardware?.value) { GuestHints(guest.name, guest.tags, report?.hardware?.value?.fields?.get("description")) }
     val web = LocalAppHost.current.web
     key(guest.resource) {
-        ServicePinForm(hints, hosts, canProbe = !demo && !web, onDismiss = onDismiss, onSave = onPin,
-            probeUnavailable = if (demo) "Find services and Test are not offered with sample data." else "Find services and Test need the desktop app.")
+        ServicePinForm(hints, hosts, canProbe = !web, onDismiss = onDismiss, onSave = onPin,
+            probeUnavailable = "Find services and Test need the desktop app.")
     }
 }

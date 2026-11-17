@@ -127,7 +127,7 @@ class StorageModelTest {
         assertEquals(FillLevel.Critical, fillLevel(120, 100), "An over-full sample is drawn full")
         assertEquals(1.0, usedFraction(120, 100))
         assertEquals(0.25, usedFraction(25, 100))
-        assertEquals(FillLevel.High, fillLevel(RecordedStorage(DEMO_REMOTE_KEY, "node-a", "local", false, 90, 100, "available", "dir", "iso")))
+        assertEquals(FillLevel.High, fillLevel(RecordedStorage(SAMPLE_ADDRESS, "node-a", "local", false, 90, 100, "available", "dir", "iso")))
     }
 
     @Test fun freeIsTotalMinusUsedAndIsNamedSo() {
@@ -425,30 +425,30 @@ class StorageModelTest {
     // ---- demo ----
 
     @Test fun demoConfigurationAddsADisabledStorageAndRetention() {
-        val model = storageListModel(demoOverview.storage, demoOverview.members, demoStorageConfig)
+        val model = storageListModel(sampleOverview().storage, sampleOverview().members, sampleStorageConfig)
         assertEquals(listOf("old-nfs"), model.disabled.map { it.storage })
         assertEquals(listOf("shared-data"), model.shared.map { it.id })
-        assertEquals(KeepRules(last = 3, weekly = 2), demoStorageConfig.single { it.storage == "shared-data" }.pruneBackups)
-        assertTrue(demoStorageConfig.all { pveStorageIdOrNull(it.storage) != null && it.content.all { c -> c in STORAGE_CONTENT_TYPES } })
+        assertEquals(KeepRules(last = 3, weekly = 2), sampleStorageConfig.single { it.storage == "shared-data" }.pruneBackups)
+        assertTrue(sampleStorageConfig.all { pveStorageIdOrNull(it.storage) != null && it.content.all { c -> c in STORAGE_CONTENT_TYPES } })
     }
 
     @Test fun demoHistoryIsDeterministicAndStaysWithinTheTotal() {
-        val row = demoOverview.storage.first { it.id == "local-lvm" }
+        val row = sampleOverview().storage.first { it.id == "local-lvm" }
         val now = Instant.parse("2026-11-12T12:00:00Z")
-        val average = demoStorageHistory(row, "day", "AVERAGE", now)
-        assertEquals(average, demoStorageHistory(row, "day", "AVERAGE", now))
+        val average = sampleStorageHistory(row, "day", "AVERAGE", now)
+        assertEquals(average, sampleStorageHistory(row, "day", "AVERAGE", now))
         assertEquals(120, average.size)
         assertEquals(now.epochSecond.toDouble(), average.last().time)
         assertEquals(now.epochSecond - 86_400.0, average.first().time)
         val total = row.maxDiskBytes!!.toDouble()
-        val max = demoStorageHistory(row, "day", "MAX", now)
+        val max = sampleStorageHistory(row, "day", "MAX", now)
         assertTrue(average.zip(max).all { (a, m) -> m.values["used"]!! >= a.values["used"]!! && m.values["used"]!! <= total })
         assertTrue(average.all { it.values["total"] == total })
         val used = average.map { it.values["used"]!! }
         assertTrue(used.first() < used.last(), "A slow climb")
         assertTrue(used.zipWithNext().any { (a, b) -> b < a * 0.95 }, "With a drop after a prune")
-        val empty = demoStorageHistory(row.copy(diskBytes = null, maxDiskBytes = null), "hour", "AVERAGE", now)
+        val empty = sampleStorageHistory(row.copy(diskBytes = null, maxDiskBytes = null), "hour", "AVERAGE", now)
         assertTrue(empty.all { it.values["used"] == null && it.values["total"] == null })
-        assertFailsWith<IllegalArgumentException> { demoStorageHistory(row, "decade", "AVERAGE", now) }
+        assertFailsWith<IllegalArgumentException> { sampleStorageHistory(row, "decade", "AVERAGE", now) }
     }
 }

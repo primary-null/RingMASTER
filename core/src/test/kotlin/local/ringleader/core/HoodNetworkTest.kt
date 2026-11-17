@@ -67,12 +67,6 @@ class HoodNetworkTest {
         assertEquals(listOf("PROBLEM", "TRUST", "SIGN-IN", "LAST REQUEST", "FAILURES"), row.facts.map { it.name })
     }
 
-    @Test fun aDemoSessionClaimsNoServer() {
-        val row = HoodNetwork.rows(listOf(session(1, "", inView = true, phase = TickerSessionPhase.Demo, pinned = null, signIn = "Demo")), emptyList(), now).single()
-        assertEquals(listOf("REACHED", "REFRESH"), row.facts.map { it.name })
-        assertEquals("Demonstration data, no server", row.facts.first().value)
-    }
-
     @Test fun theRefreshFactNamesPauseAndBackOff() {
         fun refresh(s: TickerSession, loop: TraceLiveLoop = TraceLiveLoop()) = HoodNetwork.rows(listOf(s), emptyList(), now, loop).single().facts.first { it.name == "REFRESH" }
         assertEquals("Paused", refresh(session(1, east, live = false)).value)

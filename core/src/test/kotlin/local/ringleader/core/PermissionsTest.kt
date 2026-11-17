@@ -380,14 +380,14 @@ class PermissionsTest {
         val counts = featureStatusCounts(result)
         assertEquals(result.size, counts.values.sum())
         assertEquals(8, counts.getValue(FeatureStatus.Allowed))
-        assertEquals(1, counts.getValue(FeatureStatus.Partial))
+        assertEquals(2, counts.getValue(FeatureStatus.Partial))
         assertEquals(16, counts.getValue(FeatureStatus.Missing))
     }
 
     // ---- targets and demo ----
 
     @Test fun targetsComeFromTheRecordedInventoryAndSkipPdmGuests() {
-        val demo = permissionTargets(demoOverview)
+        val demo = permissionTargets(sampleOverview())
         assertEquals(listOf("demo-node-a", "demo-node-b"), demo.nodes)
         assertEquals(listOf(120 to "VM", 121 to "Container", 130 to "VM"), demo.guests)
         assertEquals(listOf("local", "local-lvm", "shared-data"), demo.storages)
@@ -399,10 +399,10 @@ class PermissionsTest {
     }
 
     @Test fun theDemoSampleShowsEveryKindOfOutcome() {
-        val r = evaluateFeatures(demoPermissions, permissionTargets(demoOverview)).associateBy { it.requirement.id }
+        val r = evaluateFeatures(samplePermissions, permissionTargets(sampleOverview())).associateBy { it.requirement.id }
         assertEquals(setOf("fleet-guests", "fleet-nodes", "activity", "agent-addresses", "services", "node-network", "pci", "notifications"),
             r.filterValues { it.status == FeatureStatus.Allowed }.keys)
-        assertEquals(setOf("backup-notes", "power", "console", "node-shell", "storage", "syslog", "backup-now"), r.filterValues { it.status == FeatureStatus.Partial }.keys)
+        assertEquals(setOf("backup-notes", "power", "console", "node-shell", "storage", "radios", "syslog", "backup-now"), r.filterValues { it.status == FeatureStatus.Partial }.keys)
         assertEquals(setOf("storage-get-files", "storage-url", "storage-remove", "create-vm", "create-ct", "snapshots", "rollback", "bluetooth", "updates", "usb"), r.filterValues { it.status == FeatureStatus.Missing }.keys)
         assertEquals("Missing on 1 of 3 guests this identity can see. The roles on /vms/130 do not include VM.PowerMgmt.", r.getValue("power").summary)
         assertEquals("Missing on 1 of 2 nodes. /nodes/demo-node-b inherits from /nodes, whose roles do not include Sys.Console.", r.getValue("node-shell").summary)

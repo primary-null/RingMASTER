@@ -16,7 +16,7 @@ class GuestInspectionWorkspaceTest {
     @Test fun lateReadAfterSelectionChangeIsDiscarded() = runTest {
         val gate = CompletableDeferred<Unit>()
         val reader = object: GuestInspectionGateway {
-            override suspend fun read(connection: Connection,guest: Guest,storages: List<String>,timeframe: String): GuestInspection = withContext(NonCancellable) { gate.await(); demoInspection(guest,timeframe) }
+            override suspend fun read(connection: Connection,guest: Guest,storages: List<String>,timeframe: String): GuestInspection = withContext(NonCancellable) { gate.await(); sampleInspection(guest,timeframe) }
         }
         val w = Workspace(this,gateway=inventory,inspectionGateway=reader)
         w.connect(connection()); runCurrent(); w.select(vm); runCurrent(); w.inspectGuest(); runCurrent()
@@ -28,7 +28,7 @@ class GuestInspectionWorkspaceTest {
         val reader = object: GuestInspectionGateway {
             override suspend fun read(connection: Connection,guest: Guest,storages: List<String>,timeframe: String): GuestInspection {
                 if(expired) throw SessionExpiredException()
-                return demoInspection(guest,timeframe).copy(addresses=InspectionSection(error="Not permitted for this token"))
+                return sampleInspection(guest,timeframe).copy(addresses=InspectionSection(error="Not permitted for this token"))
             }
         }
         val w = Workspace(this,gateway=inventory,inspectionGateway=reader)
@@ -70,7 +70,7 @@ class GuestInspectionWorkspaceTest {
             override suspend fun read(connection: Connection, guest: Guest, storages: List<String>, timeframe: String) = error("unused")
             override suspend fun readPublishing(connection: Connection, guest: Guest, storages: List<String>, emit: (GuestInspection) -> Unit, backupKnown: Boolean, timeframe: String) {
                 pass++
-                val base = demoInspection(guest, timeframe)
+                val base = sampleInspection(guest, timeframe)
                 if (pass == 1) { emit(base); return }
                 emit(base.copy(snapshots = InspectionSection(), backups = InspectionSection(), addresses = InspectionSection(), history = InspectionSection()))
                 gate.await()
@@ -97,7 +97,7 @@ class GuestInspectionWorkspaceTest {
             override suspend fun details(connection: Connection, guest: Guest) = GuestDetails(guest, "running", 2, null, null, null, null, null, null, null, null)
         }
         val reader = object : GuestInspectionGateway {
-            override suspend fun read(connection: Connection, guest: Guest, storages: List<String>, timeframe: String): GuestInspection { reads++; return demoInspection(guest, timeframe) }
+            override suspend fun read(connection: Connection, guest: Guest, storages: List<String>, timeframe: String): GuestInspection { reads++; return sampleInspection(guest, timeframe) }
         }
         val w = Workspace(this, gateway = moving, inspectionGateway = reader)
         w.connect(connection()); runCurrent(); w.select(vm); runCurrent(); w.inspectGuest(); runCurrent()
@@ -113,7 +113,7 @@ class GuestInspectionWorkspaceTest {
     @Test fun finishedSnapshotTaskRefreshesInspection() = runTest {
         var reads = 0
         val reader = object : GuestInspectionGateway {
-            override suspend fun read(connection: Connection, guest: Guest, storages: List<String>, timeframe: String): GuestInspection { reads++; return demoInspection(guest, timeframe) }
+            override suspend fun read(connection: Connection, guest: Guest, storages: List<String>, timeframe: String): GuestInspection { reads++; return sampleInspection(guest, timeframe) }
         }
         val power = object : PowerGateway {
             override suspend fun submit(connection: Connection, guest: Guest, action: PowerAction) = "UPID:node-a:00000001:00000002:00000003:qmsnapshot:100:tester@pve:"

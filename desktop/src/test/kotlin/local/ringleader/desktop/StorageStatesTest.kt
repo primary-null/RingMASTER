@@ -22,7 +22,7 @@ class StorageStatesTest {
     }
     private fun text(n: SemanticsNode)=n.config.getOrNull(SemanticsProperties.Text)?.joinToString("") {it.text}.orEmpty()
     @Test fun stateMatrix() = runSceneTest {
-        val scope=CoroutineScope(coroutineContext+SupervisorJob());val workspace=Workspace(scope);workspace.exploreDemo()
+        val scope=CoroutineScope(coroutineContext+SupervisorJob());val workspace=sampleWorkspace(scope).awaitInventory()
         val selected=workspace.state.value.overview!!.storage.first {it.id=="shared-data"}
         workspace.selectStorage(selected.node,selected.id);workspace.loadStorageConfig();workspace.loadStorageHistory(selected.node,selected.id)
         yield()
@@ -39,8 +39,8 @@ class StorageStatesTest {
             "empty" to base.copy(storageContent=ReadSection.loaded(loaded.copy(volumes=emptyList()),java.time.Instant.parse("2026-11-12T10:00:00Z"))),
             "error" to base.copy(storageContent=ReadSection<StorageContentView>().failed("Contents could not be read.")),
             "stale" to base.copy(stale=true,storageContent=base.storageContent.failed("Refresh failed.")),
-            "PDM" to base.copy(demo=false,kind=PDM_KIND,storageSelection=null),
-            "partial" to base.copy(demo=false,address=DEMO_REMOTE_KEY,permissions=ReadSection.loaded(PermissionsView(PermissionDump(emptyMap()),PermissionIdentity.Token),java.time.Instant.parse("2026-11-12T10:00:00Z"))),
+            "PDM" to base.copy(kind=PDM_KIND,storageSelection=null),
+            "partial" to base.copy(address=SAMPLE_ADDRESS,permissions=ReadSection.loaded(PermissionsView(PermissionDump(emptyMap()),PermissionIdentity.Token),java.time.Instant.parse("2026-11-12T10:00:00Z"))),
             "high" to base.copy(overview=overview.copy(storage=overview.storage.map {it.copy(diskBytes=(it.maxDiskBytes!!*.96).toLong())})),
             "unknown-sizes" to base.copy(storageContent=ReadSection.loaded(loaded.copy(volumes=loaded.volumes.map {it.copy(sizeBytes=null,approximateSizeBytes=null)}),java.time.Instant.parse("2026-11-12T10:00:00Z"))),
             "history-denied" to base.copy(storageView=base.storageView.copy(history=ReadSection<StorageHistoryView>().failed(STORAGE_HISTORY_DENIED,true))),

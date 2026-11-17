@@ -63,7 +63,6 @@ internal fun volumeDate(at: Instant?): String =
 @Composable internal fun ReadNotices(section: ReadSection<*>, modifier: Modifier = Modifier) {
     Column(modifier, verticalArrangement = Arrangement.spacedBy(3.dp)) {
         if (section.loading) TechProgress()
-        if (section.sample) AttentionTag("Sample data", help = "Demonstration data. Nothing was read from a server.")
         section.error?.let { message ->
             Text(message, color = if (section.denied) Tech.Amber else Tech.Red, fontSize = 11.sp, lineHeight = 15.sp, maxLines = 4, overflow = TextOverflow.Ellipsis)
         }

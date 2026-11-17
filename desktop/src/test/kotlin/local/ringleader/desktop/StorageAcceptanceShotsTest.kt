@@ -28,7 +28,7 @@ import java.nio.file.Files
 class StorageAcceptanceShotsTest {
     private val actions = StorageAction.entries
     private val formActions = listOf(StorageAction.TemplateDownload, StorageAction.UrlDownload, StorageAction.Upload, StorageAction.EditNotes)
-    private val stateModes = listOf("sending", "following", "progress", "ok", "failed", "rejected", "unknown", "warnings", "demo", "loading", "error", "empty", "permission")
+    private val stateModes = listOf("sending", "following", "progress", "ok", "failed", "rejected", "unknown", "warnings", "loading", "error", "empty", "permission")
 
     private fun expectedCases(look: StorageLook): List<String> = buildList {
         formActions.forEach { add("action/form-$it/${look.id}"); add("action/form-$it-end/${look.id}") }
@@ -61,7 +61,7 @@ class StorageAcceptanceShotsTest {
         } finally { Appearance.preview(false); Files.deleteIfExists(fixture); scratch.deleteRecursively() }
     }
 
-    private fun demoWorkspace(scope: CoroutineScope): Workspace = Workspace(scope).also { it.exploreDemo() }
+    private suspend fun demoWorkspace(scope: CoroutineScope): Workspace = sampleWorkspace(scope).awaitInventory()
 
     private suspend fun CoroutineScope.actionJourney(look: StorageLook, action: StorageAction, fixture: java.nio.file.Path, manifest: StorageManifest, dir: File) {
         val scope = CoroutineScope(coroutineContext + SupervisorJob()); val w = demoWorkspace(scope)
@@ -93,7 +93,7 @@ class StorageAcceptanceShotsTest {
                     StorageAction.TemplateDownload -> d.click("sample_1_amd64.tar.zst · architecture unknown")
                     else -> Unit
                 }
-                val formContract = StorageCaseContract(listOf(title(storageActionTitle(action)), footer("Cancel"), footer("Review"), body(header, true), body("Demo · no server requests", true)) + when (action) {
+                val formContract = StorageCaseContract(listOf(title(storageActionTitle(action)), footer("Cancel"), footer("Review"), body(header, true)) + when (action) {
                     StorageAction.UrlDownload -> listOf(body("URL · fetched by the node"), body("Verify website certificate", true), body("A filtered listing cannot prove a filename is unused.", true))
                     StorageAction.Upload -> listOf(body("fixture-1mib.iso · 1048576 bytes", true), body("Sending all bytes is not task completion"))
                     StorageAction.TemplateDownload -> listOf(body("Host architecture unknown"), body("sample_1_amd64.tar.zst · architecture unknown", true))
@@ -112,13 +112,14 @@ class StorageAcceptanceShotsTest {
                 StorageAction.EditNotes -> listOf(body(volume!!.volid))
                 StorageAction.SetProtection -> listOf(body("Protected backups cannot be removed"))
             }
-            record("confirm-$action", StorageCaseContract(listOf(title("Simulate storage action"), footer("Cancel"), footer("Simulate"), body("Synthetic profile · demo", true)) + facts),
+            record("confirm-$action", StorageCaseContract(listOf(title(storageActionTitle(action)), footer("Cancel"), footer("Confirm"), body("Synthetic profile · $SAMPLE_ADDRESS", true)) + facts),
                 d.settle(dir, "$action-confirm"))
             check(w.state.value.storageActions.submissions.isEmpty()) { "$action: reviewing sent something" }
-            d.click("Simulate")
-            record("result-$action", StorageCaseContract(listOf(title("Storage action"), footer("Close"), body("Demo · simulated", true), body("${storageActionTitle(action)} · ${row.node} · ${row.id}")),
-                forbid = listOf("Terminal OK", "Unknown", "awaiting server task completion")), d.settle(dir, "$action-result"))
-            check(w.state.value.storageActions.submissions.size == 1) { "$action: expected exactly one simulated submission" }
+            d.click("Confirm")
+            d.until("the end of $action") { w.state.value.storageActions.submissions.singleOrNull()?.phase == PowerPhase.Succeeded }
+            record("result-$action", StorageCaseContract(listOf(title("Storage action"), footer("Close"), body("${storageActionTitle(action)} · ${row.node} · ${row.id}")),
+                forbid = listOf("Unknown", "awaiting server task completion")), d.settle(dir, "$action-result"))
+            check(w.state.value.storageActions.submissions.size == 1) { "$action: expected exactly one submission" }
         } finally { scene.close(); scope.cancel() }
     }
 
@@ -162,9 +163,9 @@ class StorageAcceptanceShotsTest {
         w.selectStorage(row.node, row.id); yield()
         val base = w.state.value; val key = base.storageSelection!!
         val total = 1024L * 1024
-        val phase = when (mode) { "ok" -> PowerPhase.Succeeded; "failed", "warnings" -> PowerPhase.Unsuccessful; "rejected" -> PowerPhase.Rejected; "unknown" -> PowerPhase.Unknown; "demo" -> PowerPhase.Simulated; else -> PowerPhase.Accepted }
+        val phase = when (mode) { "ok" -> PowerPhase.Succeeded; "failed", "warnings" -> PowerPhase.Unsuccessful; "rejected" -> PowerPhase.Rejected; "unknown" -> PowerPhase.Unknown; else -> PowerPhase.Accepted }
         val detail = when (mode) { "failed" -> "Stopped with an error. Check the task log."; "rejected" -> "The server refused the request (HTTP 403)."; "unknown" -> "The reply was lost after sending."; else -> "Fixed safe storage detail" }
-        val sub = StorageSubmission("local-fixture", key, StorageAction.Upload, phase, detail, simulated = mode == "demo", checkable = mode in listOf("following", "ok", "failed", "warnings"),
+        val sub = StorageSubmission("local-fixture", key, StorageAction.Upload, phase, detail, checkable = mode in listOf("following", "ok", "failed", "warnings"),
             warningCount = if (mode == "warnings") 3 else null, bytesSent = when (mode) { "progress" -> total / 2; "sending" -> 0; else -> total }, totalBytes = total,
             evidence = if (mode == "ok") StorageSuccessEvidence.TerminalOk else null, subject = "fixture-1mib.iso")
         val view = base.copy(storageActions = base.storageActions.copy(submissions = listOf(sub)))
@@ -174,7 +175,7 @@ class StorageAcceptanceShotsTest {
             "error" -> base.copy(storageActions = base.storageActions.copy(readErrors = mapOf("attributes" to "Storage read failed. No action was sent."), attributes = null, attributesTarget = null))
             else -> base
         }
-        val denied = base.copy(demo = false, permissions = ReadSection(value = PermissionsView(PermissionDump(emptyMap()), PermissionIdentity.Token)))
+        val denied = base.copy(permissions = ReadSection(value = PermissionsView(PermissionDump(emptyMap()), PermissionIdentity.Token)))
         val scene = storageScene(look, coroutineContext) {
             when (mode) {
                 "loading", "error" -> StorageActionDialog(frozen, w, key, StorageAction.EditNotes, backupVolume, profileLabel = "Synthetic profile", onClose = {})
@@ -208,7 +209,6 @@ class StorageAcceptanceShotsTest {
                 "rejected" -> StorageCaseContract(strip + listOf(body("Rejected", true), body(detail, true)), listOf("Terminal OK"))
                 "unknown" -> StorageCaseContract(strip + listOf(body("Unknown · check storage before trying again", true), StorageExpect("I checked storage", control = true)), listOf("Terminal OK", "Stop upload", "Return to form"))
                 "warnings" -> StorageCaseContract(strip + listOf(body("3 warnings · check task log", true)), listOf("Terminal OK"))
-                "demo" -> StorageCaseContract(strip + listOf(body("Demo · simulated", true)), listOf("Terminal OK", "file bytes sent"))
                 "loading" -> StorageCaseContract(listOf(title(storageActionTitle(StorageAction.EditNotes)), footer("Cancel"), footer("Review"), body("Reading attributes…", true), body("Read full notes before editing")), listOf("Full backup notes"))
                 "error" -> StorageCaseContract(listOf(title(storageActionTitle(StorageAction.EditNotes)), footer("Cancel"), footer("Review"), body("Storage read failed. No action was sent.", true), StorageExpect("Retry full notes", control = true)), listOf("Full backup notes"))
                 "empty" -> StorageCaseContract(listOf(title(storageActionTitle(StorageAction.TemplateDownload)), footer("Cancel"), footer("Review"), body("No matching catalogue templates.", true)), listOf("sample_1_amd64.tar.zst"))

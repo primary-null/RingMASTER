@@ -1,0 +1,5 @@
+{"t":"adapter","id":"{00000000-0000-0000-0000-0000000000A1}","name":"Example Wi-Fi 6E Wireless LAN Card","address":"020000000021","status":"Up","state":"connected","radio":"on","hwRadio":"on","airplane":false,"rxMbps":866.7,"txMbps":866.7,"driver":"1.0.0.1","pnp":"PCI\\VEN_8086&DEV_2725&SUBSYS_00000000&REV_1A\\0&00000000","pci":"0000:03:00.0"}
+{"t":"link","ms":1466,"adapter":"{00000000-0000-0000-0000-0000000000A1}","connected":true,"channel":157,"rssi":-50}
+{"t":"note","note":"LOCATION_OFF","access":"DeniedBySystem"}
+{"t":"cycle","ms":1542}
+{"t":"done","ms":1542}

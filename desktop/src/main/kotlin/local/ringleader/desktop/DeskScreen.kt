@@ -197,12 +197,11 @@ private val ConnectPanelWidth = 520.dp
 
 /** One open connection. [inView] is null when it is the only one; otherwise it says whether the pages show this one. */
 @Composable private fun SessionCard(workspaceState: WorkspaceState, active: ConnectionProfile?, inView: Boolean?, onOpenWorkspace: () -> Unit, number: Int? = null, onDisconnect: () -> Unit) {
-    val demo = workspaceState.demo
-    TechPanel(Modifier.fillMaxWidth(), rail = if (demo) Tech.Amber else Tech.Green, padding = 8.dp) {
+    TechPanel(Modifier.fillMaxWidth(), rail = Tech.Green, padding = 8.dp) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             // The number is the one the sidebar shows for this session.
             Text(if (number == null) "SESSION" else "SESSION $number", fontFamily = Tech.Mono, fontSize = 9.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp, color = Tech.Muted)
-            SessionDot(demo = demo)
+            SessionDot()
             Text(
                 sessionText(workspaceState, active),
                 Modifier.weight(1f).identity(),
@@ -218,13 +217,13 @@ private val ConnectPanelWidth = 520.dp
     }
 }
 
-@Composable private fun SessionDot(demo: Boolean) {
+@Composable private fun SessionDot() {
     val reduce = LocalReduceMotion.current
     val phase = LocalMotionPhase.current
-    val pulse = !demo && !reduce && phase.active.value
+    val pulse = !reduce && phase.active.value
     Canvas(Modifier.size(8.dp)) {
         val alpha = if (!pulse) 1f else 0.35f + 0.65f * ((phase.pulse.floatValue - 0.15f) / 0.45f).coerceIn(0f, 1f)
-        drawCircle((if (demo) Tech.Amber else Tech.Green).copy(alpha = alpha))
+        drawCircle(Tech.Green.copy(alpha = alpha))
     }
 }
 
@@ -243,7 +242,7 @@ private val ConnectPanelWidth = 520.dp
         deskState.storeMessage?.let {
             TechPanel(Modifier.fillMaxWidth(), rail = Tech.Red, padding = 8.dp) {
                 Text(it, color = Tech.Red, fontSize = 12.sp)
-                Text("You can still connect manually or explore the demo.", color = Tech.Muted, fontSize = Tech.Label)
+                Text("You can still connect manually.", color = Tech.Muted, fontSize = Tech.Label)
             }
         }
         if (deskState.profiles.isEmpty() && deskState.storeMessage == null) EmptyConnections()
@@ -806,11 +805,9 @@ private fun rememberHelp(vaultName: String): String = when {
             if (trust.needsApproval) Column(verticalArrangement = Arrangement.spacedBy(Tech.Space8)) {
                 TrustAction(trust, canConnect, replacementChecked) { connect(true, false) }
                 if (trust.known.isEmpty() && trust.error == null && !normalTlsRefused) TechAction("Connect with normal TLS", enabled = canConnect && fingerprint.isBlank()) { connect(false, true) }
-                TechAction("Explore demo") { if (desk.exploreDemo()) onOpenWorkspace() }
             } else FlowRow(horizontalArrangement = Arrangement.spacedBy(Tech.Space12), verticalArrangement = Arrangement.spacedBy(Tech.Space8)) {
                 TechAction(if (anyOpen) "Add connection" else "Connect", active = true,
                     enabled = canConnect && !trust.conflict && (trust.error == null || bare), onClick = submit)
-                TechAction("Explore demo") { if (desk.exploreDemo()) onOpenWorkspace() }
             }
         }
     }
@@ -931,7 +928,6 @@ internal fun submitOnEnter(event: KeyEvent, onSubmit: (() -> Unit)?): Boolean {
 
 private fun sessionText(state: WorkspaceState, active: ConnectionProfile?): String {
     val base = when {
-        state.demo -> return "Demo workspace is open."
         active != null && state.connected -> "Connected with ${active.displayName} · ${connectionKindLabel(active.kind)} · ${active.origin}"
         else -> "Current connection: ${connectionKindLabel(state.kind)} · ${state.address}"
     }
@@ -941,7 +937,7 @@ private fun sessionText(state: WorkspaceState, active: ConnectionProfile?): Stri
 
 /**
  * A one-line field. [identity] fields (addresses, user and token IDs, profile names) show a bullet mask under the
- * showcase blur until they are focused for editing, so the real value is never on screen during a demo.
+ * showcase blur until they are focused for editing, so the real value is never on screen while presenting.
  */
 @Composable private fun CompactDeskField(value: String, onValue: (String) -> Unit, label: String, placeholder: String? = null, identity: Boolean = false, onSubmit: (() -> Unit)? = null, passwordUser: Boolean = false) {
     val interaction = remember { MutableInteractionSource() }

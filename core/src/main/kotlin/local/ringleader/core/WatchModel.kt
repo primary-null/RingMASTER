@@ -6,7 +6,7 @@ import java.time.Instant
 enum class WatchKind(val label: String) { Node("Node"), VM("VM"), Container("Container") }
 
 /**
- * A node or guest inside one connection. [remoteScope] is the PDM remote id, empty for direct PVE and Demo.
+ * A node or guest inside one connection. [remoteScope] is the PDM remote id, empty for direct PVE.
  * A guest is its kind and VMID (its node is a route and may change); a node is its name.
  */
 data class WatchResource(val kind: WatchKind, val remoteScope: String = "", val node: String? = null, val vmid: Int? = null) {
@@ -27,7 +27,6 @@ fun watchResourceOf(guest: Guest): WatchResource? = when (guest.kind) {
 
 fun watchResourceOf(member: RecordedMember): WatchResource = WatchResource(WatchKind.Node, node = member.name)
 
-internal val DEMO_WATCH_BINDING: String = sha256Hex("ringmaster-watch-demo-v1")
 
 /**
  * Where a session is connected and as whom: the saved profile (if any), kind, origin, account (user or API token ID)
@@ -35,18 +34,16 @@ internal val DEMO_WATCH_BINDING: String = sha256Hex("ringmaster-watch-demo-v1")
  * under one binding is never evaluated with data from another, so a changed address, account or pin stops its alerts
  * until the user watches the resource again.
  */
-class WatchScope private constructor(val profileId: String?, val kind: String, val origin: String, val account: String, val pin: String?, val demo: Boolean) {
-    val binding: String = if (demo) DEMO_WATCH_BINDING else sha256Hex("ringmaster-watch-v1\n$kind\n$origin\n$account\n${pin ?: "pki"}")
+class WatchScope private constructor(val profileId: String?, val kind: String, val origin: String, val account: String, val pin: String?) {
+    val binding: String = sha256Hex("ringmaster-watch-v1\n$kind\n$origin\n$account\n${pin ?: "pki"}")
     /** The remote key the inventory rows of this scope must carry. */
-    val remote: String get() = if (demo) DEMO_REMOTE_KEY else origin
+    val remote: String get() = origin
 
     override fun equals(other: Any?): Boolean = other is WatchScope && other.profileId == profileId && other.binding == binding
     override fun hashCode(): Int = 31 * binding.hashCode() + (profileId?.hashCode() ?: 0)
-    override fun toString(): String = if (demo) "WatchScope(demo)" else "WatchScope(${binding.take(8)})"
+    override fun toString(): String = "WatchScope(${binding.take(8)})"
 
     companion object {
-        val Demo = WatchScope(null, "demo", DEMO_REMOTE_KEY, "demo", null, true)
-
         /** @throws IllegalArgumentException when a value is not a usable connection identity. */
         fun of(profileId: String?, kind: String, origin: String, account: String, pin: String?): WatchScope {
             require(profileId == null || isCanonicalUuid(profileId)) { "The connection is not usable." }
@@ -55,7 +52,7 @@ class WatchScope private constructor(val profileId: String?, val kind: String, v
             require(account.isNotBlank() && account.length <= 256 && account.none { it.isISOControl() || it.isWhitespace() }) { "The connection is not usable." }
             val canonicalPin = pin?.replace(":", "")?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }
             require(canonicalPin == null || canonicalPin.matches(sha256PinPattern)) { "The connection is not usable." }
-            return WatchScope(profileId, kind, origin, account, canonicalPin, false)
+            return WatchScope(profileId, kind, origin, account, canonicalPin)
         }
 
         fun of(profile: ConnectionProfile): WatchScope = of(profile.id, profile.kind, profile.origin, profile.tokenId, profile.sha256Pin)
@@ -70,7 +67,6 @@ data class WatchSession(val scope: WatchScope, val sessionId: Long, val epoch: L
 
 /** Uses only one immutable snapshot; never reads the UI-thread-owned Connection. */
 fun watchScopeOf(state: WorkspaceState, profileId: String? = null): WatchScope? {
-    if (state.demo) return WatchScope.Demo
     if (!state.connected) return null
     val identity = state.watchIdentity ?: return null
     return runCatching { WatchScope.of(profileId, identity.kind, identity.origin, identity.account, identity.pin) }.getOrNull()
@@ -247,12 +243,12 @@ internal val knownNodeStates = setOf("online", "offline")
  * recomposition or an unrelated state change yields the same reading and is counted once.
  */
 fun watchInventoryOf(state: WorkspaceState): WatchInventoryReading? {
-    if (!state.connected && !state.demo) return null
+    if (!state.connected) return null
     val overview = state.overview
     val readAt = state.updatedAt
     if (state.stale || (state.error != null && !state.loading)) return WatchInventoryReading.Failed
     if (overview == null || readAt == null) return null
-    val pdm = state.kind == PDM_KIND && !state.demo
+    val pdm = state.kind == PDM_KIND
     return WatchInventoryReading.Fresh(
         readAt = readAt, guests = overview.guests, members = overview.members,
         // A PDM fleet read carries no node rows; a direct read whose recorded index failed keeps the previous ones.
@@ -263,9 +259,9 @@ fun watchInventoryOf(state: WorkspaceState): WatchInventoryReading? {
 
 /** The task-feed reading a session's state holds, or null when it holds none (PDM sessions never read that feed). */
 fun watchTasksOf(state: WorkspaceState): WatchTaskReading? {
-    if (!state.connected && !state.demo) return null
+    if (!state.connected) return null
     if (state.tasksStale || state.tasksError != null) return WatchTaskReading.Failed
     val tasks = state.tasks ?: return null
     val readAt = state.tasksUpdatedAt ?: return null
-    return WatchTaskReading.Fresh(readAt, tasks, state.submissions.filter { !it.simulated }.map { it.vmid }.toSet())
+    return WatchTaskReading.Fresh(readAt, tasks, state.submissions.map { it.vmid }.toSet())
 }

@@ -54,7 +54,7 @@ internal fun encodeNotifications(document: NotificationDocument): String = build
     document.snoozeAllUntil?.let { put("snoozeAllUntil", it.toString()) }
     put("snoozes", buildJsonObject { document.snoozes.toSortedMap().forEach { (subject, until) -> put(subject, until.toString()) } })
     put("items", buildJsonArray {
-        document.items.filter { !it.demo }.forEach { n ->
+        document.items.forEach { n ->
             add(buildJsonObject {
                 put("id", n.id); put("subject", n.subjectId); put("category", n.category.name); put("severity", n.severity.name)
                 put("title", n.title); put("body", n.body); put("createdAt", n.createdAt.toString()); put("read", n.read)

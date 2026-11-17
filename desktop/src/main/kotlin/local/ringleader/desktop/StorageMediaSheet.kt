@@ -16,7 +16,7 @@ internal fun mediaReadyMatches(ready: StorageMediaReady, session: CreateSession)
         ready.volid.startsWith("${ready.storage}:") && session.volumes[ready.storage to ready.volid.substringAfter(':').substringBefore('/')]?.let { !it.loading && !it.stale && it.error==null && it.value?.any {v -> v.volid==ready.volid}==true }==true
 internal fun mediaSubmissionReady(sub: StorageSubmission?, key: StorageKey, expected: String?, state: WorkspaceState): Boolean =
     expected != null && sub?.key==key && sub.subject==expected.substringAfter('/') &&
-        (sub.phase==PowerPhase.Succeeded && sub.evidence==StorageSuccessEvidence.TerminalOk || sub.phase==PowerPhase.Simulated) &&
+        sub.phase==PowerPhase.Succeeded && sub.evidence==StorageSuccessEvidence.TerminalOk &&
         state.storageSelection==key && !state.storageContent.loading && !state.storageContent.stale && state.storageContent.error==null &&
         state.storageContent.value?.let {it.key==key && it.volumes.any {v -> v.volid==expected}}==true
 
@@ -25,7 +25,7 @@ internal fun mediaSubmissionReady(sub: StorageSubmission?, key: StorageKey, expe
     preferred: String, kind: MediaKind, profileLabel: String, onReady: (StorageMediaReady)->Unit, onClose: ()->Unit) {
     val browser=LocalAppHost.current.web
     val targets=mediaTargets(state,session.node,kind,preferred).filter {
-        !browser || kind!=MediaKind.Iso || storageActionGate(StorageAction.UrlDownload,if(state.demo) null else state.permissions.value?.dump,it.key)==null
+        !browser || kind!=MediaKind.Iso || storageActionGate(StorageAction.UrlDownload,state.permissions.value?.dump,it.key)==null
     }
     var target by remember {mutableStateOf(targets.firstOrNull()?.key)}
     var tab by remember {mutableStateOf(if(kind==MediaKind.Template) "Catalogue" else "URL")}
@@ -58,7 +58,7 @@ internal fun mediaSubmissionReady(sub: StorageSubmission?, key: StorageKey, expe
             if(submitted==null) MiniAction("Open $tab",enabled=valid && !state.storageContent.loading && state.storageContent.error==null) {editing=true}
             Text("Your create form stays open. A task being accepted does not make media ready. Only Terminal OK and the exact file in refreshed storage can select it.",color=Tech.Muted)
             Box(Modifier.heightIn(max=260.dp)) {StorageActionStrip(state,workspace,target)}
-            if(sub?.phase==PowerPhase.Succeeded || sub?.phase==PowerPhase.Simulated) {
+            if(sub?.phase==PowerPhase.Succeeded) {
                 Text("Checking exact file and refreshing create choices\u2026",color=Tech.Amber)
                 if(state.creation?.volumes?.get(target!!.storage to kind.content)?.error != null)
                     Text("Could not refresh the create choices. Refresh storage and choices to try again.",color=Tech.Amber)

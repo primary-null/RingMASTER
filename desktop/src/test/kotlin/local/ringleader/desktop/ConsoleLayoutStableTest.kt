@@ -22,7 +22,7 @@ import local.ringleader.core.InspectionSection
 import local.ringleader.core.Overview
 import local.ringleader.core.Workspace
 import local.ringleader.core.WorkspaceState
-import local.ringleader.core.demoInspection
+import local.ringleader.core.sampleInspection
 import local.ringleader.core.parseHardware
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -40,8 +40,8 @@ class ConsoleLayoutStableTest {
         val a = Guest(origin, 120, "alpha", "node", "VM", "running")
         val b = Guest(origin, 130, "beta", "node", "VM", "running")
         val overview = Overview(1, listOf(a, b))
-        val spice = demoInspection(b, "hour").copy(hardware = InspectionSection(parseHardware("""{"data":{"cores":2,"memory":2048,"vga":"qxl","serial0":"socket"}}""")))
-        val plain = demoInspection(a, "hour")
+        val spice = sampleInspection(b, "hour").copy(hardware = InspectionSection(parseHardware("""{"data":{"cores":2,"memory":2048,"vga":"qxl","serial0":"socket"}}""")))
+        val plain = sampleInspection(a, "hour")
         var state by mutableStateOf(WorkspaceState(connected = true, selected = a, overview = overview, inspection = plain))
         val seen = mutableListOf<Rect>()
         consolePictureProbe = { seen += it }

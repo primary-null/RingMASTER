@@ -4,10 +4,10 @@ import org.junit.jupiter.api.Assertions.*
 import local.ringleader.core.*
 class TelemetryPresentationTest {
  @Test fun rampBoundaries() { assertEquals(Tech.Green,ramp(.499));assertEquals(Tech.Amber,ramp(.5));assertEquals(Tech.Amber,ramp(.85));assertEquals(Tech.Red,ramp(.851)) }
- @Test fun shortcutBounds() { assertNull(shortcutPage(0));assertEquals("Desk",shortcutPage(1));assertEquals("Fleet",shortcutPage(2));assertEquals("Storage",shortcutPage(3));assertEquals("Activity",shortcutPage(4));assertEquals("Scan",shortcutPage(5));assertEquals("Bluetooth",shortcutPage(6));assertEquals("VPN",shortcutPage(7));assertEquals("Tools",shortcutPage(8));assertEquals("Under the Hood",shortcutPage(9));assertNull(shortcutPage(10)) }
+ @Test fun shortcutBounds() { assertNull(shortcutPage(0));assertEquals("Desk",shortcutPage(1));assertEquals("Fleet",shortcutPage(2));assertEquals("Storage",shortcutPage(3));assertEquals("Activity",shortcutPage(4));assertEquals("Scan",shortcutPage(5));assertEquals("Radios",shortcutPage(6));assertEquals("VPN",shortcutPage(7));assertEquals("Tools",shortcutPage(8));assertEquals("Under the Hood",shortcutPage(9));assertNull(shortcutPage(10)) }
  @Test fun ratesAreNotCounters() { assertEquals("1.00 KiB/s",formatRate(1024.0));assertEquals("1.00 MiB/s",formatRate(1048576.0));assertEquals("0.99 MiB/s",formatRate(1014.9*1024));assertEquals("999 B/s",formatRate(999.0));assertEquals("0.98 KiB/s",formatRate(1000.0));assertEquals(formatRate(null),formatRate(-1.0));assertEquals(formatRate(null),formatRate(Double.NaN)) }
  @Test fun sortNumericAndMissing() {
-  val a=demoOverview.guests.first().copy(id=2,metrics=GuestListMetrics(cpuFraction=.9))
+  val a=sampleOverview().guests.first().copy(id=2,metrics=GuestListMetrics(cpuFraction=.9))
   val b=a.copy(id=10,metrics=null)
   assertEquals(listOf(a,b),listOf(b,a).sortedWith(guestComparator("ID")))
   // The header's down arrow reverses this ascending comparator, so the busier guest leads.
@@ -15,7 +15,7 @@ class TelemetryPresentationTest {
   assertEquals(a,listOf(b,a).sortedWith(guestComparator("CPU").reversed()).first())
  }
  @Test fun sortUsesLiveHistoryAndSkipsStopped() {
-  val running=demoOverview.guests.first()
+  val running=sampleOverview().guests.first()
   val quiet=running.copy(id=1,metrics=GuestListMetrics(cpuFraction=.9,memoryBytes=500))
   val busy=running.copy(id=2,metrics=GuestListMetrics(cpuFraction=.1,memoryBytes=100))
   val stopped=running.copy(id=3,status="stopped",metrics=GuestListMetrics(cpuFraction=.99,memoryBytes=9_000))
@@ -29,7 +29,7 @@ class TelemetryPresentationTest {
   assertEquals(2,byMem.first().id)
  }
  @Test fun filtersMatchStripAndIncludeTags() {
-  val running=demoOverview.guests.first()
+  val running=sampleOverview().guests.first()
   val template=running.copy(id=140,name="ubuntu-template",status="stopped",template=true,tags=listOf("lab"))
   assertTrue(guestVisible(template,"Templates",""))
   assertFalse(guestVisible(template,"Stopped",""))

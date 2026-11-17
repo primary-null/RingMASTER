@@ -958,7 +958,7 @@ internal fun fleetDigest(state: WorkspaceState, total: FleetTotals?): String {
     val phase = LocalMotionPhase.current
     val spinning = !reduce && phase.active.value && state.loading
     var details by remember { mutableStateOf(false) }
-    val host = if (state.demo) "DEMO · SAMPLE DATA" else state.address.substringAfter("://").trimEnd('/')
+    val host = state.address.substringAfter("://").trimEnd('/')
     // sp grows with the accessibility text size; dp does not. Widen the tight cells, and stop before the 960 and 1920 strips gain a line.
     val fontScale = androidx.compose.ui.platform.LocalDensity.current.fontScale.coerceIn(1f, 1.5f)
     fun textWidth(base: Dp, cap: Float) = base * fontScale.coerceAtMost(cap)
@@ -1060,7 +1060,7 @@ internal fun fleetDigest(state: WorkspaceState, total: FleetTotals?): String {
     val actions: @Composable (Modifier) -> Unit = { modifier ->
         Row(modifier.padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             HelpTip("Sync now (F5)") {
-                Box(Modifier.size(28.dp).border(1.dp, Tech.Edge, Tech.Control).clickable(enabled = state.connected || state.demo, onClick = { workspace.refresh(force = true) }), contentAlignment = Alignment.Center) {
+                Box(Modifier.size(28.dp).border(1.dp, Tech.Edge, Tech.Control).clickable(enabled = state.connected, onClick = { workspace.refresh(force = true) }), contentAlignment = Alignment.Center) {
                     Canvas(Modifier.size(14.dp)) {
                         val spin = if (spinning) phase.spin.floatValue else 0f
                         val st = Stroke(1.6.dp.toPx(), cap = StrokeCap.Round)
@@ -1071,11 +1071,11 @@ internal fun fleetDigest(state: WorkspaceState, total: FleetTotals?): String {
                 }
             }
             var permissions by remember { mutableStateOf(false) }
-            HelpTip("What this sign-in is allowed to do, feature by feature") { MiniAction("Permissions", enabled = state.connected || state.demo) { permissions = true } }
+            HelpTip("What this sign-in is allowed to do, feature by feature") { MiniAction("Permissions", enabled = state.connected) { permissions = true } }
             if (permissions) TechDialog("Permissions", { permissions = false }, width = 860.dp, subtitle = "Effective privileges of the signed-in identity, read from the server", dismiss = Dismiss.Light, actions = {
                 TechAction("Done", active = true) { permissions = false }
             }) { PermissionsPanel(state, workspace, framed = false) }
-            MiniAction("Disconnect", enabled = state.connected || state.demo, onClick = onDisconnect)
+            MiniAction("Disconnect", enabled = state.connected, onClick = onDisconnect)
             if (short) HelpTip("Fold the summary to one line so the inventory stays in view") { MiniAction("Hide details") { details = false } }
         }
     }

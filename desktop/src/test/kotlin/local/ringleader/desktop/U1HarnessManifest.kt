@@ -168,6 +168,7 @@ internal val u1RequiredStateNames = setOf(
     "guest-summary", "guest-console-rail-open", "guest-console-rail-folded", "guest-hardware", "guest-snapshots", "guest-backups", "guest-bluetooth", "guest-actions", "guest-ct-console",
     "storage", "activity-log", "scan-results", "bluetooth-results", "vpn", "tools-result", "hood",
     "settings-appearance", "settings-size", "settings-motion", "settings-background", "settings-browser", "settings-updates", "settings-about",
+    "settings-engine",
     "dlg-power-hardstop", "dlg-pin-service", "dlg-clear", "dlg-chart-lens", "dlg-update-prompt",
     "create-vm", "create-ct",
 )
@@ -207,7 +208,7 @@ internal fun matrixStateContract(name: String): MatrixStateContract {
         name == "guest-snapshots" -> state(MatrixGroup.Guest, exact("Snapshots"), exact("Create snapshot", control = true))
         name == "guest-snapshots-form" -> state(MatrixGroup.Guest, exact("Close form", control = true), contains("Snapshot name"))
         name == "guest-backups" -> state(MatrixGroup.Guest, exact("Backups"), contains("shared-backup-storage-primary"))
-        name == "guest-bluetooth" -> state(MatrixGroup.Guest, exact("Bluetooth"), contains("Attached to this VM"), contains("Scan inside this VM"))
+        name == "guest-bluetooth" -> state(MatrixGroup.Guest, exact("Radios"), contains("Attached to this VM"), contains("Scan inside this VM"))
         name == "guest-actions" || name == "guest-ct-actions" -> state(MatrixGroup.Guest, exact("Actions"), exact("Hard stop", control = true))
         name == "guest-ct-summary" || name == "guest-ct-long-summary" -> state(MatrixGroup.Guest, exact("Summary"), exact("Addresses"))
         name == "guest-console-rail-open" ->
@@ -242,6 +243,7 @@ internal fun matrixStateContract(name: String): MatrixStateContract {
                 "size" -> "Size and text"
                 "motion" -> "Motion and refresh"
                 "browser" -> "Browser access"
+                "engine" -> "RingMASTER Engine"
                 "updates" -> "Updates"
                 "about" -> "About"
                 else -> error("No Settings heading contract for '$name'")

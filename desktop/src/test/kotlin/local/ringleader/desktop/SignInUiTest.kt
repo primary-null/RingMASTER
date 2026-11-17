@@ -47,7 +47,7 @@ import local.ringleader.core.RememberedProfiles
 import local.ringleader.core.SecretVault
 import local.ringleader.core.VaultStatus
 import local.ringleader.core.Workspace
-import local.ringleader.core.demoDetails
+import local.ringleader.core.sampleDetails
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -331,7 +331,7 @@ class SignInUiTest {
                 seen = connection
                 return Overview(1, listOf(Guest(connection.remoteKey, 100, "alpha", "node-a", "VM", "running")))
             }
-            override suspend fun details(connection: Connection, guest: Guest) = demoDetails(guest)
+            override suspend fun details(connection: Connection, guest: Guest) = sampleDetails(guest)
         })
         val desk = ProfileDesk(workspace, ProfileStore(directory.resolve("profiles.json")))
         @androidx.compose.runtime.Composable fun deskContent() {
@@ -473,7 +473,7 @@ private class RememberBench(private val vault: SecretVault, remembered: Boolean 
             seen = connection
             return Overview(1, listOf(Guest(connection.remoteKey, 100, "alpha", "node-a", "VM", "running")))
         }
-        override suspend fun details(connection: Connection, guest: Guest) = demoDetails(guest)
+        override suspend fun details(connection: Connection, guest: Guest) = sampleDetails(guest)
     })
     val desk: ProfileDesk
 

@@ -21,7 +21,7 @@ class ScheduleInterlockTest {
 
     private class Inventory : InventoryGateway {
         override suspend fun overview(connection: Connection) = Overview(1, listOf(Guest(connection.remoteKey, 100, "alpha", "node-a", "VM", "running")))
-        override suspend fun details(connection: Connection, guest: Guest) = demoDetails(guest)
+        override suspend fun details(connection: Connection, guest: Guest) = sampleDetails(guest)
     }
 
     private class Power(private val upid: String) : PowerGateway {

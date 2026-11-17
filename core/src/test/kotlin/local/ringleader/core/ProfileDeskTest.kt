@@ -343,10 +343,6 @@ class ProfileDeskTest {
             runCurrent()
             assertFalse(workspace.state.value.connected)
             assertTrue(desk.hasManualSecret())
-            desk.exploreDemo()
-            assertTrue(workspace.state.value.demo)
-            assertEquals(DEMO_REMOTE_KEY, workspace.state.value.overview!!.guests.first().remote)
-            assertFalse(desk.hasManualSecret())
             assertTrue(Files.readAllBytes(file).contentEquals(bytes))
             workspace.close()
         } finally {
@@ -433,6 +429,6 @@ class ProfileDeskTest {
             Overview(1, listOf(Guest(connection.remoteKey, 100, "alpha", "node-a", "VM", "running")))
         }
         override suspend fun overview(connection: Connection) = inventory(connection)
-        override suspend fun details(connection: Connection, guest: Guest) = demoDetails(guest)
+        override suspend fun details(connection: Connection, guest: Guest) = sampleDetails(guest)
     }
 }

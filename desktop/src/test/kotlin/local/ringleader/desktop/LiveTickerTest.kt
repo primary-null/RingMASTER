@@ -260,7 +260,7 @@ class LiveTickerTest {
         assertEquals("VPN" to TickerTarget.Vpn(VpnKind.Tailscale), go(TickerTarget.Vpn(VpnKind.Tailscale)))
         assertEquals("Tools" to null, go(TickerTarget.Tools))
         assertEquals("Storage" to null, go(TickerTarget.Storage))
-        assertEquals("Bluetooth" to null, go(TickerTarget.Bluetooth))
+        assertEquals("Radios" to TickerTarget.Bluetooth, go(TickerTarget.Bluetooth), "the Radios page, on its Bluetooth view")
         assertEquals("Activity" to TickerTarget.Activity("UPID:x"), go(TickerTarget.Activity("UPID:x")))
         assertEquals("Fleet" to null, go(TickerTarget.Fleet()), "no guest: the Fleet page")
         assertTrue(guests.isEmpty())

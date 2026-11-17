@@ -102,7 +102,7 @@ enum class TickerFailure(val short: String) {
     Certificate("certificate refused"), SignIn("sign-in refused"), Unreachable("server not reached"), Other("connection failed")
 }
 
-enum class TickerSessionPhase { Demo, Loading, Connected, Failed }
+enum class TickerSessionPhase { Loading, Connected, Failed }
 
 /** One open connection. [label] and [address] are identities: tiles never carry them. */
 data class TickerSession(
@@ -112,7 +112,7 @@ data class TickerSession(
     val kind: String = DIRECT_PVE_KIND,
     val label: String = "",
     val address: String = "",
-    /** "API token", "Password" or "Demo": the type only. */
+    /** "API token" or "Password": the type only. */
     val signIn: String? = null,
     /** True for a pinned certificate, false for normal TLS, null when not known. */
     val pinned: Boolean? = null,
@@ -124,7 +124,7 @@ data class TickerSession(
     val updatedAt: Instant? = null,
     val failure: TickerFailure? = null,
 ) {
-    val usable get() = phase == TickerSessionPhase.Connected || phase == TickerSessionPhase.Demo
+    val usable get() = phase == TickerSessionPhase.Connected
 }
 
 /** A Proxmox task that is running now. [subject] is an identity (a guest id or name). */
@@ -194,7 +194,7 @@ object HoodTicker {
 
     /** The marks a sample leaves behind for [cues]. */
     fun marks(input: TickerInput): TickerMarks = TickerMarks(
-        input.activity.sessions.count { it.usable && (it.updatedAt != null || it.phase == TickerSessionPhase.Demo) },
+        input.activity.sessions.count { it.usable && it.updatedAt != null },
         input.metrics.errors.firstOrNull()?.id, runningKeys(input.activity), input.loop.state == "backoff")
 
     /**
@@ -274,7 +274,7 @@ object HoodTicker {
             emptyList(), TickerTarget.Hood(HoodFocus.Engine), listOf(TickerLink("Engine", TickerTarget.Hood(HoodFocus.Engine))))
         return when (loop.state) {
             "refreshing" -> tile("Reading now", every, TickerTone.Busy)
-            "waiting", "demo" -> seconds?.let { tile("in ${formatSeconds(it)}", every, TickerTone.Calm) }
+            "waiting" -> seconds?.let { tile("in ${formatSeconds(it)}", every, TickerTone.Calm) }
             "backoff" -> tile("Backing off", listOfNotNull(seconds?.let { "retry in ${formatSeconds(it)}" }, loop.backoffSeconds.takeIf { it > 0 }?.let { "waits ${formatSeconds(it)}" })
                 .joinToString(" · ").ifBlank { null }, TickerTone.Warning)
             else -> null
@@ -292,7 +292,6 @@ object HoodTicker {
             view.phase == TickerSessionPhase.Failed -> TickerTile(TickerTileId.Network, "CONNECTION", "Failed",
                 listOfNotNull(view.failure?.short, tail).joinToString(" · ").ifBlank { null }, TickerTone.Error, emptyList(), body,
                 listOf(TickerLink("Desk", TickerTarget.Desk), TickerLink("Engine", TickerTarget.Hood(HoodFocus.Engine))), pill = "Connection failed")
-            view.phase == TickerSessionPhase.Demo -> if (several) TickerTile(TickerTileId.Network, "ROUTE", "Demo", tail, TickerTone.Calm, emptyList(), body) else null
             else -> {
                 val notable = several || route?.kind in NOTABLE_ROUTES
                 if (!notable) return null

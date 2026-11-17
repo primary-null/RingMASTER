@@ -1,0 +1,7 @@
+RINGMASTER-RADIO 1 probe 852506f9a5414ad1
+852506f9a5414ad1	tools	nmcli	rfkill
+852506f9a5414ad1	uid	1000
+852506f9a5414ad1	begin	rfkill-list
+
+852506f9a5414ad1	end	rfkill-list
+852506f9a5414ad1	done

@@ -26,7 +26,7 @@ class UnderTheHoodProbeTest {
             val dir=File(System.getenv("RINGMASTER_PROBE_DIR") ?: "../artifacts/under-the-hood").apply { mkdirs() }
             listOf(1920 to 1080,1280 to 800).forEach { (w,h) ->
                 javax.swing.SwingUtilities.invokeAndWait {
-                val scene=ImageComposeScene(w,h,Density(1f)) { CompositionLocalProvider(LocalHoodProbe provides true, LocalReduceMotion provides true) { MaterialTheme(ringColors) { UnderTheHoodScreen(WorkspaceState(demo=true)) } } }
+                val scene=ImageComposeScene(w,h,Density(1f)) { CompositionLocalProvider(LocalHoodProbe provides true, LocalReduceMotion provides true) { MaterialTheme(ringColors) { UnderTheHoodScreen(WorkspaceState(connected = true, address = SAMPLE_ADDRESS)) } } }
                 try { File(dir,"hood-${w}x$h.png").writeBytes(scene.render().encodeToData()!!.bytes) } finally { scene.close() }
                 }
             }
