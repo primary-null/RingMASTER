@@ -440,6 +440,7 @@ class Workspace(
         }
         val expected = generation
         val order = ++inventoryOrder
+        if (force) guestAgentAvailability.invalidate()
         val remote = current.remoteKey
         dropNodeRead()
         mutableState.update { it.copy(loading = true, error = null, failure = null, nodeStatusLoading = false) }
@@ -1310,7 +1311,6 @@ class Workspace(
 
     /**
      * The Bluetooth and Wi-Fi adapters of the current server's nodes and the guests that hold them. Reading only.
-     * Guest configs are reused for a few minutes unless [force] is set. A PDM connection answers with a reason instead.
      */
     suspend fun fleetRadios(force: Boolean = false): FleetRadios {
         val state = mutableState.value
@@ -1331,8 +1331,7 @@ class Workspace(
 
     /**
      * The Bluetooth controllers and Wi-Fi interfaces a VM itself sees, read through the guest agent after the user asked.
-     * [hardware] is the VM's loaded configuration; without it, or for a guest that cannot be asked, the gateway refuses
-     * before anything is sent.
+     * Without loaded configuration the gateway refuses before anything is sent.
      */
     suspend fun guestRadioProbe(guest: Guest, hardware: HardwareSummary?): GuestRadioProbe =
         onGuest(guest) { c, g -> guestRadioGateway.probe(c, g, hardware) }
@@ -1630,6 +1629,7 @@ class Workspace(
         }
     }
 
+    val guestAgentAvailability = GuestAgentAvailability({ state.value }, { inspectionGeneration })
     private var inspectionGeneration = 0L
     private var inspectionJob: Job? = null
     fun inspectGuest(timeframe: String = "hour") {

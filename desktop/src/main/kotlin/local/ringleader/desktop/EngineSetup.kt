@@ -68,10 +68,12 @@ internal class EngineSetup(
     private val workspace: Workspace,
     private val scope: CoroutineScope,
     val guest: Guest,
-    hardware: HardwareSummary?,
+    private val hardware: HardwareSummary?,
     address: String?,
     private val onClose: () -> Unit = {},
 ) {
+    private val consent = workspace.guestAgentAvailability.revision()
+    val availability get() = workspace.guestAgentAvailability
     var step by mutableStateOf<EngineStep>(EngineStep.Choose)
         private set
     var busy by mutableStateOf(false)
@@ -96,7 +98,10 @@ internal class EngineSetup(
         scope.launch {
             try { block()?.let { step = it } }
             catch (e: CancellationException) { throw e }
-            catch (e: Exception) { error = setupFailure(e) }
+            catch (e: Exception) {
+                error = setupFailure(e)
+                if (step is EngineStep.Installing) step = EngineStep.Choose
+            }
             finally { busy = false }
         }
     }
@@ -105,7 +110,7 @@ internal class EngineSetup(
     fun installThroughAgent(bundle: GuestHelperBundle) = run {
         step = EngineStep.Installing(GuestHelperProgress(0, 1))
         val done = withContext(Dispatchers.IO) {
-            workspace.onGuest(guest) { connection, live ->
+            availability.mutate(workspace, guest, consent, checkNotNull(hardware)) { connection, live ->
                 hub.installer.install(connection, live, bundle) { p -> scope.launch { step = EngineStep.Installing(p) } }
             }
         }

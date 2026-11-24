@@ -26,8 +26,9 @@ class EnginePickerSceneTest {
         val wire = ServiceWire("RingMASTER/test")
         val hub = EngineHub(GuestHelperPairings(GuestHelperStore(null), NoVault("Test"), wire), wire, { emptyList() })
         try {
+            for ((width, height) in listOf(1600 to 900, 960 to 640)) {
             for (web in listOf(false, true)) {
-                val scene = ImageComposeScene(960, 640, coroutineContext = coroutineContext) {
+                val scene = ImageComposeScene(width, height, coroutineContext = coroutineContext) {
                     MaterialTheme(colorScheme = ringColors) {
                         CompositionLocalProvider(LocalReduceMotion provides true, LocalAppHost provides AppHost(web)) {
                             EngineSetupDialog(hub, workspace, WorkspaceState(), guest, null)
@@ -36,6 +37,10 @@ class EnginePickerSceneTest {
                 }
                 try {
                     repeat(4) { scene.render((it + 1) * 16_000_000L).close(); yield() }
+                    System.getenv("RINGMASTER_UI_PHASE")?.let { phase ->
+                        val folder = java.io.File("../artifacts/engine-fallback/$phase").apply { mkdirs() }
+                        java.io.File(folder, "setup-$web-${width}x$height.png").writeBytes(scene.render().encodeToData()!!.bytes)
+                    }
                     val texts = mutableListOf<String>()
                     fun visit(node: SemanticsNode) {
                         node.config.getOrNull(SemanticsProperties.Text)?.forEach { texts += it.text }
@@ -45,6 +50,7 @@ class EnginePickerSceneTest {
                     assertEquals(!web, texts.any { it.startsWith("Choose a bundle file", ignoreCase = true) })
                 } finally { scene.close() }
             }
+        }
         } finally { workspace.close() }
     }
 }

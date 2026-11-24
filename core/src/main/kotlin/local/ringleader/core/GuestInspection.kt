@@ -42,7 +42,8 @@ data class HardwareDevice(val key: String, val volume: String?, val storage: Str
 /** One row from `GET /pending`. [value] is the pending text. [delete] means the live entry is going away. */
 data class PendingChange(val key: String, val value: String?, val delete: Boolean)
 data class HardwareSummary(val fields: Map<String,String>, val disks: List<HardwareDevice>, val nics: List<HardwareDevice>, val pending: List<PendingChange> = emptyList(),
-    val usb: List<UsbAttachment> = emptyList(), val pci: List<HardwareDevice> = emptyList())
+    val usb: List<UsbAttachment> = emptyList(), val pci: List<HardwareDevice> = emptyList(),
+    val identity: GuestIdentityFacts? = null)
 data class GuestSnapshot(val name: String, val parent: String?, val time: Long?, val description: String?, val ram: Boolean, val current: Boolean,
     /** Proxmox `snapstate` (`prepare`, `delete`) while a snapshot is not complete; null for a complete one. */
     val snapstate: String? = null)
@@ -153,7 +154,10 @@ private fun hardwareFromConfig(row: JsonObject, pending: List<PendingChange> = e
         HardwareDevice(key, volume, volume?.substringBefore(':')?.takeIf { ':' in volume }, props["size"], props)
     }.sortedWith(deviceOrder)
     val fields = hardwareFieldKeys.mapNotNull { key -> row.text(key)?.let { key to it } }.toMap()
-    return HardwareSummary(fields, devices(diskKey), devices(Regex("net[0-9]+")), pending, parseUsbAttachments(row), devices(Regex("hostpci[0-9]+")))
+    val kind = if ("hostname" in row || "rootfs" in row) "Container" else "VM"
+    val identity = parseIdentityFacts(buildJsonObject { put("data", row) }.toString(), kind)
+    return HardwareSummary(fields, devices(diskKey), devices(Regex("net[0-9]+")), pending,
+        parseUsbAttachments(row), devices(Regex("hostpci[0-9]+")), identity)
 }
 
 private fun pendingDelete(row: JsonObject): Boolean {

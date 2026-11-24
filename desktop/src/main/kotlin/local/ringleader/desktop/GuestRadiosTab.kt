@@ -46,13 +46,22 @@ private class GuestCall<T>(val failed: String) {
 
 @Composable fun GuestRadiosTab(state: WorkspaceState, workspace: Workspace, guest: Guest, hardware: HardwareSummary?) {
     val hub = LocalRadios.current ?: noRadios
+    val liveGuests = hub.guests as? LiveGuestRadios
+    val guestAvailability = liveGuests?.availability ?: workspace.guestAgentAvailability
     val board by hub.board.board.collectAsState()
     val pairings = hub.engine?.version?.collectAsState()?.value
-    val view = remember(guest, hardware, board, pairings) { hub.guests.view(guest, hardware, board) }
-    val probe = remember(guest.resource) { GuestCall<GuestProbeView>("Looking inside the guest failed.") }
-    val wifi = remember(guest.resource) { GuestCall<WifiPanel>("The Wi-Fi scan inside the guest failed.") }
-    val bt = remember(guest.resource) { GuestCall<BtScan>("The scan inside the guest failed.") }
-    var confirm by remember { mutableStateOf<String?>(null) }
+    val availability by guestAvailability.version.collectAsState()
+    val view = remember(
+        workspace, hub, guest, hardware, board, pairings, availability,
+        state.connectionEpoch, state.inspectionLoading, state.connected, state.stale, state.loading, state.kind,
+    ) {
+        hub.guests.view(guest, hardware, board)
+    }
+    val revision = guestAvailability.revision()
+    val probe = remember(workspace, guest.resource, revision) { GuestCall<GuestProbeView>("Looking inside the guest failed.") }
+    val wifi = remember(workspace, guest.resource, revision) { GuestCall<WifiPanel>("The Wi-Fi scan inside the guest failed.") }
+    val bt = remember(workspace, guest.resource, revision) { GuestCall<BtScan>("The scan inside the guest failed.") }
+    var confirm by remember(workspace, guest.resource, revision) { mutableStateOf<String?>(null) }
     val vm = guest.kind == "VM"
     val inside = vm || view.throughEngine
     val what = if (vm) "VM" else "container"
@@ -61,8 +70,7 @@ private class GuestCall<T>(val failed: String) {
         if (vm) AttachedDevices(view, hardware)
         LookInside(view, what, inside, probe) { confirm = "probe" }
         if (inside) {
-            val directPve = state.kind != PDM_KIND && guest.scope.isEmpty()
-            val refusal = if (view.throughEngine) null else guestBluetoothRefusal(guest, directPve, hardware)
+            val refusal = if (view.throughEngine) null else view.probeRefusal?.text
             BluetoothInside(what, refusal, bt, view.throughEngine) { confirm = "bt" }
         }
         if (view.hasWifi) WifiInside(view, what, wifi) { confirm = "wifi" }
@@ -73,7 +81,7 @@ private class GuestCall<T>(val failed: String) {
         call.busy = true
         call.error = null
         scope.launch {
-            try { call.result = block() }
+            try { call.result = guestAvailability.observe(guest) { block() } }
             catch (e: CancellationException) { throw e }
             catch (e: Exception) { call.error = if (e is java.io.IOException) readableError(e) else e.message ?: call.failed }
             finally { call.busy = false }
@@ -89,7 +97,6 @@ private class GuestCall<T>(val failed: String) {
         "wifi" -> GuestCallConfirm("Scan for Wi-Fi inside ${guest.kind} ${guest.id}?", guest, "Scan",
             if (engine) ENGINE_WIFI_CONFIRM else GUEST_WIFI_CONFIRM, { confirm = null }) { start(wifi) { hub.guests.wifiScan(guest) } }
     }
-    val liveGuests = hub.guests as? LiveGuestRadios
     val setupFor = liveGuests?.setup?.collectAsState()?.value
     if (setupFor?.resource == guest.resource && hub.engine != null) {
         EngineSetupDialog(hub.engine, workspace, state, guest, hardware) { if (liveGuests.setup.value == guest) liveGuests.setup.value = null }

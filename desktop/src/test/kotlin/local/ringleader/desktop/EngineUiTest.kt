@@ -1,6 +1,7 @@
 package local.ringleader.desktop
 
 import java.time.Instant
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -96,6 +97,24 @@ class EngineUiTest {
         }
         chooseBundle(hub, browser)
         assertEquals(0, calls)
+    }
+
+    @Test fun runtimeDenialOffersSetupInTheSameLiveSession() = kotlinx.coroutines.runBlocking {
+        val workspace = local.ringleader.core.sampleWorkspace(scope)
+        try {
+            workspace.state.first { it.overview != null }
+            val guest = workspace.state.value.overview!!.guests.first { it.kind == "VM" && it.status == "running" }
+            val config = local.ringleader.core.parseHardware("""{"data":{"agent":"1","ostype":"l26"}}""")
+            val radios = LiveGuestRadios(LiveRadiosFeed(scope, workspace, null), workspace, hub)
+            radios.view(guest, config, RadiosBoard())
+            assertFailsWith<GuestAgentFailure> {
+                workspace.guestAgentAvailability.observe(guest) { throw GuestAgentFailure(GuestRefusal.NoPermission) }
+            }
+            val note = radios.probeRefusal(guest)!!
+            assertEquals(ENGINE_SETUP_LABEL, note.action!!.label)
+            note.action!!.run()
+            assertEquals(guest, radios.setup.value)
+        } finally { workspace.close() }
     }
 
     @Test fun aRefusalItCannotHelpWithOffersNothing() {

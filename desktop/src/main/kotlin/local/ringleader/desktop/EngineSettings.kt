@@ -20,6 +20,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import local.ringleader.core.Guest
+import local.ringleader.core.GuestAgentAvailability
+import local.ringleader.core.HardwareSummary
 import local.ringleader.core.PDM_KIND
 import local.ringleader.core.Workspace
 import local.ringleader.core.WorkspaceState
@@ -78,22 +80,46 @@ private fun seen(at: Instant?) = at?.let { "last seen " + seenFormat.format(it.a
     if (hub != null) links.forEach { link -> PairingRow(hub, workspace, state, link) }
 }
 
-@Composable private fun PairingRow(hub: EngineHub, workspace: Workspace, state: WorkspaceState, link: GuestHelperLink) {
+@Composable internal fun PairingRow(
+    hub: EngineHub, workspace: Workspace, state: WorkspaceState, link: GuestHelperLink,
+    agentAccess: GuestAgentAvailability = workspace.guestAgentAvailability,
+    loadHardware: suspend (Workspace, Guest) -> local.ringleader.core.HardwareSummary? = { w, g ->
+        agentAccess.hardware(w, g)
+    },
+) {
     val scope = rememberCoroutineScope()
     var said by remember(link.id) { mutableStateOf<String?>(null) }
     var busy by remember(link.id) { mutableStateOf(false) }
+    var consent by remember(link.id) { mutableStateOf(agentAccess.revision()) }
+    var removalHardware by remember(link.id) { mutableStateOf<HardwareSummary?>(null) }
+    var removalGuest by remember(link.id) { mutableStateOf<Guest?>(null) }
     var confirmRemove by remember(link.id) { mutableStateOf(false) }
     var showCommand by remember(link.id) { mutableStateOf(false) }
     val guest = inventoryGuest(state, link.place)
-    val agentFree = guest != null && guest.kind == "VM" && guestRadioRefusal(guest, state.kind != PDM_KIND && guest.scope.isEmpty(), null)
-        .let { it == null || it == local.ringleader.core.GuestRefusal.ConfigLoading }
+    val availability by agentAccess.version.collectAsState()
+    val revision = agentAccess.revision()
+    var hardware by remember(agentAccess, workspace, revision, guest?.resource, guest?.node, guest?.name, guest?.status, guest?.template) {
+        mutableStateOf<local.ringleader.core.HardwareSummary?>(null)
+    }
+    LaunchedEffect(agentAccess, workspace, revision, guest?.resource, guest?.node, guest?.name, guest?.status, guest?.template, state.inspectionLoading) {
+        hardware = null
+        if (guest != null && guest.kind == "VM" && guest.status == "running" && state.kind != PDM_KIND && guest.scope.isEmpty()) {
+            try { hardware = loadHardware(workspace, guest) }
+            catch (e: CancellationException) { throw e }
+            catch (e: Exception) { said = setupFailure(e); showCommand = true }
+        }
+    }
+    val agentRefusal = remember(agentAccess, workspace, availability, guest, hardware, state) {
+        guest?.let { agentAccess.refusal(it, hardware) }
+    }
+    val agentFree = guest != null && agentRefusal == null && hardware?.identity?.best(false) != null
     fun act(block: suspend () -> String?) {
         busy = true
         said = null
         scope.launch {
             try { said = block() }
             catch (e: CancellationException) { throw e }
-            catch (e: Exception) { said = setupFailure(e) }
+            catch (e: Exception) { said = setupFailure(e); showCommand = true }
             finally { busy = false }
         }
     }
@@ -109,21 +135,28 @@ private fun seen(at: Instant?) = at?.let { "last seen " + seenFormat.format(it.a
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             MiniAction("Check now", enabled = !busy) { act { checkNow(hub, link) } }
             MiniAction("Unpair", enabled = !busy) { act { unpair(hub, link) } }
-            if (agentFree) MiniAction("Remove…", enabled = !busy) { confirmRemove = true }
+            if (agentFree) MiniAction("Remove…", enabled = !busy) {
+                removalGuest = guest
+                removalHardware = hardware
+                consent = agentAccess.revision()
+                confirmRemove = true
+            }
             else MiniAction("How to remove it") { showCommand = !showCommand }
         }
         if (showCommand) RemoveCommand()
         said?.let { Text(it, fontSize = 12.sp, lineHeight = 17.sp, color = Tech.Muted) }
     }
-    if (confirmRemove && guest != null) {
+    val confirmedHardware = removalHardware
+    val confirmed = removalGuest
+    if (confirmRemove && confirmed != null && confirmedHardware != null) {
         TechDialog("Remove the RingMASTER Engine?", { confirmRemove = false }, subtitle = enginePlaceLabel(link.place), actions = {
             TechAction("Remove", active = true) {
                 confirmRemove = false
-                act { removeThroughAgent(hub, workspace, guest, link) }
+                act { removeThroughAgent(hub, workspace, confirmed, link, consent, confirmedHardware, agentAccess) }
             }
             TechAction("Cancel") { confirmRemove = false }
         }) {
-            Text("RingMASTER will run the Engine's uninstaller in ${guest.kind} ${guest.id} through the QEMU guest agent. " +
+            Text("RingMASTER will run the Engine's uninstaller in ${confirmed.kind} ${confirmed.id} through the QEMU guest agent. " +
                 "It stops the service and removes the program, its folder and its account, then checks that nothing is left.",
                 fontSize = 13.sp, lineHeight = 19.sp)
         }
@@ -150,8 +183,13 @@ private suspend fun unpair(hub: EngineHub, link: GuestHelperLink): String = with
     "Unpaired. The Engine is still installed in the guest until you remove it there."
 }
 
-private suspend fun removeThroughAgent(hub: EngineHub, workspace: Workspace, guest: Guest, link: GuestHelperLink): String {
-    withContext(Dispatchers.IO) { workspace.onGuest(guest) { connection, live -> hub.installer.remove(connection, live) } }
+private suspend fun removeThroughAgent(
+    hub: EngineHub, workspace: Workspace, guest: Guest, link: GuestHelperLink, consent: Pair<Long, Long>,
+    confirmedHardware: HardwareSummary, agentAccess: GuestAgentAvailability = workspace.guestAgentAvailability,
+): String {
+    withContext(Dispatchers.IO) {
+        agentAccess.mutate(workspace, guest, consent, confirmedHardware) { connection, live -> hub.installer.remove(connection, live) }
+    }
     unpair(hub, link)
     return "Removed from ${guest.kind} ${guest.id}, and unpaired. Nothing of the Engine is left there."
 }

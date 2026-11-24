@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import local.ringleader.core.FleetRadios
 import local.ringleader.core.Guest
+import local.ringleader.core.GuestAgentAvailability
 import local.ringleader.core.GuestRefusal
 import local.ringleader.core.HardwareSummary
 import local.ringleader.core.PDM_KIND
@@ -25,7 +26,6 @@ import local.ringleader.core.WifiIssue
 import local.ringleader.core.WifiScanner
 import local.ringleader.core.Workspace
 import local.ringleader.core.WorkspaceState
-import local.ringleader.core.guestRadioRefusal
 import local.ringleader.core.readableError
 
 /*
@@ -151,6 +151,7 @@ internal class LiveGuestRadios(
     private val feed: LiveRadiosFeed,
     private val workspace: Workspace,
     private val engine: EngineHub? = null,
+    val availability: GuestAgentAvailability = workspace.guestAgentAvailability,
 ) : BoardGuestRadios() {
     val setup = kotlinx.coroutines.flow.MutableStateFlow<Guest?>(null)
     private val shown = HashMap<ResourceId, HardwareSummary?>()
@@ -169,19 +170,20 @@ internal class LiveGuestRadios(
      */
     override fun probeRefusal(guest: Guest): RadioNote? {
         if (engine?.pairingFor(guest) != null) return null
-        val direct = workspace.state.value.kind != PDM_KIND
-        val refusal = guestRadioRefusal(guest, direct, shown[guest.resource]) ?: return null
+        val refusal = availability.refusal(guest, shown[guest.resource]) ?: return null
         val text = if (refusal == GuestRefusal.Container) RADIOS_CT_PROBE else refusal.sentence
         val setup = engine?.takeIf { refusal.engineCouldHelp }?.let { RadioAction(ENGINE_SETUP_LABEL) { setup.value = guest } }
         return RadioNote(text, setup)
     }
 
-    override suspend fun probe(guest: Guest): GuestProbeView = guestProbeView(workspace.guestRadioProbe(guest, shown[guest.resource]))
+    override suspend fun probe(guest: Guest): GuestProbeView = availability.observe(guest) {
+        guestProbeView(workspace.guestRadioProbe(guest, shown[guest.resource]))
+    }
 
-    override suspend fun wifiScan(guest: Guest): WifiPanel {
+    override suspend fun wifiScan(guest: Guest): WifiPanel = availability.observe(guest) {
         val scan = workspace.guestWifiScan(guest, shown[guest.resource])
         val source = WifiSourceView(guest.resource.toString(), "${guest.kind} ${guest.id} ${guest.name}", inGuest = true)
-        return wifiPanel(scan, listOf(source), source.key)
+        wifiPanel(scan, listOf(source), source.key)
     }
 }
 

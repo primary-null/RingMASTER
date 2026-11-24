@@ -43,7 +43,9 @@ internal const val ENGINE_FINGERPRINT_QUESTION = "Is this the fingerprint the in
     hub: EngineHub, workspace: Workspace, state: WorkspaceState, guest: Guest, hardware: HardwareSummary?, onClose: () -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
-    val setup = remember(guest.resource) { EngineSetup(hub, workspace, scope, guest, hardware, guestAddress(state, guest), onClose) }
+    val setup = remember(workspace, guest.resource, state.connectionEpoch) {
+        EngineSetup(hub, workspace, scope, guest, hardware, guestAddress(state, guest), onClose)
+    }
     DisposableEffect(setup) { onDispose { setup.close() } }
     val chosen by hub.chosenBundle.collectAsState()
     val bundle = chosen ?: hub.bundleFor(setup.machine)
@@ -85,12 +87,19 @@ internal const val ENGINE_FINGERPRINT_QUESTION = "Is this the fingerprint the in
     SectionLabel("What is installed")
     Sentences(GUEST_HELPER_PLAN, bullet = true)
     BundleLine(bundle, hub)
-    val agentRefusal = guestRadioRefusal(guest, state.kind != PDM_KIND && guest.scope.isEmpty(), hardware)
+    val availability by setup.availability.version.collectAsState()
+    val agentRefusal = remember(setup, availability, guest, hardware, state) {
+        setup.availability.refusal(guest, hardware)
+            ?: local.ringleader.core.GuestRefusal.ConfigLoading.takeIf { hardware?.identity?.best(false) == null }
+    }
     val ways = guestHelperWays(guest, agentRefusal, bundle)
     if (ways.isNotEmpty()) SectionLabel("Ways in, best first")
     ways.forEachIndexed { index, way -> WayRow(setup, way, bundle!!, best = index == 0) }
     if (GuestHelperWay.GuestAgent !in ways && agentRefusal != null && bundle != null) {
-        Hint("Not through the guest agent: ${agentRefusal.sentence}")
+        val reason = if (hardware?.identity?.best(false) == null && agentRefusal == local.ringleader.core.GuestRefusal.ConfigLoading) {
+            "The server did not provide a guest incarnation to verify. Use one of the manual ways."
+        } else agentRefusal.sentence
+        Hint("Not through the guest agent: $reason")
     }
     SectionLabel("Already installed?")
     Row { MiniAction("Pair by hand") { setup.toPairing() } }
