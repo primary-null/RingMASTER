@@ -32,7 +32,7 @@ import local.ringleader.core.integrations.ServiceWire
 internal const val ENGINE_SETUP_LABEL = "Set up RingMASTER Engine"
 
 /**
- * The RingMASTER Engine in this app: the pairings, the bundles it can install, and which guest's setup dialog is open.
+ * The RingMASTER Engine in this app: the pairings, the bundles it can install, while each session owns its setup dialog.
  * There is one for the whole app ([GuestEngine.hub]); tests build their own.
  */
 class EngineHub(
@@ -45,21 +45,16 @@ class EngineHub(
     val pairing = GuestHelperPairing(wire)
     private val packedBundles by lazy(packaged)
     private val changes = MutableStateFlow(0)
-    private val open = MutableStateFlow<Guest?>(null)
     private val chosen = MutableStateFlow<GuestHelperBundle?>(null)
 
     /** Moves on every pairing or unpairing, so a view that shows a pairing reads it again. */
     val version: StateFlow<Int> = changes.asStateFlow()
-    /** The guest whose setup dialog is open, or null. */
-    val setup: StateFlow<Guest?> = open.asStateFlow()
     /** A bundle file a developer chose in the dialog for this run. */
     val chosenBundle: StateFlow<GuestHelperBundle?> = chosen.asStateFlow()
 
     val packagedBundles: List<GuestHelperBundle> get() = packedBundles
 
     fun pairingFor(guest: Guest): GuestHelperLink? = pairings.forPlace(guestHelperPlace(guest))
-    fun offer(guest: Guest) { open.value = guest }
-    fun closeSetup() { open.value = null }
     fun changed() { changes.value += 1 }
     fun choose(bundle: GuestHelperBundle) { chosen.value = bundle }
 

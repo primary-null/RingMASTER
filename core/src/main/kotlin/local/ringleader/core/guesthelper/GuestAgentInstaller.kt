@@ -56,8 +56,8 @@ class LiveGuestAgentChannel(private val client: PveClient = PveClient()) : Guest
 const val GUEST_AGENT_PART_CHARS = 60 * 1024
 
 const val GUEST_HELPER_DELIVERY_LOST =
-    "The guest agent did not confirm one part of the upload, so the install was stopped. Parts may be left in /var/tmp; " +
-        "they are removed by the next install."
+    "The guest agent did not confirm one part of the upload, so the install was stopped. " +
+        "Cleanup was attempted for this install only; its private directory may remain in /var/tmp."
 
 /** Install progress: parts written of all parts, then the installer running. */
 data class GuestHelperProgress(val partsSent: Int, val parts: Int, val installing: Boolean = false)
@@ -71,30 +71,44 @@ class GuestAgentInstaller(private val channel: GuestAgentChannel = LiveGuestAgen
     fun install(connection: Connection, guest: Guest, bundle: GuestHelperBundle, progress: (GuestHelperProgress) -> Unit = {}): GuestHelperInstalled {
         val base64 = Base64.getEncoder().encodeToString(Files.readAllBytes(bundle.file))
         val parts = base64.chunked(GUEST_AGENT_PART_CHARS)
-        val run = ByteArray(6).also(random::nextBytes).joinToString("") { "%02x".format(it) }
-        val prefix = "/var/tmp/ringmaster-engine-$run-"
-        progress(GuestHelperProgress(0, parts.size))
-        parts.forEachIndexed { index, part ->
-            try {
-                channel.writeFile(connection, guest, prefix + "%04d".format(index), part)
-            } catch (_: AmbiguousPowerResultException) {
-                throw IllegalStateException(GUEST_HELPER_DELIVERY_LOST)
+        val run = ByteArray(18).also(random::nextBytes).joinToString("") { "%02x".format(it) }
+        val work = "/var/tmp/ringmaster-engine-$run"
+        // mkdir is atomic and refuses any pre-existing path, including a symlink. Nothing is uploaded until it succeeds.
+        val prepare = channel.run(connection, guest, listOf("sh", "-c", "umask 077; mkdir -m 700 -- '$work'"), 1, 15)
+        check(prepare.exited && prepare.exitCode == 0) { "The Engine's private staging directory could not be created." }
+        try {
+            progress(GuestHelperProgress(0, parts.size))
+            parts.forEachIndexed { index, part ->
+                try {
+                    channel.writeFile(connection, guest, "$work/part-" + "%08d".format(index), part)
+                } catch (_: AmbiguousPowerResultException) {
+                    throw IllegalStateException(GUEST_HELPER_DELIVERY_LOST)
+                }
+                progress(GuestHelperProgress(index + 1, parts.size))
             }
-            progress(GuestHelperProgress(index + 1, parts.size))
+            progress(GuestHelperProgress(parts.size, parts.size, installing = true))
+        } catch (failure: RuntimeException) {
+            try {
+                channel.run(connection, guest, listOf("sh", "-c", "rm -rf -- '$work'"), 1, 15)
+            } catch (cleanup: RuntimeException) {
+                failure.addSuppressed(cleanup)
+            }
+            throw failure
         }
-        progress(GuestHelperProgress(parts.size, parts.size, installing = true))
-        val bundlePath = "/var/tmp/ringmaster-engine-$run.tar.gz"
-        // Older runs' parts are cleared first, so a stopped install never leaves files behind for long.
         val script = listOf(
-            "find /var/tmp -maxdepth 1 -name 'ringmaster-engine-*-[0-9][0-9][0-9][0-9]' ! -name 'ringmaster-engine-$run-*' -delete",
-            "cat $prefix[0-9][0-9][0-9][0-9] > $bundlePath",
-            "rm -f $prefix[0-9][0-9][0-9][0-9]",
-            installScript(bundlePath, bundle.sha256, assumeYes = true),
+            "set -e",
+            "umask 077",
+            "work='$work'",
+            "trap 'rm -rf -- \"\$work\"' EXIT",
+            "cat \"\$work\"/part-* > \"\$work/bundle.tgz\"",
+            "rm -f -- \"\$work\"/part-*",
+            stagedInstallScript(bundle.sha256, " --yes"),
         ).joinToString("\n")
+        // If exec delivery is ambiguous the process may still be using this directory; its own trap owns cleanup.
         val status = channel.run(connection, guest, listOf("sh", "-c", script), 2, 120)
         val output = status.out + "\n" + status.err
         val installed = parseInstallerOutput(output)
-        if (status.exitCode != 0 || installed == null) {
+        if (!status.exited || status.exitCode != 0 || installed == null) {
             throw IllegalStateException("The installer did not finish. Its last line: " + lastLine(output))
         }
         return installed

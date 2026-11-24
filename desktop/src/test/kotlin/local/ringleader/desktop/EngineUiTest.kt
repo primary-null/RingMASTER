@@ -50,11 +50,52 @@ class EngineUiTest {
     }
 
     @Test fun aRefusalTheEngineWouldGetAroundOffersToSetItUp() {
-        val note = guests().probeRefusal(ct)!!
+        val radios = guests()
+        val note = radios.probeRefusal(ct)!!
         assertEquals(RADIOS_CT_PROBE, note.text)
         assertEquals(ENGINE_SETUP_LABEL, note.action?.label)
         note.action!!.run()
-        assertEquals(ct, hub.setup.value, "the action opens the setup for that guest")
+        assertEquals(ct, radios.setup.value, "the action opens the setup for that guest")
+        assertNull(guests().setup.value, "another session does not open the dialog")
+    }
+
+    @Test fun linkRemainsOwnedDuringPairingAndClosesOnBackOrDispose() = kotlinx.coroutines.runBlocking {
+        val file = java.nio.file.Files.createTempFile("engine-link", ".tar.gz")
+        val bundle = local.ringleader.core.guesthelper.GuestHelperBundle("x86_64", "0.1.0", file, "a".repeat(64), false)
+        val setup = EngineSetup(hub, Workspace(scope), scope, ct, null, "127.0.0.1")
+        try {
+            suspend fun open(): local.ringleader.core.guesthelper.OneTimeLink {
+                setup.openLink(bundle)
+                return kotlinx.coroutines.withTimeout(5000) {
+                    while (setup.step !is EngineStep.Link) kotlinx.coroutines.delay(10)
+                    (setup.step as EngineStep.Link).link
+                }
+            }
+            val first = open()
+            setup.toPairing()
+            assertEquals(local.ringleader.core.guesthelper.OneTimeLinkState.Waiting, first.status.value)
+            setup.back()
+            assertEquals(local.ringleader.core.guesthelper.OneTimeLinkState.Expired, first.status.value)
+            val second = open()
+            setup.toPairing()
+            setup.close()
+            assertEquals(local.ringleader.core.guesthelper.OneTimeLinkState.Expired, second.status.value)
+        } finally {
+            setup.close()
+            java.nio.file.Files.deleteIfExists(file)
+        }
+    }
+
+    @Test fun browserCannotInvokeHostBundlePicker() {
+        var calls = 0
+        val browser = object : AppHost(web = true, hostActions = true) {
+            override fun pickFile(title: String, extensions: Set<String>): java.nio.file.Path? {
+                calls++
+                return null
+            }
+        }
+        chooseBundle(hub, browser)
+        assertEquals(0, calls)
     }
 
     @Test fun aRefusalItCannotHelpWithOffersNothing() {

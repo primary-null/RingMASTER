@@ -315,7 +315,6 @@ internal class RingResolver(
         if (IpLiteral.isLiteral(bare.substringBefore('%'))) return listFromInner(host, policy)
         val key = nameKey(bare) ?: return listFromInner(host, policy)
         if (bare.equals("localhost", ignoreCase = true) || inside.get() == true) return order(key, listFromInner(host, policy))
-        takeLate(key)?.let { return order(key, it) }
         val bound = boundMillis ?: defaultDeadlineMillis
         val deadline = clock() + TimeUnit.MILLISECONDS.toNanos(bound)
         val answers = await(join(key, host, policy), bare, deadline, bound)
@@ -332,11 +331,12 @@ internal class RingResolver(
     /** The lookup already running for this name and policy, or a new one on a worker thread. */
     private fun join(key: String, host: String, policy: LookupPolicy): Flight {
         val flightKey = "$key|${policy.characteristics()}"
-        flights[flightKey]?.let { if (!it.future.isDone) return it }
-        val fresh = Flight(flightKey)
-        val existing = flights.putIfAbsent(flightKey, fresh)
-        if (existing != null && !existing.future.isDone) return existing
-        if (existing != null) flights[flightKey] = fresh
+        val fresh = synchronized(flights) {
+            // The worker publishes late answers and retires its flight under this same lock.
+            takeLate(key)?.let { answers -> return Flight(flightKey).apply { future.complete(answers) } }
+            flights[flightKey]?.let { if (!it.future.isDone) return it }
+            Flight(flightKey).also { flights[flightKey] = it }
+        }
         val task = Runnable { runLookup(fresh, key, host, policy) }
         val start: (Runnable) -> Unit = workerStarter ?: { pool.execute(it) }
         try {
@@ -353,12 +353,17 @@ internal class RingResolver(
         inside.set(true)
         try {
             val answers = inner.lookupByName(host, policy).toList()
-            if (flight.abandoned) keepLate(key, answers)
-            flight.future.complete(answers)
+            synchronized(flights) {
+                if (flight.abandoned) keepLate(key, answers)
+                flight.future.complete(answers)
+                flights.remove(flight.key, flight)
+            }
         } catch (t: Throwable) {
-            flight.future.completeExceptionally(t)
+            synchronized(flights) {
+                flight.future.completeExceptionally(t)
+                flights.remove(flight.key, flight)
+            }
         } finally {
-            flights.remove(flight.key, flight)
             inside.remove()
         }
     }
@@ -369,7 +374,12 @@ internal class RingResolver(
         try {
             while (true) {
                 val left = deadline - clock()
-                if (left <= 0 && !flight.future.isDone) throw giveUp(flight, host, boundMillis)
+                if (left <= 0) {
+                    val timeout = synchronized(flights) {
+                        if (flight.future.isDone) null else giveUp(flight, host, boundMillis)
+                    }
+                    if (timeout != null) throw timeout
+                }
                 try {
                     return flight.future.get(left.coerceAtLeast(1), TimeUnit.NANOSECONDS)
                 } catch (e: TimeoutException) {

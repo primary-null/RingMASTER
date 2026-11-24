@@ -28,7 +28,7 @@ internal fun mediaSubmissionReady(sub: StorageSubmission?, key: StorageKey, expe
         !browser || kind!=MediaKind.Iso || storageActionGate(StorageAction.UrlDownload,state.permissions.value?.dump,it.key)==null
     }
     var target by remember {mutableStateOf(targets.firstOrNull()?.key)}
-    var tab by remember {mutableStateOf(if(kind==MediaKind.Template) "Catalogue" else "URL")}
+    var tab by remember {mutableStateOf(if(kind==MediaKind.Template) "Catalogue" else "Existing ISOs")}
     var editing by remember {mutableStateOf(false)}
     var submitted by remember {mutableStateOf<String?>(null)}
     var expected by remember {mutableStateOf<String?>(null)}
@@ -37,7 +37,9 @@ internal fun mediaSubmissionReady(sub: StorageSubmission?, key: StorageKey, expe
     val sub=state.storageActions.submissions.firstOrNull {it.localId==submitted}
     val epoch=remember {session.epoch}; val generation=remember {session.generation};val node=remember {session.node}
     val valid=state.creation?.let {it.epoch==epoch && it.generation==generation && it.node==node}==true
-    LaunchedEffect(target) {target?.let {workspace.selectStorage(it.node,it.storage)}}
+    LaunchedEffect(target, tab) {
+        if (tab != "Existing ISOs") target?.let { workspace.selectStorage(it.node, it.storage) }
+    }
     LaunchedEffect(valid) {if(!valid) onClose()}
     LaunchedEffect(sub,state.storageContent,state.creation?.volumes) {
         val key=target ?: return@LaunchedEffect
@@ -51,23 +53,29 @@ internal fun mediaSubmissionReady(sub: StorageSubmission?, key: StorageKey, expe
         if(sub?.action==StorageAction.Upload && sub.phase==PowerPhase.Accepted && !sub.checkable) closeUpload=true else onClose()
     }
     StorageDialog(if(kind==MediaKind.Iso) "Get ISO image" else "Get container template",::close,width=640.dp,actions={TechAction(if(sub?.phase==PowerPhase.Accepted) "Started \u00b7 close" else "Close",onClick=::close)}) {
-        if(targets.isEmpty()) Text("No write-capable target is recorded on this node. A supported file storage with ${kind.content} content and Datastore.AllocateTemplate is required. Browser ISO downloads also need network permission on this node.",color=Tech.Amber)
-        else {
-            TechSelect("Target storage",targets,targets.firstOrNull {it.key==target},{if(submitted==null) target=it.key},{it.key.storage},enabled=submitted==null)
-            TechTabs(if(kind==MediaKind.Template) listOf("Catalogue","URL") + if(browser) emptyList() else listOf("Upload") else listOf("URL") + if(browser) emptyList() else listOf("Upload"),tab,{tab=it})
-            if(submitted==null) MiniAction("Open $tab",enabled=valid && !state.storageContent.loading && state.storageContent.error==null) {editing=true}
-            Text("Your create form stays open. A task being accepted does not make media ready. Only Terminal OK and the exact file in refreshed storage can select it.",color=Tech.Muted)
-            Box(Modifier.heightIn(max=260.dp)) {StorageActionStrip(state,workspace,target)}
-            if(sub?.phase==PowerPhase.Succeeded) {
-                Text("Checking exact file and refreshing create choices\u2026",color=Tech.Amber)
-                if(state.creation?.volumes?.get(target!!.storage to kind.content)?.error != null)
-                    Text("Could not refresh the create choices. Refresh storage and choices to try again.",color=Tech.Amber)
-                MiniAction("Refresh storage and choices",enabled=!state.storageContent.loading) {
-                    refreshing=false
-                    workspace.refreshStorageContent()
+        val tabs = if (kind == MediaKind.Template) listOf("Catalogue", "URL") + if (browser) emptyList() else listOf("Upload")
+            else listOf("Existing ISOs", "URL") + if (browser) emptyList() else listOf("Upload")
+        TechTabs(tabs, tab, onSelect = { if (submitted == null) tab = it })
+        if (tab == "Existing ISOs") {
+            ExistingIsoChooser(state, workspace, session, preferred, valid, onReady)
+        } else {
+            if(targets.isEmpty()) Text("No write-capable target is recorded on this node. A supported file storage with ${kind.content} content and Datastore.AllocateTemplate is required. Browser ISO downloads also need network permission on this node.",color=Tech.Amber)
+            else {
+                TechSelect("Target storage",targets,targets.firstOrNull {it.key==target},{if(submitted==null) target=it.key},{it.key.storage},enabled=submitted==null)
+                if(submitted==null) MiniAction("Open $tab",enabled=valid && !state.storageContent.loading && state.storageContent.error==null) {editing=true}
+                Text("Your create form stays open. A task being accepted does not make media ready. Only Terminal OK and the exact file in refreshed storage can select it.",color=Tech.Muted)
+                Box(Modifier.heightIn(max=260.dp)) {StorageActionStrip(state,workspace,target)}
+                if(sub?.phase==PowerPhase.Succeeded) {
+                    Text("Checking exact file and refreshing create choices\u2026",color=Tech.Amber)
+                    if(state.creation?.volumes?.get(target!!.storage to kind.content)?.error != null)
+                        Text("Could not refresh the create choices. Refresh storage and choices to try again.",color=Tech.Amber)
+                    MiniAction("Refresh storage and choices",enabled=!state.storageContent.loading) {
+                        refreshing=false
+                        workspace.refreshStorageContent()
+                    }
                 }
+                if(sub?.phase in listOf(PowerPhase.Rejected,PowerPhase.Unsuccessful)) MiniAction("Return to form") {submitted=null;expected=null;refreshing=false}
             }
-            if(sub?.phase in listOf(PowerPhase.Rejected,PowerPhase.Unsuccessful)) MiniAction("Return to form") {submitted=null;expected=null;refreshing=false}
         }
     }
     if(editing && target!=null) StorageActionDialog(state,workspace,target!!,when(tab) {"Catalogue" -> StorageAction.TemplateDownload;"Upload" -> StorageAction.Upload;else -> StorageAction.UrlDownload},contentHint=kind.content,profileLabel=profileLabel,

@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import tomllib
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,7 +22,7 @@ PLATFORMS = {"windows-x64-msi", "debian-13-amd64-deb", "ubuntu-26.04-amd64-deb",
              "fedora-45-x86_64-rpm", "arch-x86_64-pkg"}
 # The RingMASTER Engine bundles the release job builds (installed inside guests, not by the update feed). They must be in
 # SHA256SUMS and attested like the packages; nothing else unlisted may be published.
-ENGINE_BUNDLE = re.compile(r"ringmaster-engine-[0-9]+(\.[0-9]+){1,3}-linux-(x86_64|aarch64)\.tar\.gz")
+ENGINE_ARCHITECTURES = ("x86_64", "aarch64")
 
 
 def command(*args: str) -> str:
@@ -117,12 +118,17 @@ def run(args: argparse.Namespace) -> dict:
     verify_signature(manifest_path)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     packages = verify_manifest_assets(manifest, release, args.repo, args.tag)
+    engine_source = ROOT / "native/ringmaster-engine/Cargo.toml"
+    engine_version = tomllib.loads(engine_source.read_text(encoding="utf-8"))["package"]["version"]
     expected = {p["name"] for p in packages} | {"SHA256SUMS"}
-    expected |= {a["name"] for a in release["assets"] if ENGINE_BUNDLE.fullmatch(a["name"])}
+    expected |= {f"ringmaster-engine-{engine_version}-linux-{arch}.tar.gz" for arch in ENGINE_ARCHITECTURES}
     feed_names = {"ringmaster-update.json", "ringmaster-update.json.sig"}
-    if not expected.issubset({a["name"] for a in release["assets"]}):
+    asset_names = [a["name"] for a in release["assets"]]
+    if len(asset_names) != len(set(asset_names)):
+        raise ValueError("Duplicate release asset names require explicit review")
+    if not expected.issubset(asset_names):
         raise ValueError("Release is incomplete")
-    if {a["name"] for a in release["assets"]} - expected - feed_names:
+    if set(asset_names) - expected - feed_names:
         raise ValueError("Unexpected assets require explicit review")
     with tempfile.TemporaryDirectory(prefix="ringmaster-finalize-") as tmp:
         folder = Path(tmp)

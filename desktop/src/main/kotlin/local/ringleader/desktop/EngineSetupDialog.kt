@@ -39,9 +39,11 @@ internal const val ENGINE_FIREWALL_NOTE =
     "This computer's firewall may ask once whether RingMASTER may accept a connection. The link closes after one download or ten minutes."
 internal const val ENGINE_FINGERPRINT_QUESTION = "Is this the fingerprint the installer showed?"
 
-@Composable internal fun EngineSetupDialog(hub: EngineHub, workspace: Workspace, state: WorkspaceState, guest: Guest, hardware: HardwareSummary?) {
+@Composable internal fun EngineSetupDialog(
+    hub: EngineHub, workspace: Workspace, state: WorkspaceState, guest: Guest, hardware: HardwareSummary?, onClose: () -> Unit = {},
+) {
     val scope = rememberCoroutineScope()
-    val setup = remember(guest.resource) { EngineSetup(hub, workspace, scope, guest, hardware, guestAddress(state, guest)) }
+    val setup = remember(guest.resource) { EngineSetup(hub, workspace, scope, guest, hardware, guestAddress(state, guest), onClose) }
     DisposableEffect(setup) { onDispose { setup.close() } }
     val chosen by hub.chosenBundle.collectAsState()
     val bundle = chosen ?: hub.bundleFor(setup.machine)
@@ -95,22 +97,28 @@ internal const val ENGINE_FINGERPRINT_QUESTION = "Is this the fingerprint the in
 }
 
 @Composable private fun BundleLine(bundle: GuestHelperBundle?, hub: EngineHub) {
+    val host = LocalAppHost.current
     when {
-        bundle == null -> Text(GUEST_HELPER_NO_BUNDLE, fontSize = 12.sp, lineHeight = 17.sp, color = Tech.Amber)
+        bundle == null -> Text(
+            if (host.filePicker) GUEST_HELPER_NO_BUNDLE else
+                "This build does not include the Engine. Use a release build that includes it, or pair with an Engine already installed in the guest.",
+            fontSize = 12.sp, lineHeight = 17.sp, color = Tech.Amber,
+        )
         bundle.packaged -> Hint("Engine ${bundle.version} for ${bundle.arch}, packed with this app. SHA-256 ${bundle.sha256.take(16)}…")
         else -> Text("Engine ${bundle.version} for ${bundle.arch} from a file you chose: not a release file. SHA-256 ${bundle.sha256}",
             fontSize = 11.sp, lineHeight = 16.sp, color = Tech.Amber)
     }
     GuestEngineProblems.last?.let { Text(it, fontSize = 11.sp, color = Tech.Amber) }
-    if (bundle == null || !bundle.packaged) Row { MiniAction("Choose a bundle file…") { chooseBundle(hub) } }
+    if ((bundle == null || !bundle.packaged) && host.filePicker) {
+        Row { MiniAction("Choose a bundle file…") { chooseBundle(hub, host) } }
+    }
 }
 
 /** Opens the system's file chooser for a bundle; a file that is not one is said in a sentence, never taken. */
-private fun chooseBundle(hub: EngineHub) {
-    val dialog = java.awt.FileDialog(null as java.awt.Frame?, "Choose a RingMASTER Engine bundle", java.awt.FileDialog.LOAD)
-    dialog.isVisible = true
-    val name = dialog.file ?: return
-    chosenGuestHelperBundle(java.nio.file.Path.of(dialog.directory, name))
+internal fun chooseBundle(hub: EngineHub, host: AppHost) {
+    if (!host.filePicker) return
+    val path = host.pickFile("Choose a RingMASTER Engine bundle", setOf("gz")) ?: return
+    chosenGuestHelperBundle(path)
         .onSuccess { GuestEngineProblems.clear(); hub.choose(it) }
         .onFailure { GuestEngineProblems.report(it.message ?: "That file is not an Engine bundle.") }
 }

@@ -101,9 +101,11 @@ class GuestHelperInstallTest {
     @Test fun theLinkCommandIsOneLineThatFetchesChecksAndInstalls() {
         val command = linkCommand("http://192.0.2.9:41234/abc/ringmaster-engine-0.1.0-linux-x86_64.tar.gz", "d".repeat(64))
         assertFalse('\n' in command)
-        assertTrue(command.startsWith("(wget -qO /var/tmp/rme.tgz 'http://192.0.2.9:41234/abc/"))
-        assertTrue("curl -fsSo /var/tmp/rme.tgz" in command)
-        assertTrue("${"d".repeat(64)}  " in command)
+        assertTrue(command.startsWith("( set -e; umask 077; work=$(mktemp -d "))
+        assertTrue(command.indexOf("mktemp -d") < command.indexOf("wget -qO"))
+        assertFalse("/var/tmp/rme.tgz" in command)
+        assertTrue("curl -fsSo \"\$work/bundle.tgz\"" in command)
+        assertTrue("d".repeat(64) in command)
     }
 
     // The guest agent way.
@@ -117,7 +119,9 @@ class GuestHelperInstallTest {
         }
         override fun run(connection: Connection, guest: Guest, command: List<String>, firstPollSeconds: Int, budgetSeconds: Int): AgentExecStatus {
             commands += command
-            return status
+            return if (command.last().startsWith("umask 077; mkdir") || command.last().startsWith("rm -rf --")) {
+                AgentExecStatus(true, 0, "", "", false)
+            } else status
         }
     }
 
@@ -134,7 +138,7 @@ class GuestHelperInstallTest {
         val joined = channel.files.flatMap { Base64.getDecoder().decode(it.second).toList() }.toByteArray()
         assertContentEquals(bytes, joined)
         assertEquals(channel.files.map { it.first }.sorted(), channel.files.map { it.first }, "part names sort in order")
-        val script = channel.commands.single().last()
+        val script = channel.commands.last().last()
         assertTrue("sha256sum -c -" in script && "install.sh --yes" in script, script)
         assertEquals(listOf("192.0.2.7"), result.addresses)
         assertEquals(GuestHelperProgress(4, 4, installing = true), progress.last())
@@ -147,7 +151,9 @@ class GuestHelperInstallTest {
         }
         assertEquals(GUEST_HELPER_DELIVERY_LOST, e.message)
         assertEquals(1, channel.files.size, "the lost part is not sent again")
-        assertTrue(channel.commands.isEmpty())
+        assertEquals(2, channel.commands.size, "create and clean only this staging directory; no installer exec")
+        assertTrue(channel.commands.first().last().contains("mkdir -m 700"))
+        assertTrue(channel.commands.last().last().startsWith("rm -rf --"))
     }
 
     @Test fun anInstallerThatStoppedIsReportedWithItsLastLine() {

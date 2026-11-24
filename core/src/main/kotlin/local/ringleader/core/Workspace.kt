@@ -710,21 +710,16 @@ class Workspace(
             mutableState.update { it.copy(powerNotice = refusal) }
             return false
         }
-        if (connection?.let { mutationLeases.scheduledHolds(GuestKey(it.remoteKey, confirmation.kind, confirmation.resource.vmid)) } == true) {
-            mutableState.update { it.copy(powerNotice = MutationLeases.SCHEDULED_REFUSAL) }
-            return false
-        }
-        if (!usedConfirmations.add(confirmation.confirmationId)) {
-            mutableState.update { it.copy(powerNotice = "This confirmation was already used. Nothing else was sent.") }
-            return false
-        }
         val current = connection ?: run {
             mutableState.update { it.copy(powerNotice = "The connection changed. Nothing was sent.") }
             return false
         }
-        // Checked and marked under the scheduler interlock's lock, so a scheduled run cannot claim the guest in between.
-        if (mutationLeases.foreground(GuestKey(current.remoteKey, confirmation.kind, confirmation.resource.vmid)) { powerBusy = true; powerInFlight = confirmation; true } == null) {
-            mutableState.update { it.copy(powerNotice = MutationLeases.SCHEDULED_REFUSAL) }
+        val claimed = mutationLeases.confirmForeground(
+            GuestKey(current.remoteKey, confirmation.kind, confirmation.resource.vmid), usedConfirmations, confirmation.confirmationId,
+        ) { powerBusy = true; powerInFlight = confirmation }
+        if (claimed != true) {
+            val notice = if (claimed == null) MutationLeases.SCHEDULED_REFUSAL else "This confirmation was already used. Nothing else was sent."
+            mutableState.update { it.copy(powerNotice = notice) }
             return false
         }
         val session = generation
@@ -1099,7 +1094,7 @@ class Workspace(
                 if (submission.localId != localId) submission
                 else {
                     finished = submission.phase == PowerPhase.Accepted && status.phase != PowerPhase.Accepted
-                    submission.copy(checking = if (manual) false else submission.checking, phase = status.phase, detail = status.detail)
+                    submission.withTaskStatus(status, manual)
                         .also { if (it.phase != submission.phase) changed = it }
                 }
             })

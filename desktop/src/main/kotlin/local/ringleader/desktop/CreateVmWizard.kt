@@ -130,7 +130,9 @@ import local.ringleader.core.*
                     ListStateView(state, "Reading ISO images\u2026", "No ISO images on this storage. Upload one in Storage.", { onRead(CreateRead.Volumes(iso.storage, "iso")) }) { rows ->
                         TechSelect("ISO image", rows, rows.firstOrNull { it.volid == iso.volid }, { change(drive.copy(media = iso.copy(volid = it.volid))) }, { it.volid.substringAfter(":iso/") })
                     }
-                    if (onGetMedia != null) MiniAction("Get ISO image") { mediaSlot=label;mediaBaseline=drive; onGetMedia(draft.node, iso.storage, "iso") }
+                }
+                if (onGetMedia != null) MiniAction("Get ISO image") {
+                    mediaSlot = label; mediaBaseline = drive; onGetMedia(draft.node, iso.storage, "iso")
                 }
             }
         }

@@ -89,8 +89,11 @@ private class GuestCall<T>(val failed: String) {
         "wifi" -> GuestCallConfirm("Scan for Wi-Fi inside ${guest.kind} ${guest.id}?", guest, "Scan",
             if (engine) ENGINE_WIFI_CONFIRM else GUEST_WIFI_CONFIRM, { confirm = null }) { start(wifi) { hub.guests.wifiScan(guest) } }
     }
-    val setupFor = hub.engine?.setup?.collectAsState()?.value
-    if (setupFor?.resource == guest.resource) EngineSetupDialog(hub.engine!!, workspace, state, guest, hardware)
+    val liveGuests = hub.guests as? LiveGuestRadios
+    val setupFor = liveGuests?.setup?.collectAsState()?.value
+    if (setupFor?.resource == guest.resource && hub.engine != null) {
+        EngineSetupDialog(hub.engine, workspace, state, guest, hardware) { if (liveGuests.setup.value == guest) liveGuests.setup.value = null }
+    }
 }
 
 @Composable private fun GuestCallConfirm(title: String, guest: Guest, go: String, text: String, onCancel: () -> Unit, onGo: () -> Unit) {

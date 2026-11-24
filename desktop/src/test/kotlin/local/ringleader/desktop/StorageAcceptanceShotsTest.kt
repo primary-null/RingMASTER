@@ -145,9 +145,12 @@ class StorageAcceptanceShotsTest {
             d.click(if (d.matches(step).isNotEmpty()) step else "2", last = false); d.settle(dir, "media-$kind-step") // the narrow rail shows numbers only
             d.click(if (vm) "Get ISO image" else "Get template")
             val sheetTitle = if (vm) "Get ISO image" else "Get container template"
-            val sheet = StorageCaseContract(listOf(title(sheetTitle), footer("Close"), body("Your create form stays open"), body("Target storage"),
-                body(if (vm) "Open URL" else "Open Catalogue", true), body("Only Terminal OK and the exact file in refreshed storage can select it")))
+            val sheet = if (vm) StorageCaseContract(listOf(title(sheetTitle), footer("Close"), body("Your create form stays open"),
+                body("Storage scope"), body("Refresh ISO list", true)))
+            else StorageCaseContract(listOf(title(sheetTitle), footer("Close"), body("Your create form stays open"), body("Target storage"),
+                body("Open Catalogue", true), body("Only Terminal OK and the exact file in refreshed storage can select it")))
             manifest.record("media/sheet-$kind/${look.id}", "media", "sheet-$kind", look, sheet, d.verify("media/sheet-$kind", sheet, d.settle(dir, "media-$kind-sheet")))
+            if (vm) { d.click("URL"); d.settle(dir, "media-$kind-url") }
             d.click(if (vm) "Open URL" else "Open Catalogue")
             val formTitle = if (vm) "Download from URL" else "Template catalogue"
             val form = StorageCaseContract(listOf(title(formTitle), footer("Cancel"), footer("Review"), body("$node · ")))

@@ -12,7 +12,8 @@ import java.nio.file.Files
 import java.security.SecureRandom
 import java.time.Duration
 import java.util.Base64
-import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.ScheduledThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -34,8 +35,11 @@ class OneTimeLink private constructor(
 ) : AutoCloseable {
     private val state = MutableStateFlow(OneTimeLinkState.Waiting)
     val status: StateFlow<OneTimeLinkState> = state.asStateFlow()
-    private val closed = AtomicBoolean(false)
+    private val lock = Any()
+    @Volatile private var closed = false
+    private var active: Socket? = null
     private val deadline = System.nanoTime() + lifetime.toNanos()
+    private var expiry: java.util.concurrent.ScheduledFuture<*>? = null
 
     /** `http://<this computer's address facing the guest>:<port>/<random>/<bundle name>`. */
     val url: String = run {
@@ -50,16 +54,25 @@ class OneTimeLink private constructor(
 
     private fun serve() {
         try {
-            while (!closed.get()) {
+            while (!closed) {
                 val left = (deadline - System.nanoTime()) / 1_000_000
                 if (left <= 0) { finish(OneTimeLinkState.Expired); return }
                 listener.soTimeout = left.coerceAtMost(1_000).toInt()
                 val socket = try { listener.accept() } catch (_: SocketTimeoutException) { continue }
-                if (answer(socket)) { finish(OneTimeLinkState.Served); return }
+                synchronized(lock) {
+                    if (closed || expired()) { socket.close(); return }
+                    active = socket
+                }
+                try {
+                    if (answer(socket)) { finish(OneTimeLinkState.Served); return }
+                } finally {
+                    synchronized(lock) { if (active === socket) active = null }
+                    socket.close()
+                }
             }
         } catch (_: SocketException) {
             // close() closes the listener to stop this loop; the state was set by whoever closed it.
-            if (!closed.get()) finish(OneTimeLinkState.Failed)
+            if (!closed) finish(OneTimeLinkState.Failed)
         } catch (_: IOException) {
             finish(OneTimeLinkState.Failed)
         }
@@ -67,9 +80,9 @@ class OneTimeLink private constructor(
 
     /** Serves the bundle when [socket] asks for the exact path; true when it did. Anything else gets 404 and the link stays. */
     private fun answer(socket: Socket): Boolean = socket.use { s ->
-        s.soTimeout = 10_000
         val request = readHead(s) ?: return false
         val line = request.lineSequence().firstOrNull().orEmpty()
+        if (closed || expired()) return false
         val out = s.getOutputStream()
         if (line != "GET $path HTTP/1.1" && line != "GET $path HTTP/1.0") {
             out.write("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".toByteArray())
@@ -78,15 +91,23 @@ class OneTimeLink private constructor(
         val head = "HTTP/1.1 200 OK\r\nContent-Type: application/gzip\r\nContent-Length: ${bundle.size}\r\n" +
             "Cache-Control: no-store\r\nConnection: close\r\n\r\n"
         out.write(head.toByteArray())
-        Files.newInputStream(bundle.file).use { it.copyTo(out) }
-        out.flush()
-        true
+        Files.newInputStream(bundle.file).use { input ->
+            val buffer = ByteArray(8192)
+            while (!closed && !expired()) {
+                val count = input.read(buffer)
+                if (count < 0) { out.flush(); return !closed && !expired() }
+                out.write(buffer, 0, count)
+            }
+        }
+        false
     }
 
     private fun readHead(s: Socket): String? {
         val input = s.getInputStream()
         val bytes = java.io.ByteArrayOutputStream()
         while (bytes.size() < 8192) {
+            if (closed || expired()) return null
+            s.soTimeout = ((deadline - System.nanoTime()) / 1_000_000).coerceIn(1, 10_000).toInt()
             val b = try { input.read() } catch (_: SocketTimeoutException) { return null }
             if (b < 0) return null
             bytes.write(b)
@@ -95,22 +116,34 @@ class OneTimeLink private constructor(
         return null
     }
 
+    private fun expired() = deadline - System.nanoTime() <= 0
+
     private fun finish(end: OneTimeLinkState) {
-        if (state.value == OneTimeLinkState.Waiting) state.value = end
-        close()
+        synchronized(lock) {
+            if (closed) return
+            closed = true
+            state.value = if (expired()) OneTimeLinkState.Expired else end
+            closeQuietly(listener)
+            active?.let(::closeQuietly)
+            active = null
+        }
+        expiry?.cancel(false)
     }
 
-    override fun close() {
-        if (!closed.compareAndSet(false, true)) return
-        if (state.value == OneTimeLinkState.Waiting) state.value = OneTimeLinkState.Expired
+    override fun close() = finish(OneTimeLinkState.Expired)
+
+    private fun closeQuietly(socket: java.io.Closeable) {
         try {
-            listener.close()
+            socket.close()
         } catch (_: IOException) {
-            // The listener is going away either way; there is nothing left to tell the user.
+            // Closing is final even when the transport has already gone away.
         }
     }
 
     companion object {
+        private val expiryTimer = ScheduledThreadPoolExecutor(1) { task ->
+            Thread(task, "ringmaster-engine-link-expiry").apply { isDaemon = true }
+        }.apply { removeOnCancelPolicy = true }
         val LIFETIME: Duration = Duration.ofMinutes(10)
 
         /**
@@ -118,12 +151,27 @@ class OneTimeLink private constructor(
          * packet is sent to find it: a UDP socket is only connected, which picks the route.
          */
         fun open(bundle: GuestHelperBundle, guestHost: String, lifetime: Duration = LIFETIME, random: SecureRandom = SecureRandom()): OneTimeLink {
+            require(!lifetime.isNegative && !lifetime.isZero) { "The link lifetime must be positive." }
+            lifetime.toNanos() // Reject durations that cannot be represented before opening a socket.
             val local = facingAddress(guestHost)
             val listener = ServerSocket()
-            listener.bind(InetSocketAddress(local, 0), 4)
-            val secret = ByteArray(18).also(random::nextBytes)
-            val path = "/" + Base64.getUrlEncoder().withoutPadding().encodeToString(secret) + "/" + bundle.file.fileName
-            return OneTimeLink(listener, bundle, path, lifetime).also { it.thread.start() }
+            try {
+                listener.bind(InetSocketAddress(local, 0), 4)
+                val secret = ByteArray(18).also(random::nextBytes)
+                val path = "/" + Base64.getUrlEncoder().withoutPadding().encodeToString(secret) + "/" + bundle.file.fileName
+                return OneTimeLink(listener, bundle, path, lifetime).also { link ->
+                    link.expiry = expiryTimer.schedule(
+                        { link.finish(OneTimeLinkState.Expired) }, lifetime.toNanos(), TimeUnit.NANOSECONDS,
+                    )
+                    link.thread.start()
+                }
+            } catch (failure: IOException) {
+                listener.close()
+                throw failure
+            } catch (failure: RuntimeException) {
+                listener.close()
+                throw failure
+            }
         }
 
         fun facingAddress(guestHost: String): InetAddress = DatagramSocket().use { socket ->

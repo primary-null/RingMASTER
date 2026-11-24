@@ -535,7 +535,28 @@ class ScheduleEngine(
         }
         try {
             return runSlots.withPermit {
-                val state = try { gateway.state(conn, guest.node, target.kind, target.vmid) }
+                // A lease or active-slot wait can outlive the VMID's owner or its node route.
+                val currentGuest = try {
+                    gateway.guests(conn).singleOrNull { it.id == target.vmid && it.kind == target.kind && it.scope.isEmpty() }
+                        ?: run { finish(RunPhase.Skipped, "The guest is no longer on this server. Nothing was sent.", null); return null }
+                } catch (e: CancellationException) {
+                    withContext(NonCancellable) { finish(RunPhase.NotSent, "RingMASTER stopped before sending. Nothing was sent.", null) }
+                    throw e
+                } catch (e: Exception) { finish(RunPhase.Skipped, "${readError(e)} Nothing was sent.", null); return null }
+                val facts = try { gateway.identity(conn, currentGuest.node, target.kind, target.vmid) }
+                    catch (e: CancellationException) {
+                        withContext(NonCancellable) { finish(RunPhase.NotSent, "RingMASTER stopped before sending. Nothing was sent.", null) }
+                        throw e
+                    } catch (e: Exception) { finish(RunPhase.Skipped, "${readError(e)} Nothing was sent.", null); return null }
+                if (facts.with(target.identity.method) != target.identity) {
+                    finish(RunPhase.Skipped, "The guest's identity changed. Nothing was sent; the schedule needs review.",
+                        "The guest's identity changed. Check that it is the right guest, then edit and authorize the schedule again.")
+                    return null
+                }
+                if (currentGuest.template || facts.template) {
+                    finish(RunPhase.Skipped, "The guest is now a template. Nothing was sent.", null); return null
+                }
+                val state = try { gateway.state(conn, currentGuest.node, target.kind, target.vmid) }
                     catch (e: CancellationException) { withContext(NonCancellable) { finish(RunPhase.NotSent, "RingMASTER stopped before sending. Nothing was sent.", null) }; throw e }
                     catch (e: Exception) { finish(RunPhase.Skipped, "${readError(e)} Nothing was sent.", null); return null }
                 if (state.template) { finish(RunPhase.Skipped, "The guest is now a template. Nothing was sent.", null); return null }
@@ -554,12 +575,13 @@ class ScheduleEngine(
                 }
                 if (!clock.instant().isBefore(deadline)) { finish(RunPhase.Skipped, "The grace window ended before sending. Nothing was sent.", null); return null }
                 // One lock: the plan is still this revision and enabled, and Dispatching is on disk, before the POST.
-                val (dispatching, saved) = record(run, RunPhase.Dispatching, "Sending ${plan.action.title.lowercase()} to the server.", node = guest.node, requireCurrent = true)
+                val (dispatching, saved) = record(run, RunPhase.Dispatching, "Sending ${plan.action.title.lowercase()} to the server.",
+                    node = currentGuest.node, requireCurrent = true)
                     ?: run { finish(RunPhase.Cancelled, "The schedule or background access changed, or RingMASTER stopped before sending. Nothing was sent.", null); return null }
                 run = dispatching
                 if (!saved) { run = record(run, RunPhase.NotSent, "The run could not be recorded before sending, so nothing was sent.").first; return run }
                 val upid = try {
-                    gateway.dispatch(conn, guest.node, target.kind, target.vmid, plan.action)
+                    gateway.dispatch(conn, currentGuest.node, target.kind, target.vmid, plan.action)
                 } catch (e: CancellationException) {
                     withContext(NonCancellable) { run = record(run, RunPhase.Unknown, "RingMASTER stopped while sending. The server may have received it; it was not sent again.").first }
                     throw e
@@ -577,8 +599,8 @@ class ScheduleEngine(
                 } catch (e: Exception) {
                     run = record(run, RunPhase.Unknown, "The server did not confirm whether it accepted the action. It was not sent again. Check the task list.").first; return run
                 }
-                run = record(run, RunPhase.Accepted, "Accepted by the server. Following the task.", upid = upid, node = guest.node).first
-                followTask(run, conn, guest.node, upid)
+                run = record(run, RunPhase.Accepted, "Accepted by the server. Following the task.", upid = upid, node = currentGuest.node).first
+                followTask(run, conn, currentGuest.node, upid)
             }
         } finally {
             leases.releaseScheduled(key, run.id)

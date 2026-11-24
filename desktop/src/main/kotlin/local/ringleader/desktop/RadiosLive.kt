@@ -152,6 +152,7 @@ internal class LiveGuestRadios(
     private val workspace: Workspace,
     private val engine: EngineHub? = null,
 ) : BoardGuestRadios() {
+    val setup = kotlinx.coroutines.flow.MutableStateFlow<Guest?>(null)
     private val shown = HashMap<ResourceId, HardwareSummary?>()
 
     override fun view(guest: Guest, hardware: HardwareSummary?, board: RadiosBoard): GuestRadiosView {
@@ -171,7 +172,7 @@ internal class LiveGuestRadios(
         val direct = workspace.state.value.kind != PDM_KIND
         val refusal = guestRadioRefusal(guest, direct, shown[guest.resource]) ?: return null
         val text = if (refusal == GuestRefusal.Container) RADIOS_CT_PROBE else refusal.sentence
-        val setup = engine?.takeIf { refusal.engineCouldHelp }?.let { hub -> RadioAction(ENGINE_SETUP_LABEL) { hub.offer(guest) } }
+        val setup = engine?.takeIf { refusal.engineCouldHelp }?.let { RadioAction(ENGINE_SETUP_LABEL) { setup.value = guest } }
         return RadioNote(text, setup)
     }
 

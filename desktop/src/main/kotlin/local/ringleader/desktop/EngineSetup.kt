@@ -70,6 +70,7 @@ internal class EngineSetup(
     val guest: Guest,
     hardware: HardwareSummary?,
     address: String?,
+    private val onClose: () -> Unit = {},
 ) {
     var step by mutableStateOf<EngineStep>(EngineStep.Choose)
         private set
@@ -85,6 +86,9 @@ internal class EngineSetup(
 
     /** Kept until pairing succeeds after an agent install, so a second address can be tried; wiped on [close]. */
     private var installed: GuestHelperInstalled? = null
+    private val linkLock = Any()
+    private var ownedLink: OneTimeLink? = null
+    private var closed = false
 
     private fun run(block: suspend () -> EngineStep?) {
         busy = true
@@ -124,7 +128,14 @@ internal class EngineSetup(
 
     fun openLink(bundle: GuestHelperBundle) = run {
         val address = host.trim().ifEmpty { error("Enter the guest's address first. The link is served on the side of this computer facing it.") }
-        EngineStep.Link(withContext(Dispatchers.IO) { OneTimeLink.open(bundle, address) })
+        val link = withContext(Dispatchers.IO) {
+            val opened = OneTimeLink.open(bundle, address)
+            synchronized(linkLock) {
+                if (closed) opened.close() else { ownedLink?.close(); ownedLink = opened }
+            }
+            opened
+        }
+        EngineStep.Link(link)
     }
 
     fun showCommand(command: String) { step = EngineStep.Command(command) }
@@ -163,7 +174,9 @@ internal class EngineSetup(
         EngineStep.Done(link)
     }
 
-    fun back() { error = null; step = EngineStep.Choose }
+    fun back() { closeLink(); error = null; step = EngineStep.Choose }
+
+    private fun closeLink() = synchronized(linkLock) { ownedLink?.close(); ownedLink = null }
 
     private fun wipeInstalled() {
         installed?.token?.fill(Char(0))
@@ -171,8 +184,13 @@ internal class EngineSetup(
     }
 
     fun close() {
-        (step as? EngineStep.Link)?.link?.close()
+        synchronized(linkLock) {
+            if (closed) return
+            closed = true
+            ownedLink?.close()
+            ownedLink = null
+        }
         wipeInstalled()
-        hub.closeSetup()
+        onClose()
     }
 }

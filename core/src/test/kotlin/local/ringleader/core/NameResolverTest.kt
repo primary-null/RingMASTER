@@ -8,6 +8,7 @@ import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.stream.Stream
 import kotlin.test.Test
@@ -102,6 +103,42 @@ class NameResolverTest {
         offset.addAndGet(TimeUnit.SECONDS.toNanos(60))
         resolver.lookupByName("slow.example.test", policy)
         assertEquals(2, inner.calls.size, "an old late answer is not served")
+    }
+
+    @Test fun lateAnswerPublishedWhileRetryPreparesItsDeadlineDoesNotStartAnotherWorker() {
+        val release = CountDownLatch(1)
+        val finished = CountDownLatch(1)
+        val publishBeforeJoin = AtomicBoolean(false)
+        val caller = Thread.currentThread()
+        val inner = Scripted { host ->
+            check(release.await(5, TimeUnit.SECONDS))
+            listOf(v4(host, 192, 0, 2, 10))
+        }
+        val resolver = RingResolver(
+            inner, defaultDeadlineMillis = 150,
+            clock = {
+                if (Thread.currentThread() === caller && publishBeforeJoin.compareAndSet(true, false)) {
+                    release.countDown()
+                    check(finished.await(5, TimeUnit.SECONDS))
+                }
+                System.nanoTime()
+            },
+            workerStarter = { task ->
+                Thread {
+                    try { task.run() } finally { finished.countDown() }
+                }.apply { isDaemon = true; start() }
+            },
+        )
+        try {
+            assertFailsWith<NameLookupTimedOutException> { resolver.lookupByName("slow.example.test", policy) }
+            // Finish the abandoned worker in the old gap between checking the late cache and joining its flight.
+            publishBeforeJoin.set(true)
+            assertEquals(listOf("192.0.2.10"), resolver.lookupByName("slow.example.test", policy).toList().map { it.hostAddress })
+            assertEquals(1, inner.calls.size)
+            assertEquals(1, resolver.stats().workersStarted)
+        } finally {
+            release.countDown()
+        }
     }
 
     // ---------------------------------------------------------------- what never waits

@@ -75,11 +75,26 @@ fun installScript(bundlePath: String, sha256: String, assumeYes: Boolean): Strin
     val yes = if (assumeYes) " --yes" else ""
     return listOf(
         "set -e",
-        "work=$(mktemp -d /var/tmp/ringmaster-engine.XXXXXX)",
-        "trap 'rm -rf \"\$work\"' EXIT",
-        "echo \"$sha256  \"${quote(bundlePath)} | sha256sum -c -",
-        "tar -xzf ${quote(bundlePath)} -C \"\$work\"",
-        "rm -f ${quote(bundlePath)}",
+        privateInstallDirectory(),
+        "cp -- ${quote(bundlePath)} \"\$work/bundle.tgz\"",
+        stagedInstallScript(sha256, yes),
+    ).joinToString("\n")
+}
+
+/** Create the private directory before any bundle bytes are staged. */
+internal fun privateInstallDirectory() = listOf(
+    "umask 077",
+    "work=$(mktemp -d /var/tmp/ringmaster-engine.XXXXXXXXXXXX)",
+    "trap 'rm -rf -- \"\$work\"' EXIT",
+).joinToString("\n")
+
+/** Runs only inside the directory created and owned by this install. */
+internal fun stagedInstallScript(sha256: String, yes: String): String {
+    require(sha256.matches(Regex("[0-9a-f]{64}"))) { "The bundle hash is 64 hex digits." }
+    return listOf(
+        "printf '%s  %s\\n' '$sha256' \"\$work/bundle.tgz\" | sha256sum -c -",
+        "tar -xzf \"\$work/bundle.tgz\" -C \"\$work\"",
+        "rm -f -- \"\$work/bundle.tgz\"",
         "sh \"\$work\"/ringmaster-engine-*/install.sh$yes",
         "printf '%s %s\\n' $ADDRESSES \"$(hostname -I 2>/dev/null || true)\"",
     ).joinToString("\n")
@@ -87,9 +102,10 @@ fun installScript(bundlePath: String, sha256: String, assumeYes: Boolean): Strin
 
 /** The one line a person pastes into the guest for the one-time link. It downloads, checks the hash, and installs. */
 fun linkCommand(url: String, sha256: String): String {
-    val fetch = "(wget -qO /var/tmp/rme.tgz ${quote(url)} || curl -fsSo /var/tmp/rme.tgz ${quote(url)})"
-    val install = installScript("/var/tmp/rme.tgz", sha256, assumeYes = false).replace("\n", "; ").removePrefix("set -e; ")
-    return "$fetch && ( set -e; $install )"
+    val fetch = "(wget -qO \"\$work/bundle.tgz\" ${quote(url)} || curl -fsSo \"\$work/bundle.tgz\" ${quote(url)})"
+    val script = listOf("set -e", privateInstallDirectory(), fetch, stagedInstallScript(sha256, ""))
+        .joinToString("\n").replace("\n", "; ")
+    return "( $script )"
 }
 
 /** The command for a guest with internet: the bundle from the public release of this app's version, checked by its hash. */

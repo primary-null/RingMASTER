@@ -73,7 +73,7 @@ class ScheduleEngineTest {
         assertEquals("node-a", run.node)
         assertFalse(rig.text().contains(ScheduleFixtures.SECRET))
         assertFalse(rig.text().contains(ScheduleFixtures.UUID_A))
-        assertEquals(listOf(ScheduleFixtures.SECRET), rig.gateway.secretsSeen)
+        assertEquals(List(2) { ScheduleFixtures.SECRET }, rig.gateway.secretsSeen)
         // Clock rollback by two hours: the same due time comes around again and is not run.
         rig.clock.offset = Duration.ofHours(-2); rig.engine.poke(); rig.step(3 * 3600_000L)
         assertEquals(1, rig.gateway.dispatches)
@@ -308,6 +308,63 @@ class ScheduleEngineTest {
             assertFalse(rig.leases.scheduledHolds(GuestKey(ScheduleFixtures.ORIGIN, "VM", 104)))
             rig.engine.shutdown()
         }
+    }
+
+    @Test fun replacementDuringLeaseWaitIsInvalidatedBeforeAnyStateReadOrSend() = runTest {
+        val rig = Rig(this)
+        var busy = true
+        val provider = ForegroundMutations { if (busy) "Foreground action pending" else null }
+        rig.leases.register(provider)
+        rig.engine.start(); runCurrent()
+        rig.step(Duration.between(base, due).toMillis() + 1_000)
+        assertEquals(1, rig.gateway.identityReads)
+        assertEquals(RunPhase.Claimed, rig.runs.single().phase)
+        rig.gateway.facts = ScheduleFixtures.facts(uuid = "99999999-0000-4000-8000-000000000001")
+        busy = false
+        rig.step(25_000)
+        assertEquals(2, rig.gateway.identityReads)
+        assertEquals(0, rig.gateway.stateReads)
+        assertEquals(0, rig.gateway.dispatches)
+        assertEquals(RunPhase.Skipped, rig.runs.single().phase)
+        assertNotNull(rig.engine.state.value.document.plans.single().invalidReason)
+        assertFalse(rig.leases.scheduledHolds(GuestKey(ScheduleFixtures.ORIGIN, "VM", 104)))
+        assertTrue(rig.text().contains("identity changed"))
+        rig.engine.shutdown()
+    }
+
+    @Test fun migrationDuringLeaseWaitUsesFreshNodeForIdentityStateDispatchAndFollow() = runTest {
+        val rig = Rig(this)
+        var busy = true
+        val provider = ForegroundMutations { if (busy) "Foreground action pending" else null }
+        rig.leases.register(provider)
+        val nodes = mutableListOf<String>()
+        val gateway = object : ScheduleGateway by rig.gateway {
+            override suspend fun identity(connection: Connection, node: String, kind: String, vmid: Int): GuestIdentityFacts {
+                nodes += "identity:$node"
+                return rig.gateway.identity(connection, node, kind, vmid)
+            }
+            override suspend fun state(connection: Connection, node: String, kind: String, vmid: Int): ScheduledGuestState {
+                nodes += "state:$node"
+                return rig.gateway.state(connection, node, kind, vmid)
+            }
+            override suspend fun dispatch(connection: Connection, node: String, kind: String, vmid: Int, action: ScheduleAction): String {
+                nodes += "dispatch:$node"
+                return ScheduleFixtures.upid(node)
+            }
+            override suspend fun taskStatus(connection: Connection, node: String, upid: String): PowerTaskStatus {
+                nodes += "follow:$node"
+                return rig.gateway.taskStatus(connection, node, upid)
+            }
+        }
+        val engine = rig.engine(gateway = gateway)
+        engine.start(); runCurrent()
+        rig.step(Duration.between(base, due).toMillis() + 1_000)
+        rig.gateway.guests = mutableListOf(ScheduleFixtures.guest(node = "node-b"))
+        busy = false
+        rig.step(25_000)
+        assertEquals(listOf("identity:node-a", "identity:node-b", "state:node-b", "dispatch:node-b", "follow:node-b"), nodes)
+        assertEquals(RunPhase.Succeeded, engine.state.value.document.runs.single().phase)
+        engine.shutdown()
     }
 
     @Test fun withdrawingAccessDuringBusyWaitPreventsDispatch() = runTest {

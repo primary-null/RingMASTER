@@ -164,6 +164,32 @@ class PowerFollowWorkspaceTest {
         return workspace
     }
 
+    @Test fun delayedManualRunningResponseCannotEraseAutomaticTerminalEvidence() = runTest {
+        for (terminal in listOf(ok, PowerTaskStatus(PowerPhase.Unsuccessful, "TASK ERROR: fixture failed"))) {
+            val power = Power(upid)
+            val automatic = CompletableDeferred<PowerTaskStatus>()
+            val manual = CompletableDeferred<PowerTaskStatus>()
+            power.statuses.addAll(listOf({ automatic.await() }, { manual.await() }))
+            val inventory = Inventory()
+            val workspace = connected(inventory, power)
+            assertTrue(workspace.submitPower(workspace.capturePower(PowerAction.Shutdown, "Lab")!!))
+            runCurrent()
+            step(1_000) // Automatic GET is in flight before the manual check begins.
+            val id = workspace.state.value.submissions.single().localId
+            workspace.checkPower(id); runCurrent()
+            assertEquals(2, power.statusCalls)
+            automatic.complete(terminal); runCurrent()
+            assertEquals(terminal.phase, workspace.state.value.submissions.single().phase)
+            manual.complete(running); runCurrent()
+            val result = workspace.state.value.submissions.single()
+            assertEquals(terminal.phase, result.phase)
+            assertEquals(terminal.detail, result.detail)
+            assertFalse(result.checking)
+            assertEquals(1, power.calls)
+            workspace.close()
+        }
+    }
+
     @Test fun acceptedTaskIsFollowedUntilItStopsThenTheBlockLiftsAndInventoryIsReadOnce() = runTest {
         val inventory = Inventory()
         val power = Power(upid)

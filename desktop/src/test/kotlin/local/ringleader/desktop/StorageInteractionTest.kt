@@ -397,7 +397,8 @@ class StorageInteractionTest {
             val session = w.state.value.creation!!
             d.setField("Name", "retained-name"); d.settle()
             d.click("2  OS", last = false); d.until("existing ISO choices") { d.hasText("Get ISO image") }
-            d.click("Get ISO image"); d.until("the media sheet") { d.hasText("Open URL") && d.enabled("Open URL") }
+            d.click("Get ISO image"); d.until("the media sheet") { d.hasText("EXISTING ISOS") }
+            d.click("URL"); d.until("the URL option") { d.hasText("Open URL") && d.enabled("Open URL") }
             d.click("Open URL"); d.until("the URL form") { d.hasText("Download from URL") }
             d.setField("URL · fetched by the node", "https://mirror.example.test/fixture.iso")
             d.settle(); d.setField("File name", "fixture.iso"); d.until("Review") { d.enabled("Review") }
@@ -436,6 +437,7 @@ class StorageInteractionTest {
                 val sheetOpen = { d.hasText("Your create form stays open", false) }
                 d.click(get); d.settle(); assertTrue(d.hasText(sheet) && sheetOpen()); d.key(Key.Escape); d.settle(); assertFalse(sheetOpen(), "Escape closes the sheet")
                 d.click(get); d.settle()
+                if (vm) { d.click("URL"); d.settle() }
                 // Back from the form with Cancel, then the real form -> Escape on confirmation -> submit -> result -> Close.
                 val open = "Open ${if (vm) "URL" else "Catalogue"}"
                 d.click(open); d.settle(); d.click("Cancel"); d.settle(); assertTrue(d.hasText(open))
